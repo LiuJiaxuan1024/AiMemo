@@ -1,14 +1,22 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MutableRefObject,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { AlertTriangle, Loader2 } from "lucide-react";
 
 import { deriveElfStateFromJobs } from "./elfState";
 import { MemoExpressionRenderer } from "./memoExpressionRenderer";
-import type { ElfAssistantProps } from "./types";
+import type { ElfAssistantProps, ElfMotion, ElfMood } from "./types";
 
 const ELF_POSITION_STORAGE_KEY = "ai-note-elf-position";
 const ELF_WIDTH = 260;
 const ELF_HEIGHT = 360;
 const ELF_VIEWPORT_PADDING = 12;
+const IDLE_MOTIONS: ElfMotion[] = ["blink"];
 
 interface ElfPosition {
   left: number;
@@ -30,6 +38,8 @@ export function ElfAssistant({
   const observedActiveJobIdsRef = useRef<Set<number>>(new Set());
   const pendingCompletedAnnouncementIdsRef = useRef<Set<number>>(new Set());
   const completedAnnouncementTimersRef = useRef<Map<number, number>>(new Map());
+  const idleMotionTimerRef = useRef<number | null>(null);
+  const idleMotionResetTimerRef = useRef<number | null>(null);
   const dragStateRef = useRef<{
     pointerId: number;
     startLeft: number;
@@ -39,6 +49,9 @@ export function ElfAssistant({
   } | null>(null);
   const dragMovedRef = useRef(false);
   const [elfPosition, setElfPosition] = useState<ElfPosition | null>(() => readStoredElfPosition());
+  const [isDraggingElf, setIsDraggingElf] = useState(false);
+  const [isHoveringElf, setIsHoveringElf] = useState(false);
+  const [idleMotion, setIdleMotion] = useState<ElfMotion>("breathe");
   const [announcedCompletedJobIds, setAnnouncedCompletedJobIds] = useState<Set<number>>(
     () => new Set(),
   );
@@ -66,11 +79,42 @@ export function ElfAssistant({
       }),
     [effectiveAnnouncedCompletedJobIds, jobs],
   );
+  const displayMood = useMemo<ElfMood>(() => {
+    if (elfState.mood !== "idle") {
+      return elfState.mood;
+    }
+    if (isWorkshopOpen || isHoveringElf || isDraggingElf) {
+      return "talking";
+    }
+    return "idle";
+  }, [elfState.mood, isDraggingElf, isHoveringElf, isWorkshopOpen]);
+  const displayMotion = useMemo<ElfMotion>(() => {
+    if (isDraggingElf) {
+      return "dragging";
+    }
+    if (elfState.mood === "thinking") {
+      return "thinking";
+    }
+    if (elfState.mood === "working") {
+      return "working";
+    }
+    if (elfState.mood === "success") {
+      return "success";
+    }
+    if (elfState.mood === "error" || elfState.mood === "warning") {
+      return "error";
+    }
+    if (isWorkshopOpen || isHoveringElf) {
+      return "look";
+    }
+    return idleMotion;
+  }, [elfState.mood, idleMotion, isDraggingElf, isHoveringElf, isWorkshopOpen]);
 
   useEffect(() => {
     return () => {
       completedAnnouncementTimersRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
       completedAnnouncementTimersRef.current.clear();
+      clearIdleMotionTimers(idleMotionTimerRef, idleMotionResetTimerRef);
       window.removeEventListener("pointermove", handleDragMove);
       window.removeEventListener("pointerup", handleDragEnd);
       window.removeEventListener("pointercancel", handleDragEnd);
@@ -92,6 +136,34 @@ export function ElfAssistant({
     window.addEventListener("resize", handleViewportResize);
     return () => window.removeEventListener("resize", handleViewportResize);
   }, []);
+
+  useEffect(() => {
+    clearIdleMotionTimers(idleMotionTimerRef, idleMotionResetTimerRef);
+
+    if (elfState.mood !== "idle" || isDraggingElf || isHoveringElf || isWorkshopOpen) {
+      setIdleMotion("breathe");
+      return;
+    }
+
+    function scheduleNextIdleMotion() {
+      const delayMs = 12000 + Math.floor(Math.random() * 10000);
+      idleMotionTimerRef.current = window.setTimeout(() => {
+        const nextMotion = IDLE_MOTIONS[Math.floor(Math.random() * IDLE_MOTIONS.length)] ?? "blink";
+        setIdleMotion(nextMotion);
+
+        idleMotionResetTimerRef.current = window.setTimeout(() => {
+          setIdleMotion("breathe");
+          scheduleNextIdleMotion();
+        }, 900);
+      }, delayMs);
+    }
+
+    // 空闲随机动作只在真正 idle 时运行，避免打断任务状态和用户交互。
+    setIdleMotion("breathe");
+    scheduleNextIdleMotion();
+
+    return () => clearIdleMotionTimers(idleMotionTimerRef, idleMotionResetTimerRef);
+  }, [elfState.mood, isDraggingElf, isHoveringElf, isWorkshopOpen]);
 
   useEffect(() => {
     let shouldUpdateAnnouncedIds = false;
@@ -173,6 +245,7 @@ export function ElfAssistant({
     }
 
     dragStateRef.current = null;
+    setIsDraggingElf(false);
     window.removeEventListener("pointermove", handleDragMove);
     window.removeEventListener("pointerup", handleDragEnd);
     window.removeEventListener("pointercancel", handleDragEnd);
@@ -190,6 +263,7 @@ export function ElfAssistant({
 
     const rect = currentTarget.getBoundingClientRect();
     dragMovedRef.current = false;
+    setIsDraggingElf(true);
     // 记录拖拽开始时的容器位置，移动过程中只根据指针偏移量更新外层精灵坐标。
     // 这样 Memo 图片、任务角标、点击热区会作为一个整体移动，不依赖第三方插件内部状态。
     dragStateRef.current = {
@@ -229,6 +303,8 @@ export function ElfAssistant({
         className="elf-assistant-hitbox"
         onClick={handleToggleWorkshop}
         onPointerDown={handleDragStart}
+        onPointerEnter={() => setIsHoveringElf(true)}
+        onPointerLeave={() => setIsHoveringElf(false)}
         type="button"
       />
 
@@ -242,12 +318,26 @@ export function ElfAssistant({
         </div>
       ) : null}
 
-      <MemoExpressionRenderer mood={elfState.mood} />
+      <MemoExpressionRenderer mood={displayMood} motion={displayMotion} />
 
       {failedCount > 0 ? <strong className="elf-badge danger">{failedCount}</strong> : null}
       {failedCount === 0 && activeCount > 0 ? <strong className="elf-badge">{activeCount}</strong> : null}
     </section>
   );
+}
+
+function clearIdleMotionTimers(
+  idleMotionTimerRef: MutableRefObject<number | null>,
+  idleMotionResetTimerRef: MutableRefObject<number | null>,
+) {
+  if (idleMotionTimerRef.current !== null) {
+    window.clearTimeout(idleMotionTimerRef.current);
+    idleMotionTimerRef.current = null;
+  }
+  if (idleMotionResetTimerRef.current !== null) {
+    window.clearTimeout(idleMotionResetTimerRef.current);
+    idleMotionResetTimerRef.current = null;
+  }
 }
 
 function readStoredElfPosition(): ElfPosition | null {

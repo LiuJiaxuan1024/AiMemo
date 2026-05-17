@@ -354,6 +354,64 @@ styles.css
 
 这个拆分是为了后续可以把 `memoExpressionRenderer.tsx` 替换为真正的 Live2D 渲染器，而不影响 jobs 状态推导和精灵工坊入口。
 
+## 当前动作状态机
+
+PNG 版本把“表情”和“动作”分开：
+
+```text
+ElfMood
+  决定当前显示哪张表情图。
+
+ElfMotion
+  决定当前套用哪一种 CSS 动作。
+```
+
+这样做的原因是：
+
+```text
+同一个表情可能需要不同动作，例如 idle 可以呼吸、眨眼、点头。
+同一个动作也可能复用到不同表情，例如拖拽时可以保持当前表情但切换 dragging motion。
+后续升级 Live2D 时，可以把 ElfMotion 映射到 motion group，而不需要重写业务状态。
+```
+
+当前动作：
+
+| ElfMotion | 触发场景 | 表现 |
+| --- | --- | --- |
+| breathe | 空闲默认 | 轻微呼吸浮动 |
+| blink | 空闲随机 | 很轻的眨眼感 |
+| nod | 预留 | PNG 阶段暂不随机触发，避免整图点头显得抖 |
+| look | hover / 打开工坊 | 轻微看向用户 |
+| thinking | pending / planning | 歪头思考 |
+| working | running job | 专注工作浮动 |
+| success | 本页新任务完成 | 轻跳一下 |
+| error | failed / warning | 轻微晃动 |
+| dragging | 用户拖拽精灵 | 跟手漂浮感 |
+
+当前实现位置：
+
+```text
+frontend/src/features/elf/types.ts
+  定义 ElfMotion。
+
+frontend/src/features/elf/ElfAssistant.tsx
+  根据 job、hover、drag、workshop open 和 idle 随机事件推导 displayMood / displayMotion。
+
+frontend/src/features/elf/memoExpressionRenderer.tsx
+  接收 mood / motion，输出表情图和动作 class。
+
+frontend/src/styles.css
+  通过 CSS keyframes 实现动作。
+```
+
+空闲随机动作策略：
+
+```text
+只有真正 idle 时才启动随机动作。
+每 12-22 秒随机触发一次极轻 blink。
+任务运行、任务失败、用户 hover、拖拽、打开工坊时都会暂停 idle 随机动作。
+```
+
 ## 第一版实现计划
 
 ### Step 1：状态层

@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 
-import type { ElfMood } from "./types";
+import type { ElfMood, ElfMotion } from "./types";
 
 const MEMO_EXPRESSION_BY_MOOD: Record<ElfMood, string> = {
   idle: "/elf/memo/01_idle_soft.png",
@@ -16,13 +16,14 @@ const MEMO_EXPRESSION_ASSETS = Array.from(new Set(Object.values(MEMO_EXPRESSION_
 
 interface MemoExpressionRendererProps {
   mood: ElfMood;
+  motion: ElfMotion;
 }
 
 /**
  * Memo 精灵的第一代表现层。
  * 这里先用透明 PNG 做状态切换，后续升级 Live2D 时只需要替换这一层渲染实现。
  */
-export function MemoExpressionRenderer({ mood }: MemoExpressionRendererProps) {
+export function MemoExpressionRenderer({ mood, motion }: MemoExpressionRendererProps) {
   const imageSrc = MEMO_EXPRESSION_BY_MOOD[mood] ?? MEMO_EXPRESSION_BY_MOOD.idle;
 
   useEffect(() => {
@@ -35,7 +36,9 @@ export function MemoExpressionRenderer({ mood }: MemoExpressionRendererProps) {
 
   return (
     <div className="elf-memo-frame" aria-hidden="true">
-      <img className="elf-memo-image" src={imageSrc} alt="" draggable={false} />
+      <div className={`elf-memo-sprite motion-${motion}`}>
+        <img className="elf-memo-image" src={imageSrc} alt="" draggable={false} />
+      </div>
     </div>
   );
 }
