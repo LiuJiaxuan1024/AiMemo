@@ -97,8 +97,6 @@ docs/
   frontend/      前端模块与体验优化记录
 ```
 
-## 本地开发
-
 ## 快速开始
 
 ### 1. 克隆项目
@@ -192,7 +190,7 @@ http://127.0.0.1:5173
 对话窗口可以基于笔记回答问题
 ```
 
-更多启动细节和常见问题见：`docs/setup.md`。
+更多启动细节和常见问题见：[安装与启动](./docs/setup.md)。
 
 ## 手动启动
 
@@ -288,18 +286,16 @@ npm run build
 
 推荐从这里开始：
 
-```text
-docs/README.md
-docs/setup.md
-docs/architecture/overview.md
-docs/architecture/flows.md
-docs/agent/memory-chat-graph.md
-docs/agent/memory-chat-graph-design.md
-docs/backend/jobs.md
-docs/backend/vector-storage.md
-docs/frontend/elf-assistant.md
-docs/frontend/ui-optimization-report.md
-```
+- [文档目录](./docs/README.md)
+- [安装与启动](./docs/setup.md)
+- [架构概览](./docs/architecture/overview.md)
+- [流程图](./docs/architecture/flows.md)
+- [Memory Chat Graph](./docs/agent/memory-chat-graph.md)
+- [Memory Chat Graph 设计草案](./docs/agent/memory-chat-graph-design.md)
+- [本地任务系统](./docs/backend/jobs.md)
+- [向量存储](./docs/backend/vector-storage.md)
+- [精灵助手](./docs/frontend/elf-assistant.md)
+- [前端体验优化报告](./docs/frontend/ui-optimization-report.md)
 
 ## 注意事项
 
