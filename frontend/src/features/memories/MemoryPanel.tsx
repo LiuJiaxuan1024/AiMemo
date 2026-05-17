@@ -2,7 +2,13 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { EmptyState } from "../../shared/ui";
-import { activateMemory, archiveMemory, listMemories, updateMemory } from "./memoriesApi";
+import {
+  activateMemory,
+  archiveMemory,
+  deleteDisabledMemory,
+  listMemories,
+  updateMemory,
+} from "./memoriesApi";
 import { MemoryCard } from "./MemoryCard";
 import { MemoryToolbar } from "./MemoryToolbar";
 import type { Memory, MemoryStatus, MemoryUpdateInput } from "./types";
@@ -58,10 +64,17 @@ export function MemoryPanel({ isOpen, isActive }: MemoryPanelProps) {
       await queryClient.invalidateQueries({ queryKey: ["memories"] });
     },
   });
+  const deleteMemoryMutation = useMutation({
+    mutationFn: deleteDisabledMemory,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["memories"] });
+    },
+  });
   const isSaving =
     updateMemoryMutation.isPending ||
     archiveMemoryMutation.isPending ||
-    activateMemoryMutation.isPending;
+    activateMemoryMutation.isPending ||
+    deleteMemoryMutation.isPending;
 
   function refreshMemories() {
     setError("");
@@ -138,6 +151,24 @@ export function MemoryPanel({ isOpen, isActive }: MemoryPanelProps) {
     });
   }
 
+  function handleDelete(memory: Memory) {
+    if (memory.status !== "archived") {
+      setError("只有停用的记忆可以删除");
+      return;
+    }
+    const confirmed = window.confirm("确认永久删除这条停用记忆吗？删除后无法恢复。");
+    if (!confirmed) {
+      return;
+    }
+
+    setError("");
+    deleteMemoryMutation.mutate(memory.id, {
+      onError: (currentError) => {
+        setError(currentError instanceof Error ? currentError.message : "删除记忆失败");
+      },
+    });
+  }
+
   return (
     <section className="memory-panel">
       <MemoryToolbar
@@ -176,6 +207,7 @@ export function MemoryPanel({ isOpen, isActive }: MemoryPanelProps) {
             onActivate={handleActivate}
             onArchive={handleArchive}
             onCancelEdit={cancelEdit}
+            onDelete={handleDelete}
             onDraftChange={setDraft}
             onSave={handleSave}
             onStartEdit={startEdit}

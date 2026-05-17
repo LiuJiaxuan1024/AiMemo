@@ -123,6 +123,24 @@ status = archived
 
 实际实现可以返回完整 `MemoryRead`，方便前端更新本地列表。
 
+## DELETE /api/memories/{memory_id}/hard
+
+永久删除已停用的长期记忆。
+
+规则：
+
+```text
+只允许删除 status = archived 的记忆。
+active 记忆必须先调用 DELETE /api/memories/{memory_id} 停用。
+删除后无法通过 PATCH 重新启用。
+```
+
+### Response
+
+```text
+204 No Content
+```
+
 ## GET /api/memories/{memory_id}
 
 读取单条长期记忆。
@@ -142,4 +160,5 @@ status = archived
 
 400
   content 为空、category/status 不合法、importance/confidence 超出范围。
+  尝试永久删除 active 记忆。
 ```

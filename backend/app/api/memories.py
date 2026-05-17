@@ -1,9 +1,15 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response, status
 from sqlmodel import Session
 
 from app.core.database import get_session
 from app.schemas.memory import MemoryRead, MemoryUpdate
-from app.services.memory_service import archive_memory, get_memory, list_memories, update_memory
+from app.services.memory_service import (
+    archive_memory,
+    delete_archived_memory,
+    get_memory,
+    list_memories,
+    update_memory,
+)
 
 
 router = APIRouter(prefix="/memories", tags=["memories"])
@@ -51,3 +57,12 @@ def archive_memory_api(
     session: Session = Depends(get_session),
 ) -> MemoryRead:
     return archive_memory(session, memory_id)
+
+
+@router.delete("/{memory_id}/hard", status_code=status.HTTP_204_NO_CONTENT)
+def delete_archived_memory_api(
+    memory_id: int,
+    session: Session = Depends(get_session),
+) -> Response:
+    delete_archived_memory(session, memory_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -64,6 +64,31 @@ def test_memories_api_lists_updates_disables_and_reactivates_memory(session):
     assert active_list_response.json()[0]["id"] == memory.id
 
 
+def test_memories_api_deletes_only_disabled_memory(session):
+    memory = _add_memory(session, "用户喜欢安静的工作环境。")
+    app = create_app()
+
+    def override_get_session() -> Generator[Session, None, None]:
+        yield session
+
+    app.dependency_overrides[get_session] = override_get_session
+    client = TestClient(app)
+
+    active_delete_response = client.delete(f"/api/memories/{memory.id}/hard")
+    assert active_delete_response.status_code == 400
+
+    archive_response = client.delete(f"/api/memories/{memory.id}")
+    assert archive_response.status_code == 200
+    assert archive_response.json()["status"] == "archived"
+
+    hard_delete_response = client.delete(f"/api/memories/{memory.id}/hard")
+    assert hard_delete_response.status_code == 204
+    assert hard_delete_response.content == b""
+
+    get_response = client.get(f"/api/memories/{memory.id}")
+    assert get_response.status_code == 404
+
+
 def _add_memory(session, content: str) -> LongTermMemory:
     memory = LongTermMemory(
         level=4,

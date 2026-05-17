@@ -137,6 +137,20 @@ def archive_memory(session: Session, memory_id: int) -> MemoryRead:
     return _to_memory_read(memory)
 
 
+def delete_archived_memory(session: Session, memory_id: int) -> None:
+    """永久删除已停用的长期记忆。
+
+    只允许删除 archived 记忆。active 记忆必须先停用，防止用户误删仍会进入
+    L4 上下文的重要信息。
+    """
+
+    memory = _get_memory_or_404(session, memory_id)
+    if memory.status != "archived":
+        raise _bad_request("Only disabled memories can be deleted.")
+    session.delete(memory)
+    session.commit()
+
+
 def build_memory_content_hash(category: str, content: str) -> str:
     """生成长期记忆去重 hash。
 

@@ -157,7 +157,7 @@ updated_at 必须更新。
 
 ### 停用
 
-第一版不做物理删除，而是停用：
+停用不会物理删除，而是将记忆移出 L4：
 
 ```text
 DELETE /api/memories/{id}
@@ -177,6 +177,32 @@ DELETE /api/memories/{id}
 ```text
 PATCH /api/memories/{id}
   {"status":"active"}
+```
+
+### 删除
+
+用户可以永久删除已经停用的记忆：
+
+```text
+DELETE /api/memories/{id}/hard
+```
+
+规则：
+
+```text
+只允许删除 archived 记忆。
+active 记忆必须先停用。
+删除后无法恢复，也不会再出现在停用列表。
+```
+
+这样保留了两级安全语义：
+
+```text
+停用
+  可恢复，不进入 L4。
+
+删除
+  不可恢复，只对已停用记忆开放。
 ```
 
 ### L4 读取边界
@@ -212,6 +238,9 @@ update_memory
 
 archive_memory
   停用长期记忆，底层写入 status=archived。
+
+delete_archived_memory
+  永久删除已停用记忆。active 记忆会被拒绝。
 ```
 
 Service 层负责业务规则，不把校验散落在 API route 中。
@@ -231,6 +260,7 @@ GET /api/memories
 GET /api/memories/{memory_id}
 PATCH /api/memories/{memory_id}
 DELETE /api/memories/{memory_id}
+DELETE /api/memories/{memory_id}/hard
 ```
 
 ## 与 Graph 的关系
@@ -280,6 +310,7 @@ PATCH 修改 content 或 category 后会更新 content_hash。
 PATCH 拒绝空 content、非法 category、非法 status。
 DELETE 会把 status 改为 archived，不物理删除。
 PATCH status=active 可以重新启用。
+DELETE /hard 只允许删除 archived 记忆。
 L4 worker 不读取 archived 记忆，重新启用后会读取。
 ```
 
@@ -293,7 +324,6 @@ L4 worker 不读取 archived 记忆，重新启用后会读取。
 记忆冲突检测
 用户确认后再写入
 长期记忆向量化
-物理删除
 ```
 
 后续如果要做 UI，可以先实现一个简单的“记忆管理”面板，再逐步支持搜索、筛选、恢复和来源跳转。
