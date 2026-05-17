@@ -1,0 +1,6 @@
+*.sh text eol=lf
+*.ps1 text eol=crlf
+*.py text
+*.ts text
+*.tsx text
+*.md text

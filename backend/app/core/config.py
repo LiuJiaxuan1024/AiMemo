@@ -21,7 +21,11 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # 支持两种常见启动方式：
+        # 1. 在仓库根目录执行脚本，此时读取根目录 `.env`；
+        # 2. 进入 backend/ 后启动 uvicorn，此时额外读取 `../.env`。
+        # 后面的文件优先级更高，方便用户在 backend/.env 做本地临时覆盖。
+        env_file=(".env", "../.env", "backend/.env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )

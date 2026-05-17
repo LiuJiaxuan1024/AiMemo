@@ -99,14 +99,125 @@ docs/
 
 ## 本地开发
 
-### 1. 后端
+## 快速开始
+
+### 1. 克隆项目
+
+```powershell
+git clone https://github.com/LiuJiaxuan1024/AiMemo.git
+cd AiMemo
+```
+
+### 2. 准备环境变量
+
+复制示例配置，并填入自己的阿里百炼 API Key：
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
+
+Linux / macOS：
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+至少需要配置：
+
+```text
+DASHSCOPE_API_KEY=你的百炼 API Key
+```
+
+### 3. 启动后端
+
+推荐使用脚本启动。脚本会自动创建 `backend/.venv` 并安装后端依赖：
+
+Windows PowerShell：
+
+```powershell
+.\scripts\start-backend.ps1
+```
+
+Linux / macOS：
+
+```bash
+chmod +x scripts/start-backend.sh scripts/start-frontend.sh
+./scripts/start-backend.sh
+```
+
+后端默认地址：
+
+```text
+http://127.0.0.1:8000
+```
+
+API 文档：
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+### 4. 启动前端
+
+另开一个终端窗口。
+
+Windows PowerShell：
+
+```powershell
+.\scripts\start-frontend.ps1
+```
+
+Linux / macOS：
+
+```bash
+./scripts/start-frontend.sh
+```
+
+前端默认地址：
+
+```text
+http://127.0.0.1:5173
+```
+
+### 5. 验证
+
+打开前端后，可以先创建一条笔记。如果后端和模型配置正常，稍等片刻后会看到：
+
+```text
+笔记摘要 / 标签生成
+笔记进入向量化任务
+右下角精灵显示后台任务状态
+对话窗口可以基于笔记回答问题
+```
+
+更多启动细节和常见问题见：`docs/setup.md`。
+
+## 手动启动
+
+如果不使用脚本，也可以按下面方式手动启动。
+
+### 后端
 
 建议使用 Python 3.12。项目依赖声明为 `>=3.11,<3.14`，但当前本地开发主要使用 3.12 虚拟环境。
 
+Windows PowerShell：
+
 ```powershell
 cd backend
-python -m venv .venv
+py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Linux / macOS：
+
+```bash
+cd backend
+python3.12 -m venv .venv
+source .venv/bin/activate
 python -m pip install -e ".[dev]"
 python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
@@ -117,7 +228,7 @@ python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 http://127.0.0.1:8000
 ```
 
-### 2. 前端
+### 前端
 
 ```powershell
 cd frontend
@@ -131,7 +242,7 @@ npm run dev -- --host 127.0.0.1
 http://127.0.0.1:5173
 ```
 
-## 环境变量
+## 环境变量说明
 
 复制示例配置：
 
@@ -153,6 +264,8 @@ JOB_WORKER_ENABLED=true
 ```
 
 当前默认使用阿里百炼 DashScope 的 OpenAI-compatible API。用户需要自行提供 API Key。
+
+`.env` 可以放在仓库根目录；后端从 `backend/` 目录启动时也会读取根目录配置。
 
 ## 测试与构建
 
@@ -177,6 +290,7 @@ npm run build
 
 ```text
 docs/README.md
+docs/setup.md
 docs/architecture/overview.md
 docs/architecture/flows.md
 docs/agent/memory-chat-graph.md

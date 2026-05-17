@@ -6,6 +6,7 @@
 
 - [架构概览](./architecture/overview.md)
 - [流程图](./architecture/flows.md)
+- [安装与启动](./setup.md)
 - [后端说明](./backend/README.md)
 - [笔记智能处理](./backend/note-processing.md)
 - [本地任务系统](./backend/jobs.md)
