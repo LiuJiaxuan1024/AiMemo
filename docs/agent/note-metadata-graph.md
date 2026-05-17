@@ -24,7 +24,7 @@ flowchart LR
 
 ## 节点职责
 
-- `load_note`: 读取 note，标记 `processing_status=processing`。
+- `load_note`: 读取 note，校验 `status/content_hash`，标记 `processing_status=processing`。
 - `generate_metadata`: 调用模型生成 `title`、`summary`、`tags`。
 - `write_metadata`: 幂等写回 note，并标记 `processing_status=completed`。
 
@@ -63,4 +63,5 @@ sequenceDiagram
 - 用户手动标题不被 AI 覆盖。
 - fallback 标题可以被 AI 标题覆盖。
 - `write_metadata` 使用覆盖写入，重复执行不会产生重复标签或重复记录。
+- job 绑定 `content_hash`。如果笔记已被修改或删除，旧 job 会跳过，不再调用 LLM 或写回旧 metadata。
 - 失败时 note 会标记为 `processing_status=failed` 并保存错误信息。

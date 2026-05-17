@@ -1,5 +1,5 @@
 import type { FormEvent } from "react";
-import { ArchiveX, Pencil, RotateCcw, Save, Trash2, X } from "lucide-react";
+import { ArchiveX, Eye, Pencil, RotateCcw, Save, Trash2, X } from "lucide-react";
 
 import { Badge, Button } from "../../shared/ui";
 import type { Memory, MemoryStatus, MemoryUpdateInput } from "./types";
@@ -21,6 +21,7 @@ interface MemoryCardProps {
   onCancelEdit: () => void;
   onDelete: (memory: Memory) => void;
   onDraftChange: (nextDraft: MemoryUpdateInput) => void;
+  onOpenDetail: (memory: Memory) => void;
   onSave: (event: FormEvent<HTMLFormElement>, memoryId: number) => void;
   onStartEdit: (memory: Memory) => void;
 }
@@ -39,6 +40,7 @@ export function MemoryCard({
   onCancelEdit,
   onDelete,
   onDraftChange,
+  onOpenDetail,
   onSave,
   onStartEdit,
 }: MemoryCardProps) {
@@ -140,6 +142,10 @@ export function MemoryCard({
             <span>来源 {memory.source_type}#{memory.source_id ?? "-"}</span>
           </div>
           <div className="memory-card-actions">
+            <Button onClick={() => onOpenDetail(memory)} size="sm">
+              <Eye aria-hidden="true" size={15} />
+              详情
+            </Button>
             <Button onClick={() => onStartEdit(memory)} size="sm">
               <Pencil aria-hidden="true" size={15} />
               编辑

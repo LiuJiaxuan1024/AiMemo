@@ -1,10 +1,12 @@
 from fastapi import HTTPException, status
 from sqlmodel import Session, desc, select
 
+from app.models.chat_message import ChatMessage
+from app.models.conversation import Conversation
 from app.models.long_term_memory import LongTermMemory
 from app.models.note import utc_now
 from app.rag.hashing import content_hash
-from app.schemas.memory import MemoryRead, MemoryUpdate
+from app.schemas.memory import MemoryDetail, MemoryRead, MemorySourceMessage, MemoryUpdate
 
 
 ALLOWED_MEMORY_CATEGORIES = {
@@ -60,6 +62,17 @@ def get_memory(session: Session, memory_id: int) -> MemoryRead:
     """读取单条长期记忆。"""
 
     return _to_memory_read(_get_memory_or_404(session, memory_id))
+
+
+def get_memory_detail(session: Session, memory_id: int) -> MemoryDetail:
+    """读取长期记忆详情，并尽量解析来源消息。
+
+    详情查询只在用户主动展开时触发，因此可以比列表接口多做一次来源查询。
+    如果来源记录已经被删除或不是 chat_message，接口仍返回记忆本体，source_message 为 None。
+    """
+
+    memory = _get_memory_or_404(session, memory_id)
+    return _to_memory_detail(memory, _resolve_source_message(session, memory))
 
 
 def update_memory(
@@ -220,4 +233,43 @@ def _to_memory_read(memory: LongTermMemory) -> MemoryRead:
         content_hash=memory.content_hash,
         created_at=memory.created_at,
         updated_at=memory.updated_at,
+    )
+
+
+def _to_memory_detail(
+    memory: LongTermMemory,
+    source_message: MemorySourceMessage | None,
+) -> MemoryDetail:
+    """把 ORM 对象转换为详情响应，避免 API 层直接接触数据库模型。"""
+
+    base = _to_memory_read(memory)
+    return MemoryDetail(**base.model_dump(), source_message=source_message)
+
+
+def _resolve_source_message(
+    session: Session,
+    memory: LongTermMemory,
+) -> MemorySourceMessage | None:
+    """解析长期记忆来源。
+
+    conversation_memory_graph 当前把来源写成 assistant 消息 id，因为长期记忆通常由
+    “用户输入 + AI 回复”这一轮对话抽取而来。这里先还原 assistant 消息及其会话，
+    后续可以继续扩展为返回同一轮的 user/assistant 成对上下文。
+    """
+
+    if memory.source_type != "chat_message" or memory.source_id is None:
+        return None
+
+    message = session.get(ChatMessage, memory.source_id)
+    if message is None:
+        return None
+
+    conversation = session.get(Conversation, message.conversation_id)
+    return MemorySourceMessage(
+        id=message.id or 0,
+        conversation_id=message.conversation_id,
+        conversation_title=conversation.title if conversation else "未知对话",
+        role=message.role,
+        content=message.content,
+        created_at=message.created_at,
     )

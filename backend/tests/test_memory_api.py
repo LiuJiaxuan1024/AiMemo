@@ -5,6 +5,8 @@ from sqlmodel import Session
 
 from app.core.database import get_session
 from app.main import create_app
+from app.models.chat_message import ChatMessage
+from app.models.conversation import Conversation
 from app.models.long_term_memory import LongTermMemory
 from app.services.memory_service import build_memory_content_hash
 
@@ -89,7 +91,47 @@ def test_memories_api_deletes_only_disabled_memory(session):
     assert get_response.status_code == 404
 
 
-def _add_memory(session, content: str) -> LongTermMemory:
+def test_memories_api_returns_memory_detail_with_source_message(session):
+    conversation = Conversation(title="测试对话", langgraph_thread_id="conversation:1")
+    session.add(conversation)
+    session.commit()
+    session.refresh(conversation)
+
+    message = ChatMessage(
+        conversation_id=conversation.id or 0,
+        role="assistant",
+        content="用户说自己喜欢安静的工作环境。",
+        status="completed",
+    )
+    session.add(message)
+    session.commit()
+    session.refresh(message)
+
+    memory = _add_memory(
+        session,
+        "用户喜欢安静的工作环境。",
+        source_id=message.id,
+    )
+    app = create_app()
+
+    def override_get_session() -> Generator[Session, None, None]:
+        yield session
+
+    app.dependency_overrides[get_session] = override_get_session
+    client = TestClient(app)
+
+    response = client.get(f"/api/memories/{memory.id}/detail")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["id"] == memory.id
+    assert payload["source_message"]["id"] == message.id
+    assert payload["source_message"]["conversation_id"] == conversation.id
+    assert payload["source_message"]["conversation_title"] == "测试对话"
+    assert payload["source_message"]["content"] == "用户说自己喜欢安静的工作环境。"
+
+
+def _add_memory(session, content: str, *, source_id: int | None = None) -> LongTermMemory:
     memory = LongTermMemory(
         level=4,
         category="preference",
@@ -98,6 +140,8 @@ def _add_memory(session, content: str) -> LongTermMemory:
         importance=0.9,
         confidence=0.9,
         status="active",
+        source_type="chat_message",
+        source_id=source_id,
         content_hash=build_memory_content_hash("preference", content),
     )
     session.add(memory)

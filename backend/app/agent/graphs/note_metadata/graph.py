@@ -50,6 +50,7 @@ def run_note_metadata_graph(
 ) -> None:
     payload = decode_payload(job.payload)
     note_id = int(payload["note_id"])
+    content_hash = str(payload.get("content_hash") or "")
     # 一个 job 对应一个 LangGraph thread，避免不同任务或不同笔记的 checkpoint 混在一起。
     thread_id = job.thread_id or f"job:{job.id}"
     checkpoint_file = Path(checkpoint_path)
@@ -67,7 +68,11 @@ def run_note_metadata_graph(
         snapshot = app.get_state(config)
         # 如果 checkpoint 已经有 next 节点，传 None 让 LangGraph 从持久化状态继续；
         # 否则这是首次运行，需要传入初始 state。
-        graph_input = None if snapshot.next else {"job_id": job.id or 0, "note_id": note_id}
+        graph_input = (
+            None
+            if snapshot.next
+            else {"job_id": job.id or 0, "note_id": note_id, "content_hash": content_hash}
+        )
         try:
             app.invoke(graph_input, config, interrupt_after=interrupt_after)
         except Exception as exc:

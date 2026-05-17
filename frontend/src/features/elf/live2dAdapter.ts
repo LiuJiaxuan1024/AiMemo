@@ -3,6 +3,24 @@ import type { Oml2dMethods, Oml2dProperties, Oml2dEvents } from "oh-my-live2d";
 export type Live2DInstance = Oml2dProperties & Oml2dMethods & Oml2dEvents;
 
 const DEFAULT_MODEL_URL = "https://model.hacxy.cn/HK416-1-normal/model.json";
+const DESKTOP_STAGE_STYLE = {
+  bottom: "0px",
+  height: 320,
+  left: "auto",
+  position: "absolute",
+  right: "0px",
+  top: "auto",
+  width: 240,
+} as const;
+const MOBILE_STAGE_STYLE = {
+  bottom: "0px",
+  height: 260,
+  left: "auto",
+  position: "absolute",
+  right: "0px",
+  top: "auto",
+  width: 200,
+} as const;
 
 /**
  * 创建 OhMyLive2D 实例。
@@ -40,6 +58,9 @@ export async function createLive2DElf(
     statusBar: {
       disable: true,
     },
+    // OhMyLive2D 默认会根据 dockedPosition 给舞台加浏览器停靠定位。
+    // 我们需要让舞台固定在 React 精灵容器内部，这样拖拽外层容器时模型才会一起移动。
+    stageStyle: DESKTOP_STAGE_STYLE,
     tips: {
       idleTips: {
         message: ["我会帮你盯着后台任务。"],
@@ -65,16 +86,10 @@ export async function createLive2DElf(
         path: DEFAULT_MODEL_URL,
         position: [0, 70],
         scale: 0.075,
-        stageStyle: {
-          height: 320,
-          width: 240,
-        },
+        stageStyle: DESKTOP_STAGE_STYLE,
         mobilePosition: [0, 55],
         mobileScale: 0.06,
-        mobileStageStyle: {
-          height: 260,
-          width: 200,
-        },
+        mobileStageStyle: MOBILE_STAGE_STYLE,
       },
     ],
   });

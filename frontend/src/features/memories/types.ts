@@ -16,6 +16,19 @@ export interface Memory {
   updated_at: string;
 }
 
+export interface MemorySourceMessage {
+  id: number;
+  conversation_id: number;
+  conversation_title: string;
+  role: string;
+  content: string;
+  created_at: string;
+}
+
+export interface MemoryDetail extends Memory {
+  source_message: MemorySourceMessage | null;
+}
+
 export interface MemoryUpdateInput {
   category?: string;
   content?: string;

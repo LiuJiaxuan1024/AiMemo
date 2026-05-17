@@ -82,7 +82,11 @@ def search_notes(
     # 第一版只 join note；未来如果有 longtermmemory，会在更上层做多源 merge。
     note_ids = sorted({chunk.note_id for chunk in chunks})
     note_query_started_at = now_counter()
-    notes = session.exec(select(Note).where(col(Note.id).in_(note_ids))).all()
+    notes = session.exec(
+        select(Note)
+        .where(col(Note.id).in_(note_ids))
+        .where(Note.status == "active")
+    ).all()
     note_query_ms = elapsed_ms(note_query_started_at)
     note_by_id = {note.id: note for note in notes if note.id is not None}
 

@@ -149,6 +149,49 @@ active 记忆必须先调用 DELETE /api/memories/{memory_id} 停用。
 
 返回完整 `MemoryRead`。
 
+## GET /api/memories/{memory_id}/detail
+
+读取长期记忆详情，并解析来源消息。
+
+列表接口只返回记忆本体；详情接口用于调试和排查，因此会额外尝试读取
+`source_type/source_id` 对应的来源记录。
+
+### Response
+
+```json
+{
+  "id": 1,
+  "level": 4,
+  "category": "preference",
+  "content": "用户不吃香菜。",
+  "summary": "不吃香菜",
+  "importance": 0.95,
+  "confidence": 0.9,
+  "source_type": "chat_message",
+  "source_id": 12,
+  "status": "active",
+  "content_hash": "sha256...",
+  "created_at": "2026-05-17T12:00:00Z",
+  "updated_at": "2026-05-17T12:00:00Z",
+  "source_message": {
+    "id": 12,
+    "conversation_id": 2,
+    "conversation_title": "记忆对话",
+    "role": "assistant",
+    "content": "用户说自己不吃香菜。",
+    "created_at": "2026-05-17T11:59:00Z"
+  }
+}
+```
+
+如果来源消息已经不存在，或来源不是当前支持的 `chat_message` 类型：
+
+```json
+{
+  "source_message": null
+}
+```
+
 ## 错误
 
 ```text

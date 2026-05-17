@@ -18,10 +18,15 @@ MetadataGenerator = Callable[[str], NoteMetadata]
 def build_load_note_node(session_factory: SessionFactory):
     def load_note(state: NoteMetadataGraphState) -> NoteMetadataGraphState:
         note_id = _resolve_note_id(state)
+        expected_hash = state.get("content_hash") or ""
         with session_factory() as session:
             note = session.get(Note, note_id)
             if note is None:
                 raise ValueError(f"Note {note_id} not found.")
+            # job 绑定的是某个内容版本。用户修改/删除笔记后，旧 job 只允许跳过，
+            # 不能再调用 LLM 或把旧 metadata 写回当前笔记。
+            if note.status != "active" or (expected_hash and note.content_hash != expected_hash):
+                return {"note_id": note_id, "content_hash": expected_hash, "should_skip": True}
             # 这里刻意保持幂等：恢复执行时，这个节点可能在 metadata 生成前再次运行。
             # 重复标记 processing 没有副作用，也能让前端状态保持真实。
             note.processing_status = "processing"
@@ -29,7 +34,12 @@ def build_load_note_node(session_factory: SessionFactory):
             note.updated_at = utc_now()
             session.add(note)
             session.commit()
-            return {"note_id": note_id, "content": note.content}
+            return {
+                "note_id": note_id,
+                "content": note.content,
+                "content_hash": note.content_hash,
+                "should_skip": False,
+            }
 
     return load_note
 
@@ -38,6 +48,8 @@ def build_generate_metadata_node(
     metadata_generator: MetadataGenerator = generate_note_metadata,
 ):
     def generate_metadata(state: NoteMetadataGraphState) -> NoteMetadataGraphState:
+        if state.get("should_skip"):
+            return {}
         content = state.get("content")
         if not content:
             raise ValueError("Note content is required before metadata generation.")
@@ -51,7 +63,10 @@ def build_generate_metadata_node(
 
 def build_write_metadata_node(session_factory: SessionFactory):
     def write_metadata(state: NoteMetadataGraphState) -> NoteMetadataGraphState:
+        if state.get("should_skip"):
+            return {}
         note_id = _resolve_note_id(state)
+        expected_hash = state.get("content_hash") or ""
         raw_metadata = state.get("metadata")
         if not raw_metadata:
             raise ValueError("Metadata is required before writing note metadata.")
@@ -61,6 +76,8 @@ def build_write_metadata_node(session_factory: SessionFactory):
             note = session.get(Note, note_id)
             if note is None:
                 raise ValueError(f"Note {note_id} not found.")
+            if note.status != "active" or (expected_hash and note.content_hash != expected_hash):
+                return {}
             # 用户手动输入的标题是业务事实；AI 只能替换根据正文生成的 fallback 标题。
             if note.title_source != "user" and metadata.title:
                 note.title = metadata.title

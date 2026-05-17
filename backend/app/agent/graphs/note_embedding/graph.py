@@ -58,6 +58,7 @@ def run_note_embedding_graph(
 ) -> None:
     payload = decode_payload(job.payload)
     note_id = int(payload["note_id"])
+    content_hash = str(payload.get("content_hash") or "")
     thread_id = job.thread_id or f"job:{job.id}"
     checkpoint_file = Path(checkpoint_path)
     checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
@@ -70,7 +71,11 @@ def run_note_embedding_graph(
         ).compile(checkpointer=checkpointer)
         config = {"configurable": {"thread_id": thread_id}}
         snapshot = app.get_state(config)
-        graph_input = None if snapshot.next else {"job_id": job.id or 0, "note_id": note_id}
+        graph_input = (
+            None
+            if snapshot.next
+            else {"job_id": job.id or 0, "note_id": note_id, "content_hash": content_hash}
+        )
         try:
             app.invoke(graph_input, config, interrupt_after=interrupt_after)
         except Exception as exc:

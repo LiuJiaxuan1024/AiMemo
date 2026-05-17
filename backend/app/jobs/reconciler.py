@@ -12,6 +12,7 @@ from app.jobs.models import GraphName, JobType
 from app.jobs.queue import ACTIVE_STATUSES, enqueue_job
 from app.services.conversation_summary_service import conversation_needs_summary
 from app.services.long_term_memory_service import enqueue_conversation_memory_job_if_needed
+from app.services.note_service import enqueue_note_embedding_job, enqueue_note_metadata_job
 from app.models.chat_message import ChatMessage
 from app.models.conversation import Conversation
 from app.models.job import Job
@@ -62,22 +63,17 @@ def reconcile_missing_jobs(session: Session) -> ReconcileResult:
 
 def _enqueue_note_metadata_jobs(session: Session) -> int:
     notes = session.exec(
-        select(Note).where(col(Note.processing_status).in_(["pending", "processing"]))
+        select(Note)
+        .where(Note.status == "active")
+        .where(col(Note.processing_status).in_(["pending", "processing"]))
     ).all()
     created = 0
     for note in notes:
         if note.id is None:
             continue
-        dedupe_key = f"{JobType.NOTE_METADATA.value}:note:{note.id}"
-        if _has_active_job(session, dedupe_key):
+        if _has_active_note_job(session, JobType.NOTE_METADATA.value, note):
             continue
-        job = enqueue_job(
-            session,
-            job_type=JobType.NOTE_METADATA.value,
-            graph_name=GraphName.NOTE_METADATA.value,
-            payload={"note_id": note.id},
-            dedupe_key=dedupe_key,
-        )
+        job = enqueue_note_metadata_job(session, note)
         if job.id is not None:
             created += 1
     return created
@@ -85,22 +81,17 @@ def _enqueue_note_metadata_jobs(session: Session) -> int:
 
 def _enqueue_note_embedding_jobs(session: Session) -> int:
     notes = session.exec(
-        select(Note).where(col(Note.embedding_status).in_(["pending", "processing"]))
+        select(Note)
+        .where(Note.status == "active")
+        .where(col(Note.embedding_status).in_(["pending", "processing"]))
     ).all()
     created = 0
     for note in notes:
         if note.id is None:
             continue
-        dedupe_key = f"{JobType.NOTE_EMBEDDING.value}:note:{note.id}"
-        if _has_active_job(session, dedupe_key):
+        if _has_active_note_job(session, JobType.NOTE_EMBEDDING.value, note):
             continue
-        job = enqueue_job(
-            session,
-            job_type=JobType.NOTE_EMBEDDING.value,
-            graph_name=GraphName.NOTE_EMBEDDING.value,
-            payload={"note_id": note.id},
-            dedupe_key=dedupe_key,
-        )
+        job = enqueue_note_embedding_job(session, note)
         if job.id is not None:
             created += 1
     return created
@@ -167,6 +158,20 @@ def _has_active_job(session: Session, dedupe_key: str) -> bool:
         )
     ).first()
     return job is not None
+
+
+def _has_active_note_job(session: Session, job_type: str, note: Note) -> bool:
+    """判断某个 note 当前是否已有活跃任务。
+
+    新版 dedupe_key 带 content_hash；这里兼容旧版只带 note_id 的 key，
+    避免升级后 reconciler 给同一条旧任务重复补建。
+    """
+
+    if note.id is None:
+        return False
+    current_key = f"{job_type}:note:{note.id}:content:{note.content_hash}"
+    legacy_key = f"{job_type}:note:{note.id}"
+    return _has_active_job(session, current_key) or _has_active_job(session, legacy_key)
 
 
 class JobReconciler:

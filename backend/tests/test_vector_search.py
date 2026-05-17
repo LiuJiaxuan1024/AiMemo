@@ -60,6 +60,57 @@ def test_search_notes_returns_nearest_note_chunks(session, tmp_path: Path, monke
     assert results[0].score >= results[1].score
 
 
+def test_search_notes_ignores_deleted_notes(session, tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(settings, "database_url", f"sqlite:///{tmp_path / 'test.db'}")
+    monkeypatch.setattr(settings, "embedding_dimensions", 4)
+    ensure_vector_store()
+
+    active_note = Note(title="生效", content="这条可以被检索。", embedding_status="completed")
+    deleted_note = Note(
+        title="最近删除",
+        content="这条已经删除，不应该被检索。",
+        embedding_status="completed",
+        status="deleted",
+    )
+    session.add(active_note)
+    session.add(deleted_note)
+    session.flush()
+
+    active_chunk = NoteChunk(
+        note_id=active_note.id or 0,
+        chunk_index=0,
+        content="这条可以被检索。",
+        content_hash="active",
+        token_count=8,
+        embedding_status="completed",
+    )
+    deleted_chunk = NoteChunk(
+        note_id=deleted_note.id or 0,
+        chunk_index=0,
+        content="这条已经删除，不应该被检索。",
+        content_hash="deleted",
+        token_count=10,
+        embedding_status="completed",
+    )
+    session.add(active_chunk)
+    session.add(deleted_chunk)
+    session.commit()
+    session.refresh(active_chunk)
+    session.refresh(deleted_chunk)
+
+    upsert_chunk_embedding(active_chunk.id or 0, [0.8, 0.0, 0.0, 0.0])
+    upsert_chunk_embedding(deleted_chunk.id or 0, [1.0, 0.0, 0.0, 0.0])
+
+    results = search_notes(
+        session,
+        query="删除的内容是什么？",
+        limit=2,
+        embedding_generator=lambda _: [[1.0, 0.0, 0.0, 0.0]],
+    )
+
+    assert [result.note_title for result in results] == ["生效"]
+
+
 def test_search_notes_ignores_blank_query(session):
     calls = 0
 
@@ -70,4 +121,3 @@ def test_search_notes_ignores_blank_query(session):
 
     assert search_notes(session, query="  ", embedding_generator=fake_embeddings) == []
     assert calls == 0
-

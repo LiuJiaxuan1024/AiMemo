@@ -16,6 +16,8 @@ class NoteEmbeddingGraphState(TypedDict, total=False):
     # job_id/thread_id 标识外层任务；note_id 标识 graph 正在处理的笔记。
     job_id: int
     note_id: int
+    content_hash: str
+    should_skip: bool
     content: str
     chunks: list[ChunkPayload]
     stored_chunks: list[StoredChunkPayload]

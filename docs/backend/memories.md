@@ -233,6 +233,10 @@ list_memories
 get_memory
   读取单条长期记忆，不存在时报 404。
 
+get_memory_detail
+  读取长期记忆详情，并解析 source_type/source_id 对应的来源消息。
+  第一版支持 chat_message 来源；来源缺失时返回 source_message=null。
+
 update_memory
   校验并更新长期记忆。
 
@@ -258,10 +262,49 @@ docs/api/memories.md
 ```text
 GET /api/memories
 GET /api/memories/{memory_id}
+GET /api/memories/{memory_id}/detail
 PATCH /api/memories/{memory_id}
 DELETE /api/memories/{memory_id}
 DELETE /api/memories/{memory_id}/hard
 ```
+
+## 来源追踪
+
+长期记忆的来源由两个字段表示：
+
+```text
+source_type
+source_id
+```
+
+当前 `conversation_memory_graph` 写入的是：
+
+```text
+source_type = chat_message
+source_id = assistant_message_id
+```
+
+也就是说，一条自动抽取的长期记忆默认指向生成它的 assistant 消息。
+详情接口会根据这个 id 读取：
+
+```text
+chat_message
+conversation
+```
+
+并返回：
+
+```text
+source_message.id
+source_message.conversation_id
+source_message.conversation_title
+source_message.role
+source_message.content
+source_message.created_at
+```
+
+这样用户在前端打开记忆详情时，可以看到该记忆来自哪条对话消息。后续如果要做
+“跳转到对话树节点”，可以复用 `conversation_id + message_id` 定位 UI。
 
 ## 与 Graph 的关系
 
@@ -319,11 +362,11 @@ L4 worker 不读取 archived 记忆，重新启用后会读取。
 第一版不做：
 
 ```text
-前端记忆管理 UI
 记忆版本历史
 记忆冲突检测
 用户确认后再写入
 长期记忆向量化
 ```
 
-后续如果要做 UI，可以先实现一个简单的“记忆管理”面板，再逐步支持搜索、筛选、恢复和来源跳转。
+前端已经具备第一版记忆管理面板，支持列表、编辑、停用、启用、删除和详情查看。
+后续可以继续增强搜索、批量整理、来源跳转和记忆版本历史。

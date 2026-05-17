@@ -2,11 +2,12 @@ from fastapi import APIRouter, Depends, Query, Response, status
 from sqlmodel import Session
 
 from app.core.database import get_session
-from app.schemas.memory import MemoryRead, MemoryUpdate
+from app.schemas.memory import MemoryDetail, MemoryRead, MemoryUpdate
 from app.services.memory_service import (
     archive_memory,
     delete_archived_memory,
     get_memory,
+    get_memory_detail,
     list_memories,
     update_memory,
 )
@@ -40,6 +41,19 @@ def get_memory_api(
     session: Session = Depends(get_session),
 ) -> MemoryRead:
     return get_memory(session, memory_id)
+
+
+@router.get("/{memory_id}/detail", response_model=MemoryDetail)
+def get_memory_detail_api(
+    memory_id: int,
+    session: Session = Depends(get_session),
+) -> MemoryDetail:
+    """读取记忆详情。
+
+    详情接口会解析来源消息；列表接口保持轻量，避免用户打开 Memory 面板时做过多查询。
+    """
+
+    return get_memory_detail(session, memory_id)
 
 
 @router.patch("/{memory_id}", response_model=MemoryRead)

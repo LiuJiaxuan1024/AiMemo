@@ -26,23 +26,35 @@ EmbeddingGenerator = Callable[[list[str]], list[list[float]]]
 def build_load_note_node(session_factory: SessionFactory):
     def load_note(state: NoteEmbeddingGraphState) -> NoteEmbeddingGraphState:
         note_id = _resolve_note_id(state)
+        expected_hash = state.get("content_hash") or ""
         with session_factory() as session:
             note = session.get(Note, note_id)
             if note is None:
                 raise ValueError(f"Note {note_id} not found.")
+            # 每个 embedding job 只处理创建它时的内容版本；旧 job 遇到新 hash 或
+            # deleted note 时必须跳过，避免旧 chunks/vector 重新写入。
+            if note.status != "active" or (expected_hash and note.content_hash != expected_hash):
+                return {"note_id": note_id, "content_hash": expected_hash, "should_skip": True}
             # embedding graph 独立维护 embedding_status，不复用 metadata 的 processing_status。
             note.embedding_status = "processing"
             note.embedding_error = ""
             note.updated_at = utc_now()
             session.add(note)
             session.commit()
-            return {"note_id": note_id, "content": note.content}
+            return {
+                "note_id": note_id,
+                "content": note.content,
+                "content_hash": note.content_hash,
+                "should_skip": False,
+            }
 
     return load_note
 
 
 def build_split_note_node():
     def split_note(state: NoteEmbeddingGraphState) -> NoteEmbeddingGraphState:
+        if state.get("should_skip"):
+            return {"chunks": []}
         content = state.get("content")
         if not content:
             raise ValueError("Note content is required before chunking.")
@@ -62,9 +74,17 @@ def build_split_note_node():
 
 def build_write_chunks_node(session_factory: SessionFactory):
     def write_chunks(state: NoteEmbeddingGraphState) -> NoteEmbeddingGraphState:
+        if state.get("should_skip"):
+            return {"stored_chunks": []}
         note_id = _resolve_note_id(state)
+        expected_hash = state.get("content_hash") or ""
         chunks = state.get("chunks", [])
         with session_factory() as session:
+            note = session.get(Note, note_id)
+            if note is None:
+                raise ValueError(f"Note {note_id} not found.")
+            if note.status != "active" or (expected_hash and note.content_hash != expected_hash):
+                return {"stored_chunks": []}
             # 第一版采用“先清理再重建”，比增量更新更容易验证幂等和恢复行为。
             old_chunks = session.exec(select(NoteChunk).where(NoteChunk.note_id == note_id)).all()
             delete_note_chunk_embeddings([chunk.id for chunk in old_chunks if chunk.id is not None])
@@ -106,6 +126,8 @@ def build_generate_embeddings_node(
     embedding_generator: EmbeddingGenerator = embed_texts,
 ):
     def generate_embeddings(state: NoteEmbeddingGraphState) -> NoteEmbeddingGraphState:
+        if state.get("should_skip"):
+            return {"embeddings": []}
         stored_chunks = state.get("stored_chunks", [])
         texts = [chunk["content"] for chunk in stored_chunks]
         # embeddings 会进入 checkpoint。若 LLM/网络调用后进程中断，恢复时会继续写向量，
@@ -117,6 +139,8 @@ def build_generate_embeddings_node(
 
 def build_write_vector_index_node(session_factory: SessionFactory):
     def write_vector_index(state: NoteEmbeddingGraphState) -> NoteEmbeddingGraphState:
+        if state.get("should_skip"):
+            return {}
         stored_chunks = state.get("stored_chunks", [])
         embeddings = state.get("embeddings", [])
         if len(stored_chunks) != len(embeddings):
@@ -141,11 +165,16 @@ def build_write_vector_index_node(session_factory: SessionFactory):
 
 def build_mark_completed_node(session_factory: SessionFactory):
     def mark_completed(state: NoteEmbeddingGraphState) -> NoteEmbeddingGraphState:
+        if state.get("should_skip"):
+            return {}
         note_id = _resolve_note_id(state)
+        expected_hash = state.get("content_hash") or ""
         with session_factory() as session:
             note = session.get(Note, note_id)
             if note is None:
                 raise ValueError(f"Note {note_id} not found.")
+            if note.status != "active" or (expected_hash and note.content_hash != expected_hash):
+                return {}
             note.embedding_status = "completed"
             note.embedding_error = ""
             note.embedded_at = utc_now()

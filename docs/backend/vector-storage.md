@@ -8,9 +8,12 @@ Ai 记当前使用 SQLite 业务表保存 chunk 元数据，使用 `sqlite-vec` 
 note
   id
   content
+  content_hash
+  status
   embedding_status
   embedding_error
   embedded_at
+  deleted_at
 
 notechunk
   id
@@ -34,6 +37,30 @@ vec_note_chunks
 `vec_note_chunks.rowid` 固定等于 `notechunk.id`。
 
 这个约定让业务表和向量表之间不需要额外映射表。删除或重建 chunk 时，代码会先删除对应 rowid 的向量，再写入新的 chunk 和向量。
+
+## 删除与检索边界
+
+笔记删除进入最近删除：
+
+```text
+note.status = deleted
+```
+
+此时 chunks/vector 可以保留，但所有 RAG 检索必须 join note 并过滤：
+
+```text
+note.status = active
+```
+
+因此 deleted 笔记不会被 `/api/search/notes` 或 Memory Chat Graph 的 L3 检索使用。
+
+永久删除时才会物理清理：
+
+```text
+delete notechunk rows
+delete vec_note_chunks rowid
+delete note row
+```
 
 ## Chunk 策略
 

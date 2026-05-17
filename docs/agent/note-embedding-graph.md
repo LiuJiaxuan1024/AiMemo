@@ -36,7 +36,7 @@ flowchart LR
 
 ## 节点说明
 
-- `load_note`: 读取 note，并把 `note.embedding_status` 标记为 `processing`。
+- `load_note`: 读取 note，校验 `status/content_hash`，并把 `note.embedding_status` 标记为 `processing`。
 - `split_note`: 使用 chunking 策略把笔记正文拆成多个 chunk，并计算 `content_hash`。
 - `write_chunks`: 删除旧 chunk 和旧向量，再写入新的 `notechunk` 行。
 - `generate_embeddings`: 调用 DashScope embedding 模型生成向量。
@@ -50,6 +50,20 @@ graph 使用 `thread_id=job:{job.id}` 绑定 LangGraph checkpoint。
 如果任务在 `generate_embeddings` 后中断，向量结果已经进入 checkpoint。恢复执行时会继续从后续节点写入向量索引，不会重复调用 embedding 接口。
 
 如果任务在 `write_chunks` 后中断，恢复时会继续进入 embedding 节点。`write_chunks` 第一版采用“先清理再重建”，这是为了让重试行为更容易推理和测试。
+
+## 内容版本校验
+
+`note_embedding` job 会携带创建任务时的 `content_hash`。
+
+节点执行时必须满足：
+
+```text
+note.status == active
+job.payload.content_hash == note.content_hash
+```
+
+如果用户在 job 执行期间修改或删除了笔记，旧 job 会设置 `should_skip=true` 并跳过后续写入。
+这保证旧 chunks/vector 不会覆盖新内容，也不会让最近删除中的笔记重新进入向量库。
 
 ## 当前模型
 
@@ -70,4 +84,3 @@ backend/app/agent/embeddings.py
 backend/app/rag/chunking/
 backend/app/rag/vector_store.py
 ```
-

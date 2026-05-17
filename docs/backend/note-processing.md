@@ -4,7 +4,7 @@
 
 ## 当前能力
 
-创建笔记时会立即保存原始内容，并创建两个后台 job：
+创建笔记时会立即保存原始内容，计算 `content_hash`，并创建两个后台 job：
 
 ```text
 note_metadata
@@ -40,7 +40,7 @@ backend/app/ai/note_metadata.py
   定义 NoteMetadata 结构，并封装模型调用和结果归一化。
 
 backend/app/services/note_service.py
-  负责创建 note 和 enqueue job，不直接调用模型。
+  负责创建、修改、软删除、恢复、永久删除 note，并 enqueue job，不直接调用模型。
 
 backend/app/jobs/
   管理本地持久化任务队列。
@@ -71,9 +71,9 @@ api_key: DASHSCOPE_API_KEY
 
 ```text
 POST /api/notes
-  -> save note(processing_status=pending)
-  -> enqueue note_metadata job
-  -> enqueue note_embedding job
+  -> save note(status=active, content_hash=...)
+  -> enqueue note_metadata job(payload.note_id + payload.content_hash)
+  -> enqueue note_embedding job(payload.note_id + payload.content_hash)
   -> worker claims job
   -> LangGraph checkpoint execution
        load_note
@@ -97,6 +97,71 @@ POST /api/notes
        mark_embedding_completed
 ```
 
+## 修改与内容版本
+
+笔记修改不是简单覆盖。`content` 变化时会产生新的内容版本：
+
+```text
+PATCH /api/notes/{id}
+  -> 更新 title/content
+  -> 重新计算 note.content_hash
+  -> 清空 summary/tags
+  -> processing_status = pending
+  -> embedding_status = pending
+  -> 删除旧 notechunk 和旧 vector
+  -> 创建 metadata job
+  -> 创建 embedding job
+```
+
+job 的 `dedupe_key` 带当前内容 hash：
+
+```text
+note_metadata:note:{id}:content:{content_hash}
+note_embedding:note:{id}:content:{content_hash}
+```
+
+graph 节点执行前也会检查：
+
+```text
+note.status == active
+job.payload.content_hash == note.content_hash
+```
+
+如果用户在旧 job 执行期间修改或删除了笔记，旧 job 会跳过，不会把旧 metadata、
+chunks 或 vectors 写回当前笔记。
+
+## 最近删除
+
+删除笔记采用软删除：
+
+```text
+DELETE /api/notes/{id}
+  -> note.status = deleted
+  -> note.deleted_at = now
+```
+
+软删除不会立即删除 chunks/vector。检索层通过 `note.status = active` 过滤，
+保证 deleted 笔记不会被 RAG 或 Memory Chat Graph 使用。
+
+恢复：
+
+```text
+POST /api/notes/{id}/restore
+  -> note.status = active
+  -> note.deleted_at = null
+```
+
+如果 chunks 还在，恢复后可以立即检索；如果 chunks 缺失，会补建 embedding job。
+
+永久删除：
+
+```text
+DELETE /api/notes/{id}/hard
+  -> delete notechunk
+  -> delete sqlite-vec vectors
+  -> delete note
+```
+
 ## 启动补偿
 
 服务启动时会执行一次 job reconcile，并启动周期扫描器：
@@ -105,8 +170,15 @@ POST /api/notes
 backend/app/jobs/reconciler.py
 ```
 
-如果历史笔记处于 `processing_status=pending/processing`，但没有活跃 `note_metadata` job，会自动补建 metadata job。
+如果 active 历史笔记处于 `processing_status=pending/processing`，但没有活跃 `note_metadata` job，会自动补建 metadata job。
 
-如果历史笔记处于 `embedding_status=pending/processing`，但没有活跃 `note_embedding` job，会自动补建 embedding job。
+如果 active 历史笔记处于 `embedding_status=pending/processing`，但没有活跃 `note_embedding` job，会自动补建 embedding job。
+
+补建逻辑兼容旧版 dedupe key：
+
+```text
+旧版: note_metadata:note:{id}
+新版: note_metadata:note:{id}:content:{content_hash}
+```
 
 这个机制不直接执行 AI 逻辑，只负责修复“业务状态需要任务，但任务队列缺失”的不一致。真正执行仍然由 `JobWorker` 领取 job 后完成。

@@ -6,10 +6,12 @@ import {
   activateMemory,
   archiveMemory,
   deleteDisabledMemory,
+  getMemoryDetail,
   listMemories,
   updateMemory,
 } from "./memoriesApi";
 import { MemoryCard } from "./MemoryCard";
+import { MemoryDetailPanel } from "./MemoryDetailPanel";
 import { MemoryToolbar } from "./MemoryToolbar";
 import type { Memory, MemoryStatus, MemoryUpdateInput } from "./types";
 import { STATUS_LABELS } from "./memoryUtils";
@@ -24,6 +26,7 @@ export function MemoryPanel({ isOpen, isActive }: MemoryPanelProps) {
   const [status, setStatus] = useState<MemoryStatus>("active");
   const [category, setCategory] = useState("");
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [detailId, setDetailId] = useState<number | null>(null);
   const [draft, setDraft] = useState<MemoryUpdateInput>({});
   const [error, setError] = useState("");
   const memoriesQueryKey = ["memories", { status, category: category || "" }];
@@ -37,6 +40,11 @@ export function MemoryPanel({ isOpen, isActive }: MemoryPanelProps) {
       }),
   });
   const memories = memoriesQuery.data ?? [];
+  const memoryDetailQuery = useQuery({
+    enabled: isOpen && isActive && detailId !== null,
+    queryKey: ["memories", detailId, "detail"],
+    queryFn: () => getMemoryDetail(Number(detailId)),
+  });
 
   const activeCount = useMemo(
     () => memories.filter((memory) => memory.status === "active").length,
@@ -86,7 +94,10 @@ export function MemoryPanel({ isOpen, isActive }: MemoryPanelProps) {
       setEditingId(null);
       setDraft({});
     }
-  }, [editingId, memories]);
+    if (detailId && !memories.some((memory) => memory.id === detailId)) {
+      setDetailId(null);
+    }
+  }, [detailId, editingId, memories]);
 
   function startEdit(memory: Memory) {
     setEditingId(memory.id);
@@ -98,6 +109,11 @@ export function MemoryPanel({ isOpen, isActive }: MemoryPanelProps) {
       confidence: memory.confidence,
       status: memory.status,
     });
+  }
+
+  function openDetail(memory: Memory) {
+    setError("");
+    setDetailId(memory.id);
   }
 
   function cancelEdit() {
@@ -163,6 +179,10 @@ export function MemoryPanel({ isOpen, isActive }: MemoryPanelProps) {
 
     setError("");
     deleteMemoryMutation.mutate(memory.id, {
+      onSuccess: async () => {
+        setDetailId((current) => (current === memory.id ? null : current));
+        await queryClient.invalidateQueries({ queryKey: ["memories"] });
+      },
       onError: (currentError) => {
         setError(currentError instanceof Error ? currentError.message : "删除记忆失败");
       },
@@ -170,7 +190,7 @@ export function MemoryPanel({ isOpen, isActive }: MemoryPanelProps) {
   }
 
   return (
-    <section className="memory-panel">
+    <section className={`memory-panel ${detailId ? "memory-panel-with-detail" : ""}`}>
       <MemoryToolbar
         category={category}
         onCategoryChange={setCategory}
@@ -209,11 +229,27 @@ export function MemoryPanel({ isOpen, isActive }: MemoryPanelProps) {
             onCancelEdit={cancelEdit}
             onDelete={handleDelete}
             onDraftChange={setDraft}
+            onOpenDetail={openDetail}
             onSave={handleSave}
             onStartEdit={startEdit}
           />
         ))}
       </div>
+
+      {detailId ? (
+        <MemoryDetailPanel
+          detail={memoryDetailQuery.data ?? null}
+          error={
+            memoryDetailQuery.error instanceof Error
+              ? memoryDetailQuery.error.message
+              : memoryDetailQuery.error
+                ? "读取记忆详情失败"
+                : ""
+          }
+          isLoading={memoryDetailQuery.isFetching}
+          onClose={() => setDetailId(null)}
+        />
+      ) : null}
     </section>
   );
 }
