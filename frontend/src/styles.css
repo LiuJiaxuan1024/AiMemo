@@ -557,6 +557,7 @@ textarea {
   pointer-events: none;
   position: fixed;
   right: 18px;
+  height: 360px;
   width: 260px;
   z-index: 30;
 }
@@ -582,11 +583,11 @@ textarea {
 
 .elf-assistant-bubble {
   align-items: center;
-  background: rgba(255, 255, 255, 0.96);
-  border: 1px solid #d9dde5;
+  background: linear-gradient(180deg, rgba(239, 247, 255, 0.98) 0%, rgba(220, 238, 255, 0.96) 100%);
+  border: 1px solid rgba(124, 179, 255, 0.72);
   border-radius: 8px;
-  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.14);
-  color: #1d2433;
+  box-shadow: 0 12px 30px rgba(38, 117, 213, 0.18);
+  color: #1849a9;
   display: inline-flex;
   font-size: 13px;
   gap: 7px;
@@ -601,8 +602,8 @@ textarea {
 
 .elf-assistant-bubble::after {
   background: inherit;
-  border-bottom: 1px solid #d9dde5;
-  border-right: 1px solid #d9dde5;
+  border-bottom: 1px solid rgba(124, 179, 255, 0.72);
+  border-right: 1px solid rgba(124, 179, 255, 0.72);
   bottom: -5px;
   content: "";
   height: 9px;
@@ -612,8 +613,11 @@ textarea {
   width: 9px;
 }
 
-.elf-live2d-frame {
+.elf-memo-frame {
+  align-items: end;
+  display: flex;
   height: 320px;
+  justify-content: end;
   margin-top: -4px;
   overflow: hidden;
   pointer-events: none;
@@ -621,30 +625,32 @@ textarea {
   width: 250px;
 }
 
-.elf-live2d-host {
-  bottom: 0;
-  height: 320px;
-  position: absolute;
-  right: 0;
-  width: 250px;
+.elf-memo-image {
+  filter: drop-shadow(0 18px 22px rgba(15, 23, 42, 0.18));
+  height: 100%;
+  max-width: 100%;
+  object-fit: contain;
+  object-position: right bottom;
+  transform-origin: right bottom;
+  transition:
+    filter 180ms ease,
+    transform 180ms ease;
+  user-select: none;
+  width: auto;
 }
 
-.elf-live2d-fallback {
-  align-items: center;
-  background: linear-gradient(180deg, #ffffff 0%, #eef4ff 100%);
-  border: 1px solid #d9dde5;
-  border-radius: 8px;
-  bottom: 10px;
-  color: #475467;
-  display: inline-flex;
-  flex-direction: column;
-  font-size: 12px;
-  gap: 8px;
-  height: 112px;
-  justify-content: center;
-  position: absolute;
-  right: 22px;
-  width: 112px;
+.elf-assistant.mood-thinking .elf-memo-image {
+  transform: translateY(2px) rotate(-1deg);
+}
+
+.elf-assistant.mood-working .elf-memo-image {
+  filter: drop-shadow(0 18px 24px rgba(31, 111, 235, 0.22));
+  transform: translateY(1px);
+}
+
+.elf-assistant.mood-success .elf-memo-image {
+  filter: drop-shadow(0 18px 24px rgba(2, 122, 72, 0.2));
+  transform: translateY(-2px);
 }
 
 .elf-badge {

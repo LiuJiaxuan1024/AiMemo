@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { AlertTriangle, Bot, Loader2 } from "lucide-react";
+import { AlertTriangle, Loader2 } from "lucide-react";
 
-import { createLive2DElf, type Live2DInstance } from "./live2dAdapter";
 import { deriveElfStateFromJobs } from "./elfState";
+import { MemoExpressionRenderer } from "./memoExpressionRenderer";
 import type { ElfAssistantProps } from "./types";
 
 const ELF_POSITION_STORAGE_KEY = "ai-note-elf-position";
@@ -26,8 +26,8 @@ export function ElfAssistant({
   jobs,
   onToggleWorkshop,
 }: ElfAssistantProps) {
-  const hostRef = useRef<HTMLDivElement | null>(null);
-  const live2dRef = useRef<Live2DInstance | null>(null);
+  const hasBootstrappedJobsRef = useRef(false);
+  const observedActiveJobIdsRef = useRef<Set<number>>(new Set());
   const pendingCompletedAnnouncementIdsRef = useRef<Set<number>>(new Set());
   const completedAnnouncementTimersRef = useRef<Map<number, number>>(new Map());
   const dragStateRef = useRef<{
@@ -42,50 +42,30 @@ export function ElfAssistant({
   const [announcedCompletedJobIds, setAnnouncedCompletedJobIds] = useState<Set<number>>(
     () => new Set(),
   );
-  const [live2dStatus, setLive2DStatus] = useState<"loading" | "ready" | "failed">("loading");
+  const effectiveAnnouncedCompletedJobIds = useMemo(() => {
+    const next = new Set(announcedCompletedJobIds);
+
+    for (const job of jobs) {
+      if (job.status !== "completed") {
+        continue;
+      }
+
+      // 首次加载进来的 completed 都是历史任务，不应该被当成“刚刚完成”。
+      // 后续如果一个任务没有在本页被观察到 pending/running，也同样视为历史任务。
+      if (!hasBootstrappedJobsRef.current || !observedActiveJobIdsRef.current.has(job.id)) {
+        next.add(job.id);
+      }
+    }
+
+    return next;
+  }, [announcedCompletedJobIds, jobs]);
   const elfState = useMemo(
     () =>
       deriveElfStateFromJobs(jobs, {
-        announcedCompletedJobIds,
+        announcedCompletedJobIds: effectiveAnnouncedCompletedJobIds,
       }),
-    [announcedCompletedJobIds, jobs],
+    [effectiveAnnouncedCompletedJobIds, jobs],
   );
-
-  useEffect(() => {
-    if (!hostRef.current || live2dRef.current) {
-      return;
-    }
-
-    let canceled = false;
-
-    hostRef.current.replaceChildren();
-
-    createLive2DElf(hostRef.current, () => canceled)
-      .then((instance) => {
-        if (canceled) {
-          return;
-        }
-        live2dRef.current = instance;
-        instance.onLoad((status) => {
-          if (status === "success") {
-            setLive2DStatus("ready");
-          }
-          if (status === "fail") {
-            setLive2DStatus("failed");
-          }
-        });
-      })
-      .catch(() => {
-        if (!canceled) {
-          setLive2DStatus("failed");
-        }
-      });
-
-    return () => {
-      canceled = true;
-      live2dRef.current = null;
-    };
-  }, []);
 
   useEffect(() => {
     return () => {
@@ -114,8 +94,36 @@ export function ElfAssistant({
   }, []);
 
   useEffect(() => {
-    live2dRef.current?.tipsMessage(elfState.message, 4200, elfState.priority);
+    let shouldUpdateAnnouncedIds = false;
+    const nextAnnouncedIds = new Set(announcedCompletedJobIds);
 
+    for (const job of jobs) {
+      if (job.status === "pending" || job.status === "running") {
+        observedActiveJobIdsRef.current.add(job.id);
+        continue;
+      }
+
+      if (job.status !== "completed") {
+        continue;
+      }
+
+      // jobs 首次拉取时可能已经包含大量 completed，这些都属于历史快照。
+      // 只有本页实际观察过活跃状态的任务，才允许进入“刚刚完成”的短提醒。
+      if (!hasBootstrappedJobsRef.current || !observedActiveJobIdsRef.current.has(job.id)) {
+        if (!nextAnnouncedIds.has(job.id)) {
+          nextAnnouncedIds.add(job.id);
+          shouldUpdateAnnouncedIds = true;
+        }
+      }
+    }
+
+    hasBootstrappedJobsRef.current = true;
+    if (shouldUpdateAnnouncedIds) {
+      setAnnouncedCompletedJobIds(nextAnnouncedIds);
+    }
+  }, [announcedCompletedJobIds, jobs]);
+
+  useEffect(() => {
     if (elfState.mood === "success" && elfState.jobId) {
       const jobId = elfState.jobId;
       if (pendingCompletedAnnouncementIdsRef.current.has(jobId)) {
@@ -183,7 +191,7 @@ export function ElfAssistant({
     const rect = currentTarget.getBoundingClientRect();
     dragMovedRef.current = false;
     // 记录拖拽开始时的容器位置，移动过程中只根据指针偏移量更新外层精灵坐标。
-    // 这样 Live2D、任务角标、点击热区会作为一个整体移动，不依赖第三方插件内部状态。
+    // 这样 Memo 图片、任务角标、点击热区会作为一个整体移动，不依赖第三方插件内部状态。
     dragStateRef.current = {
       pointerId: event.pointerId,
       startLeft: rect.left,
@@ -224,7 +232,7 @@ export function ElfAssistant({
         type="button"
       />
 
-      {live2dStatus !== "ready" ? (
+      {elfState.mood !== "idle" ? (
         <div className="elf-assistant-bubble">
           {elfState.mood === "error" ? <AlertTriangle aria-hidden="true" size={15} /> : null}
           {elfState.mood === "working" || elfState.mood === "thinking" ? (
@@ -234,15 +242,7 @@ export function ElfAssistant({
         </div>
       ) : null}
 
-      <div className="elf-live2d-frame">
-        <div className="elf-live2d-host" ref={hostRef} />
-        {live2dStatus !== "ready" ? (
-          <div className="elf-live2d-fallback">
-            <Bot aria-hidden="true" size={28} />
-            {live2dStatus === "failed" ? "精灵加载失败" : "精灵加载中"}
-          </div>
-        ) : null}
-      </div>
+      <MemoExpressionRenderer mood={elfState.mood} />
 
       {failedCount > 0 ? <strong className="elf-badge danger">{failedCount}</strong> : null}
       {failedCount === 0 && activeCount > 0 ? <strong className="elf-badge">{activeCount}</strong> : null}
