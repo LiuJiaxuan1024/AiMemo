@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local data
+data/*.db
+data/*.db-*
+data/*.log
+backend/data/*.db
+backend/data/*.db-*
+backend/data/*.log
+backend/data/vector_store/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+frontend/*.log
+
+# Runtime logs
+*.log
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Editor and OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

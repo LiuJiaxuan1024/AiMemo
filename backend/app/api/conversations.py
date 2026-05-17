@@ -1,0 +1,66 @@
+from fastapi import APIRouter, Depends, status
+from sqlmodel import Session
+
+from app.core.database import get_session
+from app.schemas.conversation import (
+    ChatMessageCreate,
+    ChatMessageRead,
+    ConversationCreate,
+    ConversationListItem,
+    ConversationRead,
+)
+from app.services.conversation_service import (
+    append_message,
+    create_conversation,
+    get_conversation,
+    list_conversations,
+    list_messages,
+)
+
+
+router = APIRouter(prefix="/conversations", tags=["conversations"])
+
+
+@router.post("", response_model=ConversationRead, status_code=status.HTTP_201_CREATED)
+def create_conversation_api(
+    payload: ConversationCreate,
+    session: Session = Depends(get_session),
+) -> ConversationRead:
+    # 这里只创建业务会话，不启动 LangGraph；graph 会在用户发送 AI 消息时使用同一 thread_id。
+    return create_conversation(session, payload)
+
+
+@router.get("", response_model=list[ConversationListItem])
+def list_conversations_api(session: Session = Depends(get_session)) -> list[ConversationListItem]:
+    return list_conversations(session)
+
+
+@router.get("/{conversation_id}", response_model=ConversationRead)
+def get_conversation_api(
+    conversation_id: int,
+    session: Session = Depends(get_session),
+) -> ConversationRead:
+    return get_conversation(session, conversation_id)
+
+
+@router.get("/{conversation_id}/messages", response_model=list[ChatMessageRead])
+def list_messages_api(
+    conversation_id: int,
+    session: Session = Depends(get_session),
+) -> list[ChatMessageRead]:
+    return list_messages(session, conversation_id)
+
+
+@router.post(
+    "/{conversation_id}/messages",
+    response_model=ChatMessageRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def append_message_api(
+    conversation_id: int,
+    payload: ChatMessageCreate,
+    session: Session = Depends(get_session),
+) -> ChatMessageRead:
+    # MVP 阶段该接口只保存消息，不生成 AI 回复。后续 memory_chat_graph 会复用 service。
+    return append_message(session, conversation_id, payload)
+
