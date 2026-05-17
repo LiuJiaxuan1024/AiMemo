@@ -16,4 +16,5 @@ class ConversationMemoryGraphState(TypedDict, total=False):
     assistant_message_id: int
     source_messages: list[ChatMessagePayload]
     extraction_result: dict
+    consolidation_result: dict
     written_memory_ids: list[int]

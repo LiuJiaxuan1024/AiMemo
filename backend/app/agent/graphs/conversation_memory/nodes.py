@@ -14,6 +14,11 @@ from app.models.chat_message import ChatMessage
 from app.models.conversation import Conversation
 from app.models.long_term_memory import LongTermMemory
 from app.models.note import utc_now
+from app.services.memory_consolidation_service import (
+    ConsolidationJudge,
+    NormalizedMemoryCandidate,
+    consolidate_memory_candidates,
+)
 from app.services.memory_service import build_memory_content_hash
 
 
@@ -73,15 +78,52 @@ def build_extract_memories_node(memory_extractor: MemoryExtractor | None = None)
 
 
 def build_write_memories_node(session_factory: SessionFactory):
-    """把高质量抽取结果写入 longtermmemory。
+    """执行归并决策，把长期记忆写入或更新到 longtermmemory。
 
-    写入规则保持保守：
-      - should_write 必须为 true。
-      - importance/confidence 必须超过阈值。
-      - content_hash 已存在时跳过，避免重复记忆。
+    复杂的重复判断已经由 consolidate_memories 完成。本节点只负责执行
+    skip/create/update，并在 create/update 前再次做幂等保护。
     """
 
     def write_memories(
+        state: ConversationMemoryGraphState,
+    ) -> ConversationMemoryGraphState:
+        result = state.get("consolidation_result") or {}
+        decisions = result.get("decisions", [])
+        if not isinstance(decisions, list):
+            raise ValueError("consolidation_result.decisions must be a list.")
+
+        source_id = _resolve_int(state, "assistant_message_id")
+        written_ids: list[int] = []
+        with session_factory() as session:
+            for raw_decision in decisions:
+                decision = _normalize_decision(raw_decision)
+                if decision is None or decision["action"] == "skip":
+                    continue
+
+                if decision["action"] == "update":
+                    memory = _apply_update_decision(session, decision)
+                else:
+                    memory = _apply_create_decision(session, decision, source_id)
+
+                if memory is not None and memory.id is not None:
+                    written_ids.append(memory.id)
+            session.commit()
+        return {"written_memory_ids": written_ids}
+
+    return write_memories
+
+
+def build_consolidate_memories_node(
+    session_factory: SessionFactory,
+    judge: ConsolidationJudge | None = None,
+):
+    """归并长期记忆候选，避免语义重复内容写入 L4。
+
+    该节点结果会进入 checkpoint。若归并后进程中断，恢复时 write_memories
+    可以直接执行 decisions，不重复调用 LLM judge。
+    """
+
+    def consolidate_memories(
         state: ConversationMemoryGraphState,
     ) -> ConversationMemoryGraphState:
         result = state.get("extraction_result") or {}
@@ -89,44 +131,16 @@ def build_write_memories_node(session_factory: SessionFactory):
         if not isinstance(memories, list):
             raise ValueError("extraction_result.memories must be a list.")
 
-        source_id = _resolve_int(state, "assistant_message_id")
-        written_ids: list[int] = []
+        candidates = [
+            NormalizedMemoryCandidate(**normalized)
+            for raw_memory in memories
+            if (normalized := _normalize_memory(raw_memory)) is not None
+        ]
         with session_factory() as session:
-            for raw_memory in memories:
-                normalized = _normalize_memory(raw_memory)
-                if normalized is None:
-                    continue
-                memory_hash = build_memory_content_hash(
-                    normalized["category"],
-                    normalized["content"],
-                )
-                existing = session.exec(
-                    select(LongTermMemory).where(LongTermMemory.content_hash == memory_hash)
-                ).first()
-                if existing:
-                    continue
+            decisions = consolidate_memory_candidates(session, candidates, judge=judge)
+        return {"consolidation_result": {"decisions": decisions}}
 
-                memory = LongTermMemory(
-                    level=4,
-                    category=normalized["category"],
-                    content=normalized["content"],
-                    summary=normalized["summary"],
-                    importance=normalized["importance"],
-                    confidence=normalized["confidence"],
-                    source_type="chat_message",
-                    source_id=source_id,
-                    status="active",
-                    content_hash=memory_hash,
-                    updated_at=utc_now(),
-                )
-                session.add(memory)
-                session.flush()
-                if memory.id is not None:
-                    written_ids.append(memory.id)
-            session.commit()
-        return {"written_memory_ids": written_ids}
-
-    return write_memories
+    return consolidate_memories
 
 
 def extract_long_term_memories(messages: list[ChatMessagePayload]) -> dict[str, Any]:
@@ -224,6 +238,89 @@ def _normalize_memory(raw_memory: Any) -> dict[str, Any] | None:
         "importance": importance,
         "confidence": confidence,
     }
+
+
+def _normalize_decision(raw_decision: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_decision, dict):
+        return None
+    action = str(raw_decision.get("action") or "create").strip().lower()
+    if action not in {"skip", "create", "update"}:
+        action = "create"
+
+    content = str(raw_decision.get("content") or "").strip()
+    if not content:
+        return None
+    category = str(raw_decision.get("category") or "fact").strip().lower()
+    if category not in {"preference", "identity", "goal", "instruction", "event", "fact"}:
+        category = "fact"
+    existing_memory_id = raw_decision.get("existing_memory_id")
+    try:
+        existing_memory_id = int(existing_memory_id) if existing_memory_id is not None else None
+    except (TypeError, ValueError):
+        existing_memory_id = None
+    return {
+        "action": action,
+        "existing_memory_id": existing_memory_id,
+        "category": category,
+        "content": content[:1000],
+        "summary": str(raw_decision.get("summary") or content).strip()[:300],
+        "importance": _clamp_float(raw_decision.get("importance", 0.0)),
+        "confidence": _clamp_float(raw_decision.get("confidence", 0.0)),
+    }
+
+
+def _apply_create_decision(
+    session: Session,
+    decision: dict[str, Any],
+    source_id: int,
+) -> LongTermMemory | None:
+    memory_hash = build_memory_content_hash(decision["category"], decision["content"])
+    existing = session.exec(
+        select(LongTermMemory).where(LongTermMemory.content_hash == memory_hash)
+    ).first()
+    if existing:
+        return None
+
+    memory = LongTermMemory(
+        level=4,
+        category=decision["category"],
+        content=decision["content"],
+        summary=decision["summary"],
+        importance=decision["importance"],
+        confidence=decision["confidence"],
+        source_type="chat_message",
+        source_id=source_id,
+        status="active",
+        content_hash=memory_hash,
+        updated_at=utc_now(),
+    )
+    session.add(memory)
+    session.flush()
+    return memory
+
+
+def _apply_update_decision(
+    session: Session,
+    decision: dict[str, Any],
+) -> LongTermMemory | None:
+    memory_id = decision.get("existing_memory_id")
+    if memory_id is None:
+        return None
+
+    memory = session.get(LongTermMemory, memory_id)
+    if memory is None or memory.status != "active":
+        return None
+
+    memory.category = decision["category"]
+    memory.content = decision["content"]
+    memory.summary = decision["summary"]
+    memory.importance = max(memory.importance, decision["importance"])
+    memory.confidence = max(memory.confidence, decision["confidence"])
+    memory.content_hash = build_memory_content_hash(memory.category, memory.content)
+    memory.updated_at = utc_now()
+    session.add(memory)
+    session.flush()
+    return memory
 
 
 def _clamp_float(value: Any) -> float:

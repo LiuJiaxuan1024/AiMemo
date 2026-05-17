@@ -7,6 +7,7 @@
 ```text
 docs/backend/memories.md
 docs/api/memories.md
+docs/agent/memory-consolidation.md
 ```
 
 ## 流程
@@ -15,12 +16,14 @@ docs/api/memories.md
 flowchart TD
     Start([START]) --> Load[load_memory_source]
     Load --> Extract[extract_memories]
-    Extract --> Write[write_memories]
+    Extract --> Consolidate[consolidate_memories]
+    Consolidate --> Write[write_memories]
     Write --> End([END])
 
     Load -. checkpoint .-> CP1[(checkpoint)]
     Extract -. checkpoint .-> CP2[(checkpoint)]
-    Write -. checkpoint .-> CP3[(checkpoint)]
+    Consolidate -. checkpoint .-> CP3[(checkpoint)]
+    Write -. checkpoint .-> CP4[(checkpoint)]
 ```
 
 ## 节点职责
@@ -37,10 +40,19 @@ extract_memories
   模型输出会先经过 parse_memory_extraction_response 归一化。
   如果模型偶发返回非严格 JSON，则降级为 {"memories": []}，不让后台 job 失败。
 
+consolidate_memories
+  将抽取出的候选记忆和已有 active L4 记忆做归并判断。
+  content_hash 完全重复时直接 skip。
+  明显高相似记忆由本地规则直接 skip。
+  其他同 category 候选交给 planner LLM judge，判断 skip/create/update。
+  输出 consolidation_result，并写入 LangGraph checkpoint。
+
 write_memories
-  将高质量记忆写入 longtermmemory。
-  写入前过滤 should_write=false、低 importance、低 confidence 的候选。
-  使用 content_hash 去重，避免重复记忆。
+  执行 consolidation_result.decisions。
+  skip 不写入。
+  create 创建新 LongTermMemory。
+  update 更新已有 active LongTermMemory。
+  create/update 前再次做 content_hash 或 id 检查，确保恢复时幂等。
 ```
 
 ## Job 约定
@@ -95,11 +107,17 @@ source_id = assistant_message_id
 ```text
 如果 graph 在 extract_memories 后中断：
   extraction_result 已进入 checkpoint。
-  恢复时直接执行 write_memories。
+  恢复时继续执行 consolidate_memories。
   不重复调用 LLM。
 
+如果 graph 在 consolidate_memories 后中断：
+  consolidation_result 已进入 checkpoint。
+  恢复时直接执行 write_memories。
+  不重复调用归并 judge。
+
 如果 write_memories 被重复执行：
-  content_hash 去重会跳过已存在记忆。
+  create 会再次检查 content_hash。
+  update 会按 existing_memory_id 更新已有 active 记忆。
 ```
 
 ## JSON 解析容错
@@ -130,6 +148,7 @@ source_id = assistant_message_id
 
 ```text
 长期记忆向量化
+语义级记忆归并
 记忆冲突检测
 用户确认机制
 记忆编辑 UI
@@ -137,3 +156,9 @@ source_id = assistant_message_id
 ```
 
 后续可以把 `extract_memories` 拆成 preference / identity / goal / instruction 等多个 worker 并行抽取，再由 synthesizer 合并结果。
+
+语义级去重和更新策略见：
+
+```text
+docs/agent/memory-consolidation.md
+```

@@ -8,8 +8,10 @@ from app.jobs.models import GraphName, JobType
 from app.jobs.queue import enqueue_job
 from app.models.chat_message import ChatMessage
 from app.models.long_term_memory import LongTermMemory
+from app.models.note import utc_now
 from app.schemas.conversation import ConversationCreate
 from app.services.conversation_service import create_conversation
+from app.services.memory_service import build_memory_content_hash
 
 
 def test_conversation_memory_graph_writes_high_value_memory(
@@ -134,6 +136,151 @@ def test_conversation_memory_graph_resumes_after_extract_without_recalling_llm(
     assert calls == [2]
     assert len(memories) == 1
     assert memories[0].content == "用户的长期目标是写完 Ai 记。"
+
+
+def test_conversation_memory_graph_skips_semantic_duplicate_memory(
+    session,
+    session_factory,
+    tmp_path: Path,
+):
+    """措辞不同但语义重复的长期目标不应重复进入 L4。"""
+
+    existing = LongTermMemory(
+        level=4,
+        category="goal",
+        content="用户计划开发名为 Ai 记 的智能化笔记软件。",
+        summary="开发 Ai 记智能笔记软件",
+        importance=0.9,
+        confidence=1.0,
+        source_type="chat_message",
+        source_id=18,
+        status="active",
+        content_hash=build_memory_content_hash(
+            "goal",
+            "用户计划开发名为 Ai 记 的智能化笔记软件。",
+        ),
+        updated_at=utc_now(),
+    )
+    session.add(existing)
+    session.commit()
+
+    conversation = create_conversation(session, ConversationCreate(title="重复记忆"))
+    user = _add_message(session, conversation.id, "user", "我正在计划开发名为 Ai 记 的智能化笔记软件。")
+    assistant = _add_message(session, conversation.id, "assistant", "这很适合作为长期目标。", user.id)
+    job = _enqueue_memory_job(session, conversation.id, user.id, assistant.id)
+
+    def fake_extractor(messages):
+        return {
+            "memories": [
+                {
+                    "should_write": True,
+                    "category": "goal",
+                    "content": "用户正在计划开发名为 Ai 记 的智能化笔记软件。",
+                    "summary": "计划开发 Ai 记笔记软件",
+                    "importance": 0.9,
+                    "confidence": 1.0,
+                }
+            ]
+        }
+
+    run_conversation_memory_graph(
+        job,
+        session_factory=session_factory,
+        checkpoint_path=str(tmp_path / "checkpoints.db"),
+        memory_extractor=fake_extractor,
+    )
+
+    session.expire_all()
+    memories = session.exec(select(LongTermMemory)).all()
+    assert len(memories) == 1
+    assert memories[0].id == existing.id
+    assert memories[0].content == "用户计划开发名为 Ai 记 的智能化笔记软件。"
+
+
+def test_conversation_memory_graph_resumes_after_consolidation_without_rejudging(
+    session,
+    session_factory,
+    tmp_path: Path,
+):
+    """consolidation_result 进入 checkpoint 后，恢复写入不应重复执行归并 judge。"""
+
+    existing = LongTermMemory(
+        level=4,
+        category="preference",
+        content="用户喜欢用深色主题。",
+        summary="喜欢深色主题",
+        importance=0.8,
+        confidence=0.9,
+        source_type="chat_message",
+        source_id=1,
+        status="active",
+        content_hash=build_memory_content_hash("preference", "用户喜欢用深色主题。"),
+        updated_at=utc_now(),
+    )
+    session.add(existing)
+    session.commit()
+    session.refresh(existing)
+
+    conversation = create_conversation(session, ConversationCreate(title="归并恢复"))
+    user = _add_message(session, conversation.id, "user", "我喜欢深色模式，尤其是编辑器。")
+    assistant = _add_message(session, conversation.id, "assistant", "我会记住。", user.id)
+    job = _enqueue_memory_job(session, conversation.id, user.id, assistant.id)
+    checkpoint_path = tmp_path / "checkpoints.db"
+    judge_calls: list[int] = []
+
+    def fake_extractor(messages):
+        return {
+            "memories": [
+                {
+                    "should_write": True,
+                    "category": "preference",
+                    "content": "用户喜欢深色模式，尤其是编辑器。",
+                    "summary": "喜欢编辑器深色模式",
+                    "importance": 0.85,
+                    "confidence": 0.95,
+                }
+            ]
+        }
+
+    def fake_judge(candidate, existing_memories):
+        judge_calls.append(len(existing_memories))
+        return {
+            "action": "update",
+            "existing_memory_id": existing.id,
+            "category": "preference",
+            "content": "用户喜欢深色模式，尤其是编辑器。",
+            "summary": "喜欢编辑器深色模式",
+            "importance": 0.85,
+            "confidence": 0.95,
+            "reason": "新记忆补充了编辑器偏好。",
+        }
+
+    run_conversation_memory_graph(
+        job,
+        session_factory=session_factory,
+        checkpoint_path=str(checkpoint_path),
+        memory_extractor=fake_extractor,
+        consolidation_judge=fake_judge,
+        interrupt_after=["consolidate_memories"],
+    )
+    session.expire_all()
+    assert session.get(LongTermMemory, existing.id).content == "用户喜欢用深色主题。"
+
+    run_conversation_memory_graph(
+        job,
+        session_factory=session_factory,
+        checkpoint_path=str(checkpoint_path),
+        memory_extractor=fake_extractor,
+        consolidation_judge=fake_judge,
+    )
+
+    session.expire_all()
+    memories = session.exec(select(LongTermMemory)).all()
+    assert judge_calls == [1]
+    assert len(memories) == 1
+    assert memories[0].content == "用户喜欢深色模式，尤其是编辑器。"
+    assert memories[0].importance == 0.85
+    assert memories[0].confidence == 0.95
 
 
 def test_parse_memory_extraction_response_falls_back_on_invalid_json():
