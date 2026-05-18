@@ -13,10 +13,25 @@ export type ElfMotion =
   | "error"
   | "dragging";
 
+export type ElfEventSource = "jobs" | "chat" | "memory" | "graph" | "workshop" | "system";
+
+export interface ElfEvent {
+  id?: string;
+  source: ElfEventSource;
+  mood: ElfMood;
+  motion?: ElfMotion;
+  message?: string;
+  priority: number;
+  ttlMs?: number;
+  createdAt?: number;
+  dedupeKey?: string;
+  metadata?: Record<string, unknown>;
+}
+
 export interface ElfState {
   mood: ElfMood;
   message: string;
-  source: "jobs" | "chat" | "memory" | "system";
+  source: ElfEventSource;
   priority: number;
   jobId?: number;
   turnId?: number;

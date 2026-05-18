@@ -31,6 +31,9 @@ frontend/src/
 
 - [Job Drawer](./job-drawer.md)
 - [Chat Window](./chat-window.md)
+- [精灵助手](./elf-assistant.md)
+- [精灵事件总线](./elf-event-bus.md)
+- [原创精灵设计](./elf-character-design.md)
 
 ## API 地址
 

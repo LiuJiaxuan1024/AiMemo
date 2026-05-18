@@ -12,6 +12,13 @@ import { ChatComposer } from "./ChatComposer";
 import { ChatGraphPanel } from "./ChatGraphPanel";
 import { ConversationList } from "./ConversationList";
 import { MessageList } from "./MessageList";
+import {
+  emitChatAnswerStartedElfEvent,
+  emitChatDoneElfEvent,
+  emitChatErrorElfEvent,
+  emitChatGraphOpenElfEvent,
+  emitChatNodeElfEvent,
+} from "./chatElfEvents";
 import type { DraftAssistantMessage, ChatTurnGraph, Conversation } from "./types";
 
 export function ChatWindow() {
@@ -26,6 +33,7 @@ export function ChatWindow() {
   const [isGraphLoading, setIsGraphLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const selectedGraphRef = useRef<ChatTurnGraph | null>(null);
+  const hasEmittedAnswerStartedRef = useRef(false);
 
   const activeConversationId = activeConversation?.id;
   const runningNodes = useMemo(
@@ -130,11 +138,15 @@ export function ChatWindow() {
     setError("");
     setIsSending(true);
     setNodeStatuses({});
+    hasEmittedAnswerStartedRef.current = false;
 
     try {
       await streamChat(activeConversationId, content, (streamEvent) => {
         if (streamEvent.event === "turn" || streamEvent.event === "node") {
           setNodeStatuses(streamEvent.data.node_statuses);
+        }
+        if (streamEvent.event === "node") {
+          emitChatNodeElfEvent(streamEvent.data.node);
         }
         if (streamEvent.event === "turn") {
           const { turn_id, user_message, assistant_message } = streamEvent.data;
@@ -151,6 +163,10 @@ export function ChatWindow() {
           );
         }
         if (streamEvent.event === "answer_delta") {
+          if (streamEvent.data.content.length > 0 && !hasEmittedAnswerStartedRef.current) {
+            hasEmittedAnswerStartedRef.current = true;
+            emitChatAnswerStartedElfEvent();
+          }
           setMessages((current) =>
             current.map((message) =>
               message.id === optimisticAssistant.id || message.isStreaming
@@ -161,6 +177,7 @@ export function ChatWindow() {
         }
         if (streamEvent.event === "done") {
           const { user_message, assistant_message } = streamEvent.data.response;
+          emitChatDoneElfEvent(streamEvent.data.turn_id);
           setMessages((current) =>
             current
               .filter(
@@ -175,6 +192,7 @@ export function ChatWindow() {
         }
         if (streamEvent.event === "error") {
           setError(streamEvent.data.message);
+          emitChatErrorElfEvent(streamEvent.data.message, streamEvent.data.turn_id);
         }
       });
       setConversations(await listConversations());
@@ -194,6 +212,7 @@ export function ChatWindow() {
     setSelectedGraph(null);
     setError("");
     try {
+      emitChatGraphOpenElfEvent(message.turn_id);
       setSelectedGraph(
         message.turn_id
           ? await getTurnGraph(activeConversationId, message.turn_id)

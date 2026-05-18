@@ -8,7 +8,8 @@ import {
 } from "react";
 import { AlertTriangle, Loader2 } from "lucide-react";
 
-import { deriveElfStateFromJobs } from "./elfState";
+import { elfEvents } from "./elfEventBus";
+import { useElfRuntime } from "./elfRuntime";
 import { MemoExpressionRenderer } from "./memoExpressionRenderer";
 import type { ElfAssistantProps, ElfMotion, ElfMood } from "./types";
 
@@ -35,6 +36,7 @@ export function ElfAssistant({
   onToggleWorkshop,
 }: ElfAssistantProps) {
   const hasBootstrappedJobsRef = useRef(false);
+  const knownJobIdsRef = useRef<Set<number>>(new Set());
   const observedActiveJobIdsRef = useRef<Set<number>>(new Set());
   const pendingCompletedAnnouncementIdsRef = useRef<Set<number>>(new Set());
   const completedAnnouncementTimersRef = useRef<Map<number, number>>(new Map());
@@ -63,22 +65,23 @@ export function ElfAssistant({
         continue;
       }
 
+      const isKnownJob = knownJobIdsRef.current.has(job.id);
+      const wasObservedActive = observedActiveJobIdsRef.current.has(job.id);
+
       // 首次加载进来的 completed 都是历史任务，不应该被当成“刚刚完成”。
-      // 后续如果一个任务没有在本页被观察到 pending/running，也同样视为历史任务。
-      if (!hasBootstrappedJobsRef.current || !observedActiveJobIdsRef.current.has(job.id)) {
+      // 首次加载之后才出现的新 completed，即使前端没轮询到 pending/running，也应视为刚完成。
+      if (!hasBootstrappedJobsRef.current || (isKnownJob && !wasObservedActive)) {
         next.add(job.id);
       }
     }
 
     return next;
   }, [announcedCompletedJobIds, jobs]);
-  const elfState = useMemo(
-    () =>
-      deriveElfStateFromJobs(jobs, {
-        announcedCompletedJobIds: effectiveAnnouncedCompletedJobIds,
-      }),
-    [effectiveAnnouncedCompletedJobIds, jobs],
-  );
+  const elfRuntime = useElfRuntime({
+    announcedCompletedJobIds: effectiveAnnouncedCompletedJobIds,
+    fallbackJobs: jobs,
+  });
+  const elfState = elfRuntime.state;
   const displayMood = useMemo<ElfMood>(() => {
     if (elfState.mood !== "idle") {
       return elfState.mood;
@@ -93,22 +96,25 @@ export function ElfAssistant({
       return "dragging";
     }
     if (elfState.mood === "thinking") {
-      return "thinking";
+      return elfRuntime.motion ?? "thinking";
     }
     if (elfState.mood === "working") {
-      return "working";
+      return elfRuntime.motion ?? "working";
     }
     if (elfState.mood === "success") {
-      return "success";
+      return elfRuntime.motion ?? "success";
     }
     if (elfState.mood === "error" || elfState.mood === "warning") {
-      return "error";
+      return elfRuntime.motion ?? "error";
+    }
+    if (elfRuntime.motion) {
+      return elfRuntime.motion;
     }
     if (isWorkshopOpen || isHoveringElf) {
       return "look";
     }
     return idleMotion;
-  }, [elfState.mood, idleMotion, isDraggingElf, isHoveringElf, isWorkshopOpen]);
+  }, [elfRuntime.motion, elfState.mood, idleMotion, isDraggingElf, isHoveringElf, isWorkshopOpen]);
 
   useEffect(() => {
     return () => {
@@ -179,9 +185,12 @@ export function ElfAssistant({
         continue;
       }
 
+      const isKnownJob = knownJobIdsRef.current.has(job.id);
+      const wasObservedActive = observedActiveJobIdsRef.current.has(job.id);
+
       // jobs 首次拉取时可能已经包含大量 completed，这些都属于历史快照。
-      // 只有本页实际观察过活跃状态的任务，才允许进入“刚刚完成”的短提醒。
-      if (!hasBootstrappedJobsRef.current || !observedActiveJobIdsRef.current.has(job.id)) {
+      // 后续新出现的 completed job 可能执行很快，前端没看到 active 状态也应该播报。
+      if (!hasBootstrappedJobsRef.current || (isKnownJob && !wasObservedActive)) {
         if (!nextAnnouncedIds.has(job.id)) {
           nextAnnouncedIds.add(job.id);
           shouldUpdateAnnouncedIds = true;
@@ -189,6 +198,7 @@ export function ElfAssistant({
       }
     }
 
+    jobs.forEach((job) => knownJobIdsRef.current.add(job.id));
     hasBootstrappedJobsRef.current = true;
     if (shouldUpdateAnnouncedIds) {
       setAnnouncedCompletedJobIds(nextAnnouncedIds);
@@ -284,6 +294,15 @@ export function ElfAssistant({
       dragMovedRef.current = false;
       return;
     }
+    elfEvents.emit({
+      source: "workshop",
+      mood: "talking",
+      motion: "look",
+      message: isWorkshopOpen ? "我先收起来啦。" : "我把工坊展开给你看。",
+      priority: 80,
+      ttlMs: 1800,
+      dedupeKey: `workshop:${isWorkshopOpen ? "close" : "open"}`,
+    });
     onToggleWorkshop();
   }
 

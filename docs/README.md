@@ -18,6 +18,7 @@
 - [Job Drawer](./frontend/job-drawer.md)
 - [Chat Window](./frontend/chat-window.md)
 - [原创精灵设计](./frontend/elf-character-design.md)
+- [Memo Elf 桌面化架构](./desktop/memo-elf-desktop-architecture.md)
 - [Agent 设计](./agent/README.md)
 - [Note Metadata Graph](./agent/note-metadata-graph.md)
 - [Note Embedding Graph](./agent/note-embedding-graph.md)
