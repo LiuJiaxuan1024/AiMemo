@@ -1,28 +1,53 @@
-# Ai 记 / AiMemo
+# Memo Elf / AiMemo
 
-Ai 记是一个开源的个人记忆笔记应用。`Ai` 既表示 AI，也来自中文“爱”，表达“热爱记录”的含义。
+Memo Elf 是一个本地优先的开源桌面记忆精灵。它会以桌面悬浮精灵的形式陪伴用户，连接本地 AI agent、个人记忆库和未来更多电脑操作能力。
 
-AiMemo aims to be a personal memory notebook powered by AI, built for people who love recording life.
+AiMemo / Ai 记是 Memo Elf 的第一个核心能力：记录笔记、沉淀记忆、检索个人知识，并让 AI 基于这些记忆和用户对话。
+
+`Ai` 既表示 AI，也来自中文“爱”，表达“热爱记录”的含义。
+
+Memo Elf aims to be a personal desktop memory companion. AiMemo is its first built-in memory skill.
 
 ## 项目定位
 
-Ai 记不是传统笔记软件，也不是单纯的聊天机器人。它的目标是：
+这个项目已经从单一的 AI 笔记应用，演进为“桌面精灵 + 记忆系统 + Agent Skills”的本地智能体实验。
+
+当前主线是：
 
 ```text
-记录日常笔记
-将笔记向量化存储
-基于个人知识库进行对话和检索
-通过 LangGraph 管理可恢复的 AI 工作流
-用一个精灵助手把后台任务和记忆状态可视化
+Memo Elf
+  桌面精灵本体。
+  负责陪伴、对话、气泡反馈、表情切换和未来技能入口。
+
+AiMemo Memory Skill
+  Memo Elf 的第一个内置能力。
+  负责笔记、长期记忆、向量检索、Memory Chat Graph 和记忆管理。
+
+Local Operator
+  面向未来的本地电脑操作能力。
+  当前已实现 read-only 文件读取子图，后续再谨慎扩展 write / exec。
 ```
 
-当前项目仍处于早期开发阶段，重点是把核心功能、架构和本地体验跑通。
+换句话说：
+
+```text
+过去：AiMemo with Elf
+现在：Memo Elf with AiMemo Memory Skill
+未来：Memo Elf with Memory / File / Browser / Automation Skills
+```
+
+当前项目仍处于早期开发阶段，重点是把本地后端、桌面精灵、记忆系统、LangGraph 工作流和基础工具调用跑通。
 
 ## 当前能力
 
 已实现的核心能力：
 
 ```text
+桌面外置精灵助手
+桌面精灵气泡对话与多表情切换
+后端精灵事件中心
+Tauri 桌面精灵壳
+打开 AiMemo 主页面
 笔记创建与本地 SQLite 存储
 笔记标题 / 摘要 / 标签自动整理
 笔记 chunk 分片与 embedding 入库
@@ -34,8 +59,6 @@ Memory Chat Graph 对话
 LangGraph checkpoint 持久化
 本地 job 队列与启动恢复
 任务 graph 可视化
-桌面外置精灵助手
-桌面精灵气泡对话与多表情切换
 Local Operator read-only 本地文件读取子图
 前端 Markdown 渲染和基础调试面板
 ```
@@ -84,6 +107,8 @@ backend/
 
 frontend/
   src/
+    app/         AppShell、模块路由
+    pages/       memo/chat/workshop 页面
     features/
       chat/      对话窗口、stream、graph 调试
       elf/       精灵助手
@@ -91,6 +116,11 @@ frontend/
       memories/  长期记忆管理
       notes/     笔记列表、编辑器、详情
     shared/      通用 UI 和 QueryClient
+
+desktop/
+  src-tauri/     Tauri 桌面精灵壳
+  src/           精灵窗口、气泡对话、拖拽和菜单
+  public/elf/    精灵 PNG 表情资源
 
 docs/
   agent/         Agent / graph 设计文档
@@ -262,13 +292,14 @@ http://127.0.0.1:5173/app/
 
 ### 6. 验证
 
-打开前端后，可以先创建一条笔记。如果后端和模型配置正常，稍等片刻后会看到：
+启动后，桌面精灵会出现。你可以先打开 AiMemo 创建一条笔记。如果后端和模型配置正常，稍等片刻后会看到：
 
 ```text
+桌面精灵可以显示气泡反馈
 笔记摘要 / 标签生成
 笔记进入向量化任务
 进入工坊查看后台任务状态
-对话窗口可以基于笔记回答问题
+精灵或对话窗口可以基于记忆回答问题
 ```
 
 更多启动细节和常见问题见：[安装与启动](./docs/setup.md)。
@@ -377,11 +408,15 @@ npm run build
 - [安装与启动](./docs/setup.md)
 - [架构概览](./docs/architecture/overview.md)
 - [流程图](./docs/architecture/flows.md)
+- [Memo Elf 桌面化架构](./docs/desktop/memo-elf-desktop-architecture.md)
+- [外置精灵聊天](./docs/desktop/elf-external-chat.md)
 - [Memory Chat Graph](./docs/agent/memory-chat-graph.md)
 - [Memory Chat Graph 设计草案](./docs/agent/memory-chat-graph-design.md)
+- [Local Operator Agent](./docs/agent/local-operator-agent.md)
 - [本地任务系统](./docs/backend/jobs.md)
 - [向量存储](./docs/backend/vector-storage.md)
 - [精灵助手](./docs/frontend/elf-assistant.md)
+- [精灵图片生成提示词模板](./docs/frontend/elf-image-prompts.md)
 - [前端体验优化报告](./docs/frontend/ui-optimization-report.md)
 
 ## 注意事项
