@@ -15,10 +15,10 @@ frontend/src/features/chat/
 主界面在工作区顶部增加：
 
 ```text
-笔记 / 对话
+/app/chat
 ```
 
-切换到 `对话` 后进入聊天窗口。
+聊天模块已经从笔记页面中拆出，由 React Router 挂载到 `/app/chat`。
 
 ## 当前能力
 
@@ -85,6 +85,8 @@ L3 检索证据
 
 Mermaid 图结构来自后端 LangGraph `draw_mermaid()`，前端只负责渲染。
 状态染色由后端根据 ChatTurn 的 `node_statuses` 注入 Mermaid class。
+
+Graph 调试面板使用 `React.lazy` 按需加载，Mermaid 渲染器也只在打开 graph 时动态加载。
 
 ## UI 设计
 

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Memo Elf",
+  "version": "0.1.0",
+  "identifier": "com.aimemo.memoelf",
+  "build": {
+    "beforeDevCommand": "npm run web:dev",
+    "beforeBuildCommand": "npm run web:build",
+    "devUrl": "http://127.0.0.1:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Memo Elf",
+        "label": "elf",
+        "width": 300,
+        "height": 420,
+        "x": 1160,
+        "y": 520,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "resizable": false,
+        "skipTaskbar": true,
+        "shadow": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": "all",
+    "icon": []
+  }
+}

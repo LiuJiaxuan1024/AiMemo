@@ -1,14 +1,19 @@
-# Job Drawer
+# Workshop / Job Graph
 
-Job Drawer 是右侧悬浮的精灵工坊，用于调试 Ai 记的 job、graph 和 checkpoint 执行状态，并管理 L4 长期记忆。
+Workshop 是当前调试 Ai 记 job、graph、checkpoint 执行状态和管理 L4 长期记忆的主入口。
+
+历史上的右侧 `JobDrawer` 组件仍保留为兼容组件，但主要入口已经迁移到：
+
+```text
+/app/workshop/jobs
+/app/workshop/memories
+```
 
 ## 交互
 
-- 鼠标悬停右侧 `精灵` 按钮时展开。
-- 点击按钮或面板内 `固定` 可以保持展开。
-- `任务` tab 会轮询后台任务列表。
+- `/app/workshop/jobs` 会轮询后台任务列表。
 - 选择某个 job 后，会读取对应 LangGraph 流程图。
-- `记忆` tab 会读取长期记忆列表，支持筛选、编辑、停用和重新启用。
+- `/app/workshop/memories` 会读取长期记忆列表，支持筛选、编辑、停用、重新启用和删除停用记忆。
 
 ## 当前显示内容
 
@@ -40,12 +45,14 @@ frontend/src/features/memories/
 
 ## 记忆管理
 
-`记忆` tab 使用 Memories API：
+`/app/workshop/memories` 使用 Memories API：
 
 ```text
 GET /api/memories
-PATCH /api/memories/{id}
-DELETE /api/memories/{id}
+PATCH  /api/memories/{id}
+POST   /api/memories/{id}/archive
+POST   /api/memories/{id}/activate
+DELETE /api/memories/{id}/hard
 ```
 
 当前支持：
@@ -56,6 +63,7 @@ category 筛选
 编辑 content / summary / category / importance / confidence / status
 停用生效记忆
 重新启用已停用记忆
+删除已停用记忆
 ```
 
 停用后的记忆底层状态为 `archived`，不会进入 Memory Chat Graph 的 L4 worker；
@@ -63,6 +71,6 @@ category 筛选
 
 ## Mermaid 渲染
 
-前端使用动态 `import("mermaid")` 渲染流程图，只有打开 graph 时才加载 Mermaid，避免首屏加载过重。
+前端使用共享 `MermaidGraphView` 渲染流程图。`JobGraphView` 和 Mermaid 本身都按需 lazy load，只有打开 graph 时才加载，避免首屏加载过重。
 
 后端负责返回 LangGraph 原生 Mermaid，并追加当前节点高亮样式。

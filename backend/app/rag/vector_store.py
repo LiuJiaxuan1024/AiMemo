@@ -47,8 +47,15 @@ def upsert_chunk_embedding(chunk_id: int, embedding: list[float]) -> None:
 
 
 def delete_note_chunk_embeddings(chunk_ids: list[int]) -> None:
+    """删除 chunk 对应的向量。
+
+    删除是幂等清理动作：测试环境或首次启动时向量表可能还没创建，此时先确保表存在，
+    避免“没有可删内容”反过来打断笔记修改/永久删除流程。
+    """
+
     if not chunk_ids:
         return
+    ensure_vector_store()
     with connect_vector_store() as connection:
         connection.executemany(
             f"DELETE FROM {VECTOR_TABLE_NAME} WHERE rowid = ?",

@@ -1,6 +1,6 @@
-import { useEffect, useId, useState } from "react";
 import { X } from "lucide-react";
 
+import { MermaidGraphView } from "../graph/MermaidGraphView";
 import { Button, EmptyState, PanelHeader } from "../../shared/ui";
 import type { ChatTurnGraph } from "./types";
 
@@ -11,53 +11,6 @@ interface ChatGraphPanelProps {
 }
 
 export function ChatGraphPanel({ graph, isLoading, onClose }: ChatGraphPanelProps) {
-  const id = useId().replace(/:/g, "");
-  const [svg, setSvg] = useState("");
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    if (!graph) {
-      setSvg("");
-      setError("");
-      return;
-    }
-
-    let canceled = false;
-    import("mermaid")
-      .then((module) => {
-        const mermaid = module.default;
-        mermaid.initialize({
-          startOnLoad: false,
-          securityLevel: "loose",
-          theme: "base",
-          themeVariables: {
-            fontFamily: "Inter, ui-sans-serif, system-ui",
-            primaryColor: "#f8fafc",
-            primaryBorderColor: "#cbd5e1",
-            lineColor: "#98a2b3",
-            textColor: "#1d2433",
-          },
-        });
-        return mermaid.render(`chat-graph-${id}-${graph.turn_id}`, graph.mermaid);
-      })
-      .then((result) => {
-        if (!canceled) {
-          setSvg(result.svg);
-          setError("");
-        }
-      })
-      .catch((currentError: unknown) => {
-        if (!canceled) {
-          setSvg("");
-          setError(currentError instanceof Error ? currentError.message : "流程图渲染失败");
-        }
-      });
-
-    return () => {
-      canceled = true;
-    };
-  }, [graph, id]);
-
   return (
     <aside className="chat-debug-panel">
       <PanelHeader
@@ -73,13 +26,19 @@ export function ChatGraphPanel({ graph, isLoading, onClose }: ChatGraphPanelProp
 
       {isLoading ? <EmptyState className="chat-debug-empty">正在读取 graph...</EmptyState> : null}
       {!isLoading && !graph ? <EmptyState className="chat-debug-empty">暂无 graph 数据</EmptyState> : null}
-      {error ? <pre className="chat-debug-error">{error}</pre> : null}
 
       {graph ? (
         <div className="chat-debug-content">
-          <section className="chat-graph-svg">
-            {svg ? <div dangerouslySetInnerHTML={{ __html: svg }} /> : null}
-          </section>
+          <MermaidGraphView
+            chart={graph.mermaid}
+            className="chat-graph-svg"
+            errorClassName="chat-debug-error"
+            renderKey={graph.turn_id}
+            themeVariables={{
+              primaryColor: "#f8fafc",
+              primaryBorderColor: "#cbd5e1",
+            }}
+          />
 
           <section className="chat-debug-section">
             <h4>性能</h4>

@@ -25,7 +25,7 @@ export function MessageList({ endRef, messages, onOpenGraph }: MessageListProps)
             ) : (
               <p>{message.content}</p>
             )}
-            {message.role === "assistant" && (message.id > 0 || message.turn_id) ? (
+            {message.role === "assistant" && message.turn_id ? (
               <Button
                 aria-label="查看本轮 graph"
                 onClick={() => onOpenGraph(message)}

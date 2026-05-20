@@ -27,6 +27,16 @@ class RetrievedChunkPayload(TypedDict):
     score: float
 
 
+class ElfBubblePayload(TypedDict):
+    """外置精灵气泡回复片段。
+
+    text 是该气泡展示的完整语义片段；emoji 用于驱动桌面精灵表情或动作。
+    """
+
+    text: str
+    emoji: str
+
+
 class ContextLayerPayload(TypedDict):
     """金字塔上下文单层 payload。
 
@@ -69,8 +79,13 @@ class MemoryChatGraphState(TypedDict, total=False):
     context_l2_layer: ContextLayerPayload
     context_l3_layer: ContextLayerPayload
     context_l4_layer: ContextLayerPayload
+    # 本轮本地 read-only 工具结果。为空表示没有触发 Local Operator。
+    local_operator_context: str
     prompt_context: str
+    # answer_mode 控制回答生成分支：普通 AiMemo 对话走 text，外置精灵走 elf_bubble。
+    answer_mode: Literal["text", "elf_bubble"]
     assistant_answer: str
+    elf_bubble_answer_parts: list[ElfBubblePayload]
     # 流式对话会在 graph 启动前先创建业务消息，刷新页面时也能看到本轮对话。
     # 非流式调用可以不传这两个字段，persist_messages 会按旧路径创建消息。
     user_message_id: int

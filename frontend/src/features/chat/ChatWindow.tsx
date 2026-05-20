@@ -1,15 +1,13 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   createConversation,
-  getMessageGraph,
   getTurnGraph,
   listConversations,
   listMessages,
   streamChat,
 } from "./chatApi";
 import { ChatComposer } from "./ChatComposer";
-import { ChatGraphPanel } from "./ChatGraphPanel";
 import { ConversationList } from "./ConversationList";
 import { MessageList } from "./MessageList";
 import {
@@ -20,6 +18,10 @@ import {
   emitChatNodeElfEvent,
 } from "./chatElfEvents";
 import type { DraftAssistantMessage, ChatTurnGraph, Conversation } from "./types";
+
+const ChatGraphPanel = lazy(() =>
+  import("./ChatGraphPanel").then((module) => ({ default: module.ChatGraphPanel })),
+);
 
 export function ChatWindow() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -212,12 +214,11 @@ export function ChatWindow() {
     setSelectedGraph(null);
     setError("");
     try {
+      if (!message.turn_id) {
+        throw new Error("这条消息没有关联的 ChatTurn Graph。");
+      }
       emitChatGraphOpenElfEvent(message.turn_id);
-      setSelectedGraph(
-        message.turn_id
-          ? await getTurnGraph(activeConversationId, message.turn_id)
-          : await getMessageGraph(activeConversationId, message.id),
-      );
+      setSelectedGraph(await getTurnGraph(activeConversationId, message.turn_id));
     } catch (currentError) {
       setError(currentError instanceof Error ? currentError.message : "读取 graph 失败");
     } finally {
@@ -256,11 +257,13 @@ export function ChatWindow() {
       </section>
 
       {selectedGraph || isGraphLoading ? (
-        <ChatGraphPanel
-          graph={selectedGraph}
-          isLoading={isGraphLoading}
-          onClose={() => setSelectedGraph(null)}
-        />
+        <Suspense fallback={<div className="chat-debug-panel">正在加载 Graph 调试面板...</div>}>
+          <ChatGraphPanel
+            graph={selectedGraph}
+            isLoading={isGraphLoading}
+            onClose={() => setSelectedGraph(null)}
+          />
+        </Suspense>
       ) : null}
     </section>
   );

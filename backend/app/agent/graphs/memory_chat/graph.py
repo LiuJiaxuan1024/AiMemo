@@ -8,6 +8,7 @@ from sqlmodel import Session
 from app.agent.checkpoints import get_sqlite_checkpointer
 from app.agent.graphs.memory_chat.nodes import (
     AnswerGenerator,
+    ElfBubbleAnswerGenerator,
     NoteRetriever,
     RetrievalPlanner,
     build_l0_current_input_node,
@@ -15,11 +16,14 @@ from app.agent.graphs.memory_chat.nodes import (
     build_l2_summary_node,
     build_l3_retrieved_memory_node,
     build_l4_core_memory_node,
+    build_generate_elf_bubble_answer_node,
     build_generate_answer_node,
     build_load_turn_state_node,
+    build_local_operator_context_node,
     build_merge_prompt_context_node,
     build_persist_messages_node,
     dispatch_context_workers,
+    route_answer_mode,
 )
 from app.agent.graphs.memory_chat.state import MemoryChatGraphState
 from app.agent.streaming import map_langgraph_stream_chunk
@@ -35,6 +39,7 @@ CONTEXT_WORKER_NODES = [
     "build_l2_summary",
     "build_l1_recent_messages",
     "build_l0_current_input",
+    "build_local_operator_context",
 ]
 
 
@@ -44,6 +49,7 @@ def build_memory_chat_graph(
     planner: RetrievalPlanner | None = None,
     retriever: NoteRetriever | None = None,
     answer_generator: AnswerGenerator | None = None,
+    bubble_answer_generator: ElfBubbleAnswerGenerator | None = None,
 ):
     """构建记忆对话 graph。
 
@@ -68,8 +74,13 @@ def build_memory_chat_graph(
     graph.add_node("build_l2_summary", build_l2_summary_node())
     graph.add_node("build_l1_recent_messages", build_l1_recent_messages_node())
     graph.add_node("build_l0_current_input", build_l0_current_input_node())
+    graph.add_node("build_local_operator_context", build_local_operator_context_node(session_factory))
     graph.add_node("merge_prompt_context", build_merge_prompt_context_node())
     graph.add_node("generate_answer", build_generate_answer_node(answer_generator))
+    graph.add_node(
+        "generate_elf_bubble_answer",
+        build_generate_elf_bubble_answer_node(bubble_answer_generator),
+    )
     graph.add_node("persist_messages", build_persist_messages_node(session_factory))
 
     graph.add_edge(START, "load_turn_state")
@@ -86,8 +97,14 @@ def build_memory_chat_graph(
     graph.add_edge("build_l2_summary", "merge_prompt_context")
     graph.add_edge("build_l1_recent_messages", "merge_prompt_context")
     graph.add_edge("build_l0_current_input", "merge_prompt_context")
-    graph.add_edge("merge_prompt_context", "generate_answer")
+    graph.add_edge("build_local_operator_context", "merge_prompt_context")
+    graph.add_conditional_edges(
+        "merge_prompt_context",
+        route_answer_mode,
+        ["generate_answer", "generate_elf_bubble_answer"],
+    )
     graph.add_edge("generate_answer", "persist_messages")
+    graph.add_edge("generate_elf_bubble_answer", "persist_messages")
     graph.add_edge("persist_messages", END)
     return graph
 
@@ -101,9 +118,11 @@ def run_memory_chat_graph(
     planner: RetrievalPlanner | None = None,
     retriever: NoteRetriever | None = None,
     answer_generator: AnswerGenerator | None = None,
+    bubble_answer_generator: ElfBubbleAnswerGenerator | None = None,
     interrupt_after: list[str] | None = None,
     user_message_id: int | None = None,
     assistant_message_id: int | None = None,
+    answer_mode: str = "text",
 ) -> MemoryChatGraphState:
     """执行一轮记忆对话。
 
@@ -121,6 +140,7 @@ def run_memory_chat_graph(
             planner=planner,
             retriever=retriever,
             answer_generator=answer_generator,
+            bubble_answer_generator=bubble_answer_generator,
         ).compile(checkpointer=checkpointer)
         config = {"configurable": {"thread_id": thread_id}}
         snapshot = app.get_state(config)
@@ -130,6 +150,7 @@ def run_memory_chat_graph(
             else {
                 "conversation_id": conversation_id,
                 "user_message": user_message,
+                "answer_mode": answer_mode,
                 "user_message_id": user_message_id or 0,
                 "assistant_message_id": assistant_message_id or 0,
             }
@@ -160,8 +181,10 @@ def stream_memory_chat_graph(
     planner: RetrievalPlanner | None = None,
     retriever: NoteRetriever | None = None,
     answer_generator: AnswerGenerator | None = None,
+    bubble_answer_generator: ElfBubbleAnswerGenerator | None = None,
     user_message_id: int | None = None,
     assistant_message_id: int | None = None,
+    answer_mode: str = "text",
 ):
     """以 LangGraph 原生流执行一轮记忆对话。
 
@@ -183,6 +206,7 @@ def stream_memory_chat_graph(
             planner=planner,
             retriever=retriever,
             answer_generator=answer_generator,
+            bubble_answer_generator=bubble_answer_generator,
         ).compile(checkpointer=checkpointer)
         config = {"configurable": {"thread_id": thread_id}}
         snapshot = app.get_state(config)
@@ -192,6 +216,7 @@ def stream_memory_chat_graph(
             else {
                 "conversation_id": conversation_id,
                 "user_message": user_message,
+                "answer_mode": answer_mode,
                 "user_message_id": user_message_id or 0,
                 "assistant_message_id": assistant_message_id or 0,
             }
@@ -216,6 +241,13 @@ def stream_memory_chat_graph(
                 elif event["event"] == "answer_delta":
                     yield {
                         "event": "answer_delta",
+                        "node": event["node"],
+                        "content": event["content"],
+                        "metadata": event["metadata"],
+                    }
+                elif event["event"] == "bubble_delta":
+                    yield {
+                        "event": "bubble_delta",
                         "node": event["node"],
                         "content": event["content"],
                         "metadata": event["metadata"],

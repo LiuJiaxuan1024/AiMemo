@@ -101,6 +101,11 @@ def update_memory(
         memory.category = _normalize_category(payload.category)
         category_changed = True
 
+    if "memory_key" in payload.model_fields_set:
+        if payload.memory_key is None:
+            raise _bad_request("memory_key cannot be null.")
+        memory.memory_key = _normalize_memory_key(payload.memory_key)
+
     if "content" in payload.model_fields_set:
         if payload.content is None:
             raise _bad_request("content cannot be null.")
@@ -190,6 +195,25 @@ def _normalize_category(category: str) -> str:
     return normalized
 
 
+def _normalize_memory_key(memory_key: str) -> str:
+    """归一化长期记忆槽位键。
+
+    memory_key 用来表示“这条记忆属于哪个稳定槽位”，例如 user.preferred_name。
+    它允许为空，表示当前记忆还没有被归入稳定槽位；非空时只保留简单 ASCII
+    字符，方便后续跨模型、跨端和人工编辑时保持一致。
+    """
+
+    normalized = memory_key.strip().lower()
+    if not normalized:
+        return ""
+    if len(normalized) > 120:
+        raise _bad_request("memory_key is too long.")
+    allowed = set("abcdefghijklmnopqrstuvwxyz0123456789._:-")
+    if any(character not in allowed for character in normalized):
+        raise _bad_request("memory_key contains unsupported characters.")
+    return normalized
+
+
 def _validate_status(memory_status: str) -> str:
     normalized = memory_status.strip().lower()
     if normalized not in ALLOWED_MEMORY_STATUSES:
@@ -223,6 +247,7 @@ def _to_memory_read(memory: LongTermMemory) -> MemoryRead:
         id=memory.id or 0,
         level=memory.level,
         category=memory.category,
+        memory_key=memory.memory_key,
         content=memory.content,
         summary=memory.summary,
         importance=memory.importance,

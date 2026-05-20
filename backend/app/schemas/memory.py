@@ -9,6 +9,7 @@ class MemoryRead(BaseModel):
     id: int
     level: int
     category: str
+    memory_key: str
     content: str
     summary: str
     importance: float
@@ -52,6 +53,7 @@ class MemoryUpdate(BaseModel):
     """
 
     category: str | None = Field(default=None, max_length=40)
+    memory_key: str | None = Field(default=None, max_length=120)
     content: str | None = None
     summary: str | None = None
     importance: float | None = None

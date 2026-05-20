@@ -157,6 +157,7 @@ def extract_long_term_memories(messages: list[ChatMessagePayload]) -> dict[str, 
         "{"
         "\"should_write\":true,"
         "\"category\":\"preference|identity|goal|instruction|event|fact\","
+        "\"memory_key\":\"稳定槽位键，可为空，例如 user.preferred_name\","
         "\"content\":\"用一句中文写成稳定长期记忆\","
         "\"summary\":\"更短的摘要\","
         "\"importance\":0.0,"
@@ -167,6 +168,8 @@ def extract_long_term_memories(messages: list[ChatMessagePayload]) -> dict[str, 
         "}\n\n"
         "判断原则：\n"
         "- 只保留未来多次对话仍有帮助的信息，例如稳定偏好、身份、长期目标、长期指令。\n"
+        "- 能归入稳定槽位时填写 memory_key，例如用户希望被如何称呼用 user.preferred_name。\n"
+        "- 同一个 memory_key 代表同一条可更新记忆，即使 category 表达不同也应归并。\n"
         "- 临时闲聊、一次性问题、模型自己的回答、不确定猜测不要写入。\n"
         "- 如果没有值得记住的信息，返回 {\"memories\":[]}。\n\n"
         "格式要求：所有 key 和字符串必须使用英文双引号；字段之间必须有英文逗号；"
@@ -230,9 +233,11 @@ def _normalize_memory(raw_memory: Any) -> dict[str, Any] | None:
     category = str(raw_memory.get("category") or "fact").strip().lower()
     if category not in {"preference", "identity", "goal", "instruction", "event", "fact"}:
         category = "fact"
+    memory_key = _normalize_memory_key(str(raw_memory.get("memory_key") or ""))
     summary = str(raw_memory.get("summary") or content).strip()
     return {
         "category": category,
+        "memory_key": memory_key,
         "content": content[:1000],
         "summary": summary[:300],
         "importance": importance,
@@ -253,6 +258,7 @@ def _normalize_decision(raw_decision: Any) -> dict[str, Any] | None:
     category = str(raw_decision.get("category") or "fact").strip().lower()
     if category not in {"preference", "identity", "goal", "instruction", "event", "fact"}:
         category = "fact"
+    memory_key = _normalize_memory_key(str(raw_decision.get("memory_key") or ""))
     existing_memory_id = raw_decision.get("existing_memory_id")
     try:
         existing_memory_id = int(existing_memory_id) if existing_memory_id is not None else None
@@ -262,6 +268,7 @@ def _normalize_decision(raw_decision: Any) -> dict[str, Any] | None:
         "action": action,
         "existing_memory_id": existing_memory_id,
         "category": category,
+        "memory_key": memory_key,
         "content": content[:1000],
         "summary": str(raw_decision.get("summary") or content).strip()[:300],
         "importance": _clamp_float(raw_decision.get("importance", 0.0)),
@@ -284,6 +291,7 @@ def _apply_create_decision(
     memory = LongTermMemory(
         level=4,
         category=decision["category"],
+        memory_key=decision["memory_key"],
         content=decision["content"],
         summary=decision["summary"],
         importance=decision["importance"],
@@ -312,6 +320,8 @@ def _apply_update_decision(
         return None
 
     memory.category = decision["category"]
+    if decision["memory_key"]:
+        memory.memory_key = decision["memory_key"]
     memory.content = decision["content"]
     memory.summary = decision["summary"]
     memory.importance = max(memory.importance, decision["importance"])
@@ -329,6 +339,22 @@ def _clamp_float(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
     return max(0.0, min(1.0, number))
+
+
+def _normalize_memory_key(memory_key: str) -> str:
+    """归一化模型输出的长期记忆槽位键。
+
+    槽位键是给系统用的稳定索引，不展示给模型之外的普通用户。这里允许为空；
+    非空时限制为简单 ASCII，避免模型输出中文或空格导致后续查询不稳定。
+    """
+
+    normalized = memory_key.strip().lower()
+    if not normalized:
+        return ""
+    allowed = set("abcdefghijklmnopqrstuvwxyz0123456789._:-")
+    if any(character not in allowed for character in normalized):
+        return ""
+    return normalized[:120]
 
 
 def _get_message(session: Session, conversation_id: int, message_id: int) -> ChatMessage:

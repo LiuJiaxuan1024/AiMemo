@@ -63,6 +63,6 @@ class ChatMessageRead(BaseModel):
     checkpoint_id: str | None
     status: str
     token_count: int
+    turn_id: int | None = None
     created_at: datetime
     updated_at: datetime
-

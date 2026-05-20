@@ -14,5 +14,6 @@ if ((-not $SkipInstall) -or (-not (Test-Path "node_modules"))) {
   npm install
 }
 
-Write-Host "Starting AiMemo frontend at http://127.0.0.1:5173 ..."
+Write-Host "Starting AiMemo frontend dev server at http://127.0.0.1:5173/app/ ..."
+Write-Host "Product entry remains http://127.0.0.1:8000/app after frontend build."
 npm run dev -- --host 127.0.0.1

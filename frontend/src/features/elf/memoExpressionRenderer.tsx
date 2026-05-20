@@ -9,10 +9,31 @@ const MEMO_EXPRESSION_BY_MOOD: Record<ElfMood, string> = {
   success: "/elf/memo/04_success_smile.png",
   warning: "/elf/memo/05_error_worried.png",
   error: "/elf/memo/05_error_worried.png",
-  talking: "/elf/memo/07_curious.png",
+  talking: "/elf/memo/18_relaxed.png",
 };
 
-const MEMO_EXPRESSION_ASSETS = Array.from(new Set(Object.values(MEMO_EXPRESSION_BY_MOOD)));
+const MEMO_EXPRESSION_ASSETS = [
+  "/elf/memo/01_idle_soft.png",
+  "/elf/memo/02_thinking.png",
+  "/elf/memo/03_working_focus.png",
+  "/elf/memo/04_success_smile.png",
+  "/elf/memo/05_error_worried.png",
+  "/elf/memo/06_sleepy.png",
+  "/elf/memo/07_curious.png",
+  "/elf/memo/08_memory_glow.png",
+  "/elf/memo/09_shy_blush.png",
+  "/elf/memo/10_angry_pout.png",
+  "/elf/memo/11_surprised.png",
+  "/elf/memo/12_sad_teary.png",
+  "/elf/memo/13_wronged_pout.png",
+  "/elf/memo/14_confused.png",
+  "/elf/memo/15_proud.png",
+  "/elf/memo/16_playful_wink.png",
+  "/elf/memo/17_serious.png",
+  "/elf/memo/18_relaxed.png",
+  "/elf/memo/19_encouraging.png",
+  "/elf/memo/20_speechless.png",
+];
 
 interface MemoExpressionRendererProps {
   mood: ElfMood;

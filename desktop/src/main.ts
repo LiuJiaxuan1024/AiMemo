@@ -1,0 +1,735 @@
+import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+
+import "./styles.css";
+
+const bubble = document.querySelector<HTMLDivElement>("#bubble");
+const elf = document.querySelector<HTMLButtonElement>("#elf");
+const elfImage = document.querySelector<HTMLImageElement>("#elf-image");
+const elfMenu = document.querySelector<HTMLElement>("#elf-menu");
+const openAppButton = document.querySelector<HTMLButtonElement>("#open-app");
+const chatToggleButton = document.querySelector<HTMLButtonElement>("#chat-toggle");
+const chatPanel = document.querySelector<HTMLFormElement>("#chat-panel");
+const chatInput = document.querySelector<HTMLTextAreaElement>("#chat-input");
+const chatSendButton = document.querySelector<HTMLButtonElement>("#chat-send");
+const currentWindow = getCurrentWindow();
+const ELF_EVENTS_URL = "http://127.0.0.1:8000/api/elf/events";
+const ELF_CHAT_STREAM_URL = "http://127.0.0.1:8000/api/elf/chat/stream";
+
+let dragStart:
+  | {
+      x: number;
+      y: number;
+    }
+  | null = null;
+let isDragging = false;
+let suppressClick = false;
+let suppressClickTimer: number | null = null;
+let lastElfEventId = 0;
+let bubbleHideTimer: number | null = null;
+let bubbleSequenceTimer: number | null = null;
+let isElfChatRunning = false;
+
+elf?.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0) {
+    return;
+  }
+
+  dragStart = {
+    x: event.clientX,
+    y: event.clientY,
+  };
+  isDragging = false;
+  elf.setPointerCapture(event.pointerId);
+});
+
+elf?.addEventListener("pointermove", async (event) => {
+  if (!dragStart || isDragging) {
+    return;
+  }
+
+  const deltaX = Math.abs(event.clientX - dragStart.x);
+  const deltaY = Math.abs(event.clientY - dragStart.y);
+  if (deltaX <= 5 && deltaY <= 5) {
+    return;
+  }
+
+  isDragging = true;
+  suppressNextClickBriefly();
+  hideElfMenu();
+  // 只有确认用户真的在拖动后才交给 Tauri，保留普通点击能力。
+  await currentWindow.startDragging();
+});
+
+elf?.addEventListener("pointerup", endPointerInteraction);
+elf?.addEventListener("pointercancel", endPointerInteraction);
+elf?.addEventListener("lostpointercapture", endPointerInteraction);
+
+elf?.addEventListener("click", () => {
+  if (suppressClick) {
+    suppressClick = false;
+    return;
+  }
+  toggleElfMenu();
+});
+
+openAppButton?.addEventListener("click", () => {
+  hideElfMenu();
+  openAiMemo().catch(() => setBubble("打开 AiMemo 失败。"));
+});
+
+chatToggleButton?.addEventListener("click", () => {
+  hideElfMenu();
+  toggleChatPanel();
+});
+
+chatPanel?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const message = chatInput?.value.trim() ?? "";
+  if (!message || isElfChatRunning) {
+    return;
+  }
+  if (chatInput) {
+    chatInput.value = "";
+    autoResizeChatInput();
+  }
+  streamElfChat(message).catch(() => {
+    setBubble("刚才没连上对话服务。");
+    clearBubbleAfter(4500);
+  });
+});
+
+chatInput?.addEventListener("input", () => {
+  autoResizeChatInput();
+});
+
+chatInput?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    chatPanel?.requestSubmit();
+  }
+});
+
+window.addEventListener("pointerdown", (event) => {
+  if (!(event.target instanceof Node)) {
+    return;
+  }
+  if (!elfMenu?.contains(event.target) && !elf?.contains(event.target) && !chatPanel?.contains(event.target)) {
+    hideElfMenu();
+  }
+});
+
+checkBackendHealth().catch(() => {
+  setBubble("后端还没连上。");
+});
+startElfEventPolling();
+
+async function checkBackendHealth() {
+  try {
+    const isHealthy = await invoke<boolean>("check_backend_health");
+    if (!isHealthy) {
+      setBubble("后端还没准备好。");
+      return;
+    }
+    setBubble("我在这里，点我打开 AiMemo。");
+  } catch {
+    setBubble("后端还没启动。");
+  }
+}
+
+async function openAiMemo() {
+  setBubble("我把 AiMemo 打开给你。");
+  await invoke("open_aimemo");
+}
+
+function setBubble(message: string) {
+  if (bubble) {
+    bubble.textContent = message;
+    bubble.classList.add("visible");
+  }
+}
+
+function showChatBubble(part: ChatBubblePart, ttlMs = 5200) {
+  setBubble(part.text);
+  if (elf) {
+    elf.dataset.mood = moodFromEmoji(part.emoji);
+    elf.dataset.motion = motionFromEmoji(part.emoji);
+  }
+  setElfExpression(expressionFromEmoji(part.emoji));
+  clearBubbleAfter(ttlMs, { resetExpression: true });
+}
+
+function clearBubbleAfter(ttlMs = 4000, options: { resetExpression?: boolean } = {}) {
+  if (bubbleHideTimer !== null) {
+    window.clearTimeout(bubbleHideTimer);
+  }
+  bubbleHideTimer = window.setTimeout(() => {
+    bubble?.classList.remove("visible");
+    if (options.resetExpression && !isElfChatRunning && bubbleSequenceTimer === null) {
+      resetElfExpression();
+    }
+    bubbleHideTimer = null;
+  }, ttlMs);
+}
+
+function toggleElfMenu() {
+  if (!elfMenu) {
+    return;
+  }
+  const isOpen = elfMenu.classList.toggle("open");
+  elfMenu.setAttribute("aria-hidden", String(!isOpen));
+}
+
+function hideElfMenu() {
+  if (!elfMenu) {
+    return;
+  }
+  elfMenu.classList.remove("open");
+  elfMenu.setAttribute("aria-hidden", "true");
+}
+
+function toggleChatPanel() {
+  if (!chatPanel) {
+    return;
+  }
+  const isOpen = chatPanel.classList.toggle("open");
+  chatPanel.setAttribute("aria-hidden", String(!isOpen));
+  if (isOpen) {
+    window.setTimeout(() => {
+      chatInput?.focus();
+      autoResizeChatInput();
+    }, 0);
+  }
+}
+
+function hideChatPanel() {
+  if (!chatPanel) {
+    return;
+  }
+  chatPanel.classList.remove("open");
+  chatPanel.setAttribute("aria-hidden", "true");
+}
+
+function endPointerInteraction() {
+  dragStart = null;
+  isDragging = false;
+}
+
+function suppressNextClickBriefly() {
+  suppressClick = true;
+  if (suppressClickTimer !== null) {
+    window.clearTimeout(suppressClickTimer);
+  }
+  // Tauri 接管窗口拖拽后，WebView 不一定稳定收到 pointerup/click。
+  // 所以点击抑制必须有时间兜底，避免一次拖拽后精灵菜单永远打不开。
+  suppressClickTimer = window.setTimeout(() => {
+    suppressClick = false;
+    suppressClickTimer = null;
+  }, 450);
+}
+
+async function startElfEventPolling() {
+  window.setInterval(() => {
+    pollElfEvents().catch(() => {
+      // 轮询失败通常只是后端重启或未启动。这里保持安静，避免桌面精灵刷屏。
+    });
+  }, 1000);
+}
+
+async function pollElfEvents() {
+  const response = await fetch(`${ELF_EVENTS_URL}?after_id=${lastElfEventId}&limit=20`);
+  if (!response.ok) {
+    return;
+  }
+
+  const payload = (await response.json()) as {
+    events?: ElfEvent[];
+    latest_id?: number;
+  };
+  const events = payload.events ?? [];
+  for (const event of events) {
+    lastElfEventId = Math.max(lastElfEventId, event.id);
+    applyElfEvent(event);
+  }
+}
+
+function applyElfEvent(event: ElfEvent) {
+  if (isElfChatRunning) {
+    return;
+  }
+  if (event.message) {
+    setBubble(event.message);
+    clearBubbleAfter(event.ttl_ms ?? 4000);
+  }
+
+  if (!elf) {
+    return;
+  }
+  elf.dataset.mood = event.mood;
+  if (event.motion) {
+    elf.dataset.motion = event.motion;
+  }
+  setElfExpression(expressionFromMood(event.mood));
+}
+
+async function streamElfChat(message: string) {
+  isElfChatRunning = true;
+  setChatInputEnabled(false);
+  hideChatPanel();
+  clearBubbleSequence();
+  showChatBubble({ text: "嗯，我听着。", emoji: "thinking" }, 2600);
+
+  let answer = "";
+  let graphBubbles: ChatBubblePart[] = [];
+  try {
+    const response = await fetch(ELF_CHAT_STREAM_URL, {
+      body: JSON.stringify({ message }),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      method: "POST",
+    });
+
+    if (!response.ok || !response.body) {
+      throw new Error(`Elf chat failed with ${response.status}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const rawEvents = buffer.split("\n\n");
+      buffer = rawEvents.pop() ?? "";
+      for (const rawEvent of rawEvents) {
+        const event = parseSseEvent(rawEvent);
+        if (!event) {
+          continue;
+        }
+        if (event.event === "answer_delta") {
+          answer += String(event.data.content ?? "");
+        }
+        if (event.event === "done" && Array.isArray(event.data.bubbles)) {
+          graphBubbles = normalizeGraphBubbles(event.data.bubbles);
+        }
+        if (event.event === "error") {
+          throw new Error(String(event.data.message ?? "Elf chat error"));
+        }
+      }
+    }
+
+    if (buffer.trim()) {
+      const event = parseSseEvent(buffer);
+      if (event?.event === "answer_delta") {
+        answer += String(event.data.content ?? "");
+      }
+      if (event?.event === "done" && Array.isArray(event.data.bubbles)) {
+        graphBubbles = normalizeGraphBubbles(event.data.bubbles);
+      }
+    }
+
+    // 回答流结束后稍等片刻再切气泡，避免用户看到气泡在 token 级别闪烁。
+    window.setTimeout(() => {
+      playBubbleSequence(graphBubbles.length > 0 ? graphBubbles : splitAnswerIntoBubbleParts(answer));
+      isElfChatRunning = false;
+      setChatInputEnabled(true);
+    }, 650);
+  } catch (error) {
+    isElfChatRunning = false;
+    setChatInputEnabled(true);
+    throw error;
+  }
+}
+
+function normalizeGraphBubbles(rawBubbles: unknown[]): ChatBubblePart[] {
+  return rawBubbles
+    .map((rawBubble) => {
+      if (!rawBubble || typeof rawBubble !== "object") {
+        return null;
+      }
+      const payload = rawBubble as Record<string, unknown>;
+      const text = String(payload.text ?? "").trim();
+      if (!text) {
+        return null;
+      }
+      return {
+        text,
+        emoji: normalizeEmoji(String(payload.emoji ?? "soft")),
+      };
+    })
+    .filter((part): part is ChatBubblePart => part !== null);
+}
+
+function playBubbleSequence(parts: ChatBubblePart[]) {
+  clearBubbleSequence();
+  if (parts.length === 0) {
+    showChatBubble({ text: "我刚才有点走神了，再说一次好吗？", emoji: "confused" }, 5200);
+    return;
+  }
+
+  let index = 0;
+  const showNext = () => {
+    const part = parts[index];
+    if (!part) {
+      return;
+    }
+    const ttlMs = bubbleDurationMs(part.text);
+    showChatBubble(part, ttlMs);
+    index += 1;
+    if (index < parts.length) {
+      bubbleSequenceTimer = window.setTimeout(showNext, ttlMs + 420);
+    } else {
+      bubbleSequenceTimer = window.setTimeout(() => {
+        bubbleSequenceTimer = null;
+        resetElfExpression();
+      }, ttlMs + 420);
+    }
+  };
+  showNext();
+}
+
+function clearBubbleSequence() {
+  if (bubbleSequenceTimer !== null) {
+    window.clearTimeout(bubbleSequenceTimer);
+    bubbleSequenceTimer = null;
+  }
+}
+
+function splitAnswerIntoBubbleParts(answer: string): ChatBubblePart[] {
+  const normalized = answer.replace(/\r\n/g, "\n").trim();
+  if (!normalized) {
+    return [];
+  }
+
+  const paragraphParts = normalized
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const semanticParts = paragraphParts.length > 1 ? paragraphParts : splitBySentence(normalized);
+
+  return semanticParts.flatMap((part) => splitLongText(part, 96)).map((text) => ({
+    text,
+    emoji: inferEmoji(text),
+  }));
+}
+
+function splitBySentence(text: string): string[] {
+  const parts = text.match(/[^。！？!?；;]+[。！？!?；;]?/g) ?? [text];
+  const merged: string[] = [];
+  let current = "";
+  for (const part of parts) {
+    const next = `${current}${part}`.trim();
+    if (next.length < 72) {
+      current = next;
+      continue;
+    }
+    if (current) {
+      merged.push(current);
+    }
+    current = part.trim();
+  }
+  if (current) {
+    merged.push(current);
+  }
+  return merged;
+}
+
+function splitLongText(text: string, maxLength: number): string[] {
+  if (text.length <= maxLength) {
+    return [text];
+  }
+  const result: string[] = [];
+  for (let index = 0; index < text.length; index += maxLength) {
+    result.push(text.slice(index, index + maxLength));
+  }
+  return result;
+}
+
+function inferEmoji(text: string): ElfBubbleEmoji {
+  if (/无语|尴尬|愣住|不知道说什么/.test(text)) {
+    return "speechless";
+  }
+  if (/惊讶|没想到|突然|居然|哇|诶|咦/.test(text)) {
+    return "surprised";
+  }
+  if (/委屈|冤枉|被误解|想被安慰/.test(text)) {
+    return "wronged_pout";
+  }
+  if (/难过|伤心|失落|低落|想哭/.test(text)) {
+    return "sad_teary";
+  }
+  if (/[？?]/.test(text)) {
+    return "curious";
+  }
+  if (/抱歉|失败|不能|没法|错误|担心|不安/.test(text)) {
+    return "error_worried";
+  }
+  if (/生气|气鼓鼓|不满|吐槽|哼/.test(text)) {
+    return "angry_pout";
+  }
+  if (/害羞|不好意思|脸红|被夸/.test(text)) {
+    return "shy_blush";
+  }
+  if (/困|想睡|睡觉|疲惫/.test(text)) {
+    return "sleepy";
+  }
+  if (/严肃|认真|重要|风险|必须|需要注意/.test(text)) {
+    return "serious";
+  }
+  if (/鼓励|加油|可以的|支持你|别急|慢慢来/.test(text)) {
+    return "encouraging";
+  }
+  if (/开心|很好|太好了|完成|喜欢|当然/.test(text)) {
+    return "success_smile";
+  }
+  if (/记得|记忆|笔记|想起|回忆/.test(text)) {
+    return "memory_glow";
+  }
+  if (/开玩笑|嘿嘿|逗你|调皮/.test(text)) {
+    return "playful_wink";
+  }
+  if (/骄傲|得意|厉害吧/.test(text)) {
+    return "proud";
+  }
+  if (/放松|安心|平静|舒服/.test(text)) {
+    return "relaxed";
+  }
+  if (/处理|执行|读取|写入|正在|稍等/.test(text)) {
+    return "working_focus";
+  }
+  return "idle_soft";
+}
+
+function normalizeEmoji(emoji: string): ElfBubbleEmoji {
+  // 兼容旧版 graph/checkpoint 里可能残留的 soft/happy/worried/memory。
+  const aliases: Record<string, ElfBubbleEmoji> = {
+    soft: "idle_soft",
+    happy: "success_smile",
+    worried: "error_worried",
+    memory: "memory_glow",
+  };
+  if (aliases[emoji]) {
+    return aliases[emoji];
+  }
+  const allowed: ElfBubbleEmoji[] = [
+    "idle_soft",
+    "thinking",
+    "working_focus",
+    "success_smile",
+    "error_worried",
+    "sleepy",
+    "curious",
+    "memory_glow",
+    "shy_blush",
+    "angry_pout",
+    "surprised",
+    "sad_teary",
+    "wronged_pout",
+    "confused",
+    "proud",
+    "playful_wink",
+    "serious",
+    "relaxed",
+    "encouraging",
+    "speechless",
+  ];
+  return allowed.includes(emoji as ElfBubbleEmoji) ? (emoji as ElfBubbleEmoji) : "idle_soft";
+}
+
+function moodFromEmoji(emoji: ElfBubbleEmoji) {
+  if (["error_worried", "sad_teary", "wronged_pout"].includes(emoji)) {
+    return "error";
+  }
+  if (["curious", "thinking", "confused", "surprised", "speechless"].includes(emoji)) {
+    return "thinking";
+  }
+  if (["success_smile", "memory_glow", "proud", "encouraging", "playful_wink"].includes(emoji)) {
+    return "success";
+  }
+  if (emoji === "working_focus" || emoji === "serious") {
+    return "working";
+  }
+  return "talking";
+}
+
+function motionFromEmoji(emoji: ElfBubbleEmoji) {
+  if (["error_worried", "sad_teary", "wronged_pout"].includes(emoji)) {
+    return "error";
+  }
+  if (["curious", "thinking", "confused", "surprised", "speechless"].includes(emoji)) {
+    return "thinking";
+  }
+  if (["success_smile", "memory_glow", "proud", "encouraging", "playful_wink"].includes(emoji)) {
+    return "success";
+  }
+  if (emoji === "working_focus" || emoji === "serious") {
+    return "working";
+  }
+  return "nod";
+}
+
+function expressionFromEmoji(emoji: ElfBubbleEmoji): string {
+  switch (emoji) {
+    case "thinking":
+      return "/elf/memo/02_thinking.png";
+    case "working_focus":
+      return "/elf/memo/03_working_focus.png";
+    case "success_smile":
+      return "/elf/memo/04_success_smile.png";
+    case "error_worried":
+      return "/elf/memo/05_error_worried.png";
+    case "sleepy":
+      return "/elf/memo/06_sleepy.png";
+    case "curious":
+      return "/elf/memo/07_curious.png";
+    case "memory_glow":
+      return "/elf/memo/08_memory_glow.png";
+    case "shy_blush":
+      return "/elf/memo/09_shy_blush.png";
+    case "angry_pout":
+      return "/elf/memo/10_angry_pout.png";
+    case "surprised":
+      return "/elf/memo/11_surprised.png";
+    case "sad_teary":
+      return "/elf/memo/12_sad_teary.png";
+    case "wronged_pout":
+      return "/elf/memo/13_wronged_pout.png";
+    case "confused":
+      return "/elf/memo/14_confused.png";
+    case "proud":
+      return "/elf/memo/15_proud.png";
+    case "playful_wink":
+      return "/elf/memo/16_playful_wink.png";
+    case "serious":
+      return "/elf/memo/17_serious.png";
+    case "relaxed":
+      return "/elf/memo/18_relaxed.png";
+    case "encouraging":
+      return "/elf/memo/19_encouraging.png";
+    case "speechless":
+      return "/elf/memo/20_speechless.png";
+    case "idle_soft":
+    default:
+      return "/elf/memo/01_idle_soft.png";
+  }
+}
+
+function expressionFromMood(mood: string): string {
+  switch (mood) {
+    case "thinking":
+      return "/elf/memo/02_thinking.png";
+    case "working":
+      return "/elf/memo/03_working_focus.png";
+    case "success":
+      return "/elf/memo/04_success_smile.png";
+    case "warning":
+    case "error":
+      return "/elf/memo/05_error_worried.png";
+    case "talking":
+      return "/elf/memo/07_curious.png";
+    case "idle":
+    default:
+      return "/elf/memo/01_idle_soft.png";
+  }
+}
+
+function setElfExpression(src: string) {
+  if (!elfImage || elfImage.getAttribute("src") === src) {
+    return;
+  }
+  elfImage.src = src;
+}
+
+function resetElfExpression() {
+  if (elf) {
+    elf.dataset.mood = "idle";
+    delete elf.dataset.motion;
+  }
+  setElfExpression("/elf/memo/01_idle_soft.png");
+}
+
+function bubbleDurationMs(text: string) {
+  const normalizedLength = Array.from(text.trim()).length;
+  // 气泡阅读时间按字数增长：短句不闪走，长句给足阅读时间，但避免长时间遮挡。
+  return Math.min(12000, Math.max(3200, 1400 + normalizedLength * 115));
+}
+
+function setChatInputEnabled(enabled: boolean) {
+  if (chatInput) {
+    chatInput.disabled = !enabled;
+  }
+  if (chatSendButton) {
+    chatSendButton.disabled = !enabled;
+  }
+}
+
+function autoResizeChatInput() {
+  if (!chatInput) {
+    return;
+  }
+  chatInput.style.height = "auto";
+  chatInput.style.height = `${Math.min(chatInput.scrollHeight, 110)}px`;
+}
+
+function parseSseEvent(rawEvent: string): SseEvent | null {
+  const lines = rawEvent.split("\n");
+  const eventLine = lines.find((line) => line.startsWith("event:"));
+  const dataLine = lines.find((line) => line.startsWith("data:"));
+  if (!eventLine || !dataLine) {
+    return null;
+  }
+  return {
+    event: eventLine.slice("event:".length).trim(),
+    data: JSON.parse(dataLine.slice("data:".length).trim()),
+  };
+}
+
+interface ElfEvent {
+  id: number;
+  source: string;
+  mood: string;
+  motion?: string | null;
+  message?: string | null;
+  priority: number;
+  ttl_ms?: number | null;
+  dedupe_key?: string | null;
+  metadata?: Record<string, unknown>;
+  created_at: string;
+}
+
+interface SseEvent {
+  event: string;
+  data: Record<string, unknown>;
+}
+
+type ElfBubbleEmoji =
+  | "idle_soft"
+  | "thinking"
+  | "working_focus"
+  | "success_smile"
+  | "error_worried"
+  | "sleepy"
+  | "curious"
+  | "memory_glow"
+  | "shy_blush"
+  | "angry_pout"
+  | "surprised"
+  | "sad_teary"
+  | "wronged_pout"
+  | "confused"
+  | "proud"
+  | "playful_wink"
+  | "serious"
+  | "relaxed"
+  | "encouraging"
+  | "speechless";
+
+interface ChatBubblePart {
+  text: string;
+  emoji: ElfBubbleEmoji;
+}

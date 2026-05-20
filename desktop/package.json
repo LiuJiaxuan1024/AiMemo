@@ -1,0 +1,21 @@
+{
+  "name": "memo-elf-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "web:dev": "vite --host 127.0.0.1",
+    "web:build": "tsc && vite build",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.2",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.2"
+  }
+}

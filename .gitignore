@@ -23,6 +23,16 @@ frontend/vite.config.js
 frontend/vite.config.d.ts
 frontend/*.log
 
+# Desktop
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/*.log
+
+# Local reference repositories
+submodules/
+
 # Runtime logs
 *.log
 

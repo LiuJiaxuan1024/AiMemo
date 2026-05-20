@@ -26,5 +26,6 @@ if [[ "$SKIP_INSTALL" -eq 0 || ! -d "node_modules" ]]; then
   npm install
 fi
 
-echo "Starting AiMemo frontend at http://127.0.0.1:5173 ..."
+echo "Starting AiMemo frontend dev server at http://127.0.0.1:5173/app/ ..."
+echo "Product entry remains http://127.0.0.1:8000/app after frontend build."
 npm run dev -- --host 127.0.0.1

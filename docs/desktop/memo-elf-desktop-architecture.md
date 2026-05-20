@@ -291,27 +291,29 @@ SSE chat stream
 TanStack Query polling jobs
 ```
 
-桌面阶段建议：
+桌面阶段第一版已经改为“后端事件中心”：
 
 ```text
-第一版继续使用 HTTP + SSE。
-后续引入 WebSocket 做跨窗口实时事件同步。
+FastAPI 后端产生精灵事件。
+AiMemo Web 和 Memo Elf Desktop 并行消费这些事件。
+浏览器不再作为主精灵的控制者。
 ```
 
 原因：
 
 ```text
-HTTP/SSE 已经跑通，复用成本最低。
-WebSocket 更适合后续精灵窗口和主窗口共享实时状态。
+后端最接近 chat stream、job worker、graph 节点和 memory mutation。
+精灵事件由后端产生，比浏览器轮询业务状态后再猜测更准确。
+桌面精灵即使在浏览器关闭时，也可以继续感知后台任务。
 ```
 
 未来通信模型：
 
 ```mermaid
 flowchart TD
-  Backend[FastAPI Backend] -->|HTTP/SSE| MainWindow[AiMemo Main Window]
-  Backend -->|HTTP/SSE or WebSocket| ElfWindow[Memo Elf Window]
-  MainWindow -->|Tauri event| ElfWindow
+  Backend[FastAPI Backend] -->|HTTP/SSE/Polling| MainWindow[AiMemo Main Window]
+  Backend -->|HTTP Polling, future SSE/WebSocket| ElfWindow[Memo Elf Window]
+  MainWindow -->|HTTP interaction events| Backend
   ElfWindow -->|Tauri command / HTTP| Backend
 ```
 
@@ -328,24 +330,26 @@ Chat stream -> elf events
 jobs fallback
 ```
 
-桌面化后，事件系统需要跨窗口：
+桌面化后，事件系统需要跨窗口，并以后端为中心：
 
 ```text
-AiMemo Main Window
-  发送 note / chat / memory / graph 事件。
+Backend
+  发送 note / chat / job / memory / graph 事件。
 
 Memo Elf Window
   接收事件并显示表情、动作、气泡。
 
-Backend
-  后续也可以直接推送 job / graph / memory 事件。
+AiMemo Main Window
+  默认不再渲染主精灵。
+  只保留精灵工坊和调试入口。
 ```
 
-第一版可以先用 Tauri 前端事件：
+第一版已经采用：
 
 ```text
-Main Window emit
-Elf Window listen
+Backend in-memory elf event queue
+GET /api/elf/events?after_id=<last_id>
+Desktop polling
 ```
 
 后续再升级为：

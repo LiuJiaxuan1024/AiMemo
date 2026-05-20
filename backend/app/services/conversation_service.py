@@ -2,6 +2,7 @@ from fastapi import HTTPException, status
 from sqlmodel import Session, desc, select
 
 from app.models.chat_message import ChatMessage
+from app.models.chat_turn import ChatTurn
 from app.models.conversation import Conversation
 from app.models.note import utc_now
 from app.rag.chunking.tokenizer import count_tokens
@@ -63,7 +64,17 @@ def list_messages(session: Session, conversation_id: int) -> list[ChatMessageRea
         .where(ChatMessage.conversation_id == conversation_id)
         .order_by(ChatMessage.created_at, ChatMessage.id)
     ).all()
-    return [_to_chat_message_read(message) for message in messages]
+    turn_ids_by_assistant_message_id = _load_turn_ids_by_assistant_message_id(
+        session,
+        conversation_id=conversation_id,
+    )
+    return [
+        _to_chat_message_read(
+            message,
+            turn_id=turn_ids_by_assistant_message_id.get(message.id or 0),
+        )
+        for message in messages
+    ]
 
 
 def append_message(
@@ -166,7 +177,31 @@ def _to_conversation_list_item(conversation: Conversation) -> ConversationListIt
     )
 
 
-def _to_chat_message_read(message: ChatMessage) -> ChatMessageRead:
+def _load_turn_ids_by_assistant_message_id(
+    session: Session,
+    *,
+    conversation_id: int,
+) -> dict[int, int]:
+    """读取 assistant message 与 ChatTurn 的映射。
+
+    Graph 调试视图是以 `ChatTurn` 为事实来源的。前端只有拿到明确的 turn_id，
+    才应该显示 graph 按钮；否则历史消息、摘要消息或外部入口消息会误触发 404。
+    """
+
+    turns = session.exec(
+        select(ChatTurn).where(
+            ChatTurn.conversation_id == conversation_id,
+            ChatTurn.assistant_message_id.is_not(None),
+        )
+    ).all()
+    return {
+        int(turn.assistant_message_id): int(turn.id)
+        for turn in turns
+        if turn.id is not None and turn.assistant_message_id is not None
+    }
+
+
+def _to_chat_message_read(message: ChatMessage, *, turn_id: int | None = None) -> ChatMessageRead:
     return ChatMessageRead(
         id=message.id or 0,
         conversation_id=message.conversation_id,
@@ -176,6 +211,7 @@ def _to_chat_message_read(message: ChatMessage) -> ChatMessageRead:
         checkpoint_id=message.checkpoint_id,
         status=message.status,
         token_count=message.token_count,
+        turn_id=turn_id,
         created_at=message.created_at,
         updated_at=message.updated_at,
     )

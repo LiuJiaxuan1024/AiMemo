@@ -1,6 +1,7 @@
 import pytest
 from fastapi import HTTPException
 
+from app.models.chat_turn import ChatTurn
 from app.schemas.conversation import ChatMessageCreate, ConversationCreate
 from app.services.conversation_service import (
     append_message,
@@ -58,9 +59,36 @@ def test_append_message_rejects_parent_from_other_conversation(session):
     assert exc_info.value.status_code == 400
 
 
+def test_list_messages_includes_turn_id_for_graph_backed_assistant_message(session):
+    conversation = create_conversation(session, ConversationCreate(title="Graph 测试"))
+    user = append_message(
+        session,
+        conversation.id,
+        ChatMessageCreate(role="user", content="你好"),
+    )
+    assistant = append_message(
+        session,
+        conversation.id,
+        ChatMessageCreate(role="assistant", content="你好，我在。"),
+    )
+    turn = ChatTurn(
+        conversation_id=conversation.id,
+        thread_id=f"conversation:{conversation.id}",
+        user_message_id=user.id,
+        assistant_message_id=assistant.id,
+    )
+    session.add(turn)
+    session.commit()
+    session.refresh(turn)
+
+    messages = list_messages(session, conversation.id)
+
+    assert messages[0].turn_id is None
+    assert messages[1].turn_id == turn.id
+
+
 def test_get_conversation_raises_404_for_missing_id(session):
     with pytest.raises(HTTPException) as exc_info:
         get_conversation(session, 404)
 
     assert exc_info.value.status_code == 404
-

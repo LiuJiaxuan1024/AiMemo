@@ -1,3 +1,4 @@
+from app.models.agent_operation import AgentOperation
 from app.models.chat_message import ChatMessage
 from app.models.chat_turn import ChatTurn
 from app.models.conversation import Conversation
@@ -7,6 +8,7 @@ from app.models.note import Note
 from app.models.note_chunk import NoteChunk
 
 __all__ = [
+    "AgentOperation",
     "ChatMessage",
     "ChatTurn",
     "Conversation",

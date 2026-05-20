@@ -6,13 +6,10 @@ Agent 相关代码预留在 `backend/app/agent/`。
 
 ```text
 backend/app/agent/
-  graph.py        LangGraph 图入口
-  model.py        Agent 默认模型定义
-  graphs/         具体 graph 实现
-  state.py        Agent 状态定义
-  nodes.py        图节点实现
-  tools.py        Agent 可调用工具
   checkpoints.py  checkpoint 配置
+  model.py        Agent 模型工厂、缓存和启动预热
+  graphs/         具体 graph 实现
+  streaming/      LangGraph stream 事件映射
 ```
 
 ## 默认模型
@@ -71,24 +68,32 @@ LangGraph 不直接替代业务数据库。
 - [Conversation Summary Graph](./conversation-summary-graph.md)
 - [Conversation Memory Graph](./conversation-memory-graph.md)
 - [Context Pyramid](./context-pyramid.md)
+- [Local Operator Agent](./local-operator-agent.md)
 - [Memory Chat Graph 设计草案](./memory-chat-graph-design.md)
 
-## 对话 Graph 方向
+## Memory Chat Graph 当前结构
 
 ```text
-classify_intent
-  -> retrieve_memory
-  -> generate_answer
-```
-
-对话系统后续会按 RAG + 记忆分层设计展开：
-
-```text
-load_thread_context
+load_turn_state
   -> dispatch_context_workers
   -> merge_prompt_context
-  -> generate_answer
-  -> checkpoint
+  -> route_answer_mode
+  -> generate_answer / generate_elf_bubble_answer
+  -> persist_messages
+  -> enqueue_conversation_memory_job
+```
+
+上下文金字塔通过 worker 并行构建：
+
+```text
+L0 当前输入
+L1 近期消息
+L2 对话滚动摘要
+L3 检索到的笔记记忆
+L4 长期核心记忆
+Local Operator 本地 read-only 上下文
+```
 
 其中 L3 context worker 内部负责 plan / rewrite / retrieve / grade。
-```
+Local Operator worker 负责 read-only 本地工具上下文：明确本地读取请求走规则快路径，
+模糊本地操作候选交给 qwen-turbo planner 判断，普通聊天会快速跳过。

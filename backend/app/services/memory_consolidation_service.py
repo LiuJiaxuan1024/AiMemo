@@ -33,6 +33,7 @@ class NormalizedMemoryCandidate:
     """准备写入长期记忆的标准化候选。"""
 
     category: str
+    memory_key: str
     content: str
     summary: str
     importance: float
@@ -51,6 +52,7 @@ class ConsolidationDecision:
 
     action: str
     category: str
+    memory_key: str
     content: str
     summary: str
     importance: float
@@ -111,6 +113,7 @@ def consolidate_memory_candidates(
             ConsolidationDecision(
                 action="create",
                 category=candidate.category,
+                memory_key=candidate.memory_key,
                 content=candidate.content,
                 summary=candidate.summary,
                 importance=candidate.importance,
@@ -142,6 +145,7 @@ def _coerce_decision(
         action=action,
         existing_memory_id=existing_memory_id,
         category=str(value.get("category") or candidate.category),
+        memory_key=str(value.get("memory_key") or candidate.memory_key).strip().lower()[:120],
         content=str(value.get("content") or candidate.content).strip()[:1000],
         summary=str(value.get("summary") or candidate.summary).strip()[:300],
         importance=_clamp_float(value.get("importance", candidate.importance)),
@@ -154,13 +158,28 @@ def find_candidate_memories(
     session: Session,
     candidate: NormalizedMemoryCandidate,
 ) -> list[LongTermMemory]:
-    """召回同 category 的 active L4 候选记忆。
+    """召回可能与候选记忆重复或冲突的 active L4 记忆。
 
-    第一版不引入 memory embedding，先用同类记忆的 importance / updated_at 排序召回。
-    后续可以替换为 sqlite-vec top_k 检索。
+    memory_key 是优先级最高的召回条件。它表示稳定槽位，例如 user.preferred_name；
+    只要槽位一致，就算 category 被模型分成 preference/identity/instruction，
+    也必须进入同一轮归并判断。
     """
 
-    statement = (
+    memories_by_id: dict[int, LongTermMemory] = {}
+
+    if candidate.memory_key:
+        for memory in session.exec(
+            select(LongTermMemory)
+            .where(LongTermMemory.level == 4)
+            .where(LongTermMemory.status == "active")
+            .where(LongTermMemory.memory_key == candidate.memory_key)
+            .order_by(desc(LongTermMemory.importance), desc(LongTermMemory.updated_at))
+            .limit(MAX_CANDIDATE_MEMORIES)
+        ).all():
+            if memory.id is not None:
+                memories_by_id[memory.id] = memory
+
+    category_statement = (
         select(LongTermMemory)
         .where(LongTermMemory.level == 4)
         .where(LongTermMemory.status == "active")
@@ -168,7 +187,24 @@ def find_candidate_memories(
         .order_by(desc(LongTermMemory.importance), desc(LongTermMemory.updated_at))
         .limit(MAX_CANDIDATE_MEMORIES)
     )
-    return list(session.exec(statement).all())
+    for memory in session.exec(category_statement).all():
+        if memory.id is not None:
+            memories_by_id[memory.id] = memory
+
+    if _needs_cross_category_slot_recall(candidate):
+        cross_category_statement = (
+            select(LongTermMemory)
+            .where(LongTermMemory.level == 4)
+            .where(LongTermMemory.status == "active")
+            .where(LongTermMemory.category.in_(["preference", "identity", "instruction"]))
+            .order_by(desc(LongTermMemory.importance), desc(LongTermMemory.updated_at))
+            .limit(MAX_CANDIDATE_MEMORIES)
+        )
+        for memory in session.exec(cross_category_statement).all():
+            if memory.id is not None:
+                memories_by_id[memory.id] = memory
+
+    return list(memories_by_id.values())[:MAX_CANDIDATE_MEMORIES]
 
 
 def judge_memory_consolidation(
@@ -181,6 +217,7 @@ def judge_memory_consolidation(
         (
             f"{index + 1}. id={memory.id}\n"
             f"   category: {memory.category}\n"
+            f"   memory_key: {memory.memory_key}\n"
             f"   content: {memory.content}\n"
             f"   summary: {memory.summary}\n"
             f"   importance: {memory.importance}\n"
@@ -195,12 +232,14 @@ def judge_memory_consolidation(
         "判断原则：\n"
         "- 同一主体、同一目标、同一事实，只是措辞不同 -> skip。\n"
         "- 新内容更准确、更完整，且仍是同一事实 -> update。\n"
+        "- memory_key 相同表示同一个稳定记忆槽位，若内容冲突，优先 update 为最新明确表达。\n"
         "- 表达不同事实 -> create。\n"
         "- 不要因为中文近义词差异创建新记忆。\n\n"
         "输出 JSON 格式：\n"
         "{"
         "\"action\":\"skip|create|update\","
         "\"existing_memory_id\":18,"
+        "\"memory_key\":\"user.preferred_name\","
         "\"content\":\"归并后的中文长期记忆\","
         "\"summary\":\"短摘要\","
         "\"importance\":0.9,"
@@ -209,6 +248,7 @@ def judge_memory_consolidation(
         "}\n\n"
         f"新候选记忆：\n"
         f"category: {candidate.category}\n"
+        f"memory_key: {candidate.memory_key}\n"
         f"content: {candidate.content}\n"
         f"summary: {candidate.summary}\n"
         f"importance: {candidate.importance}\n"
@@ -236,6 +276,7 @@ def _parse_judge_response(
         return ConsolidationDecision(
             action="create",
             category=candidate.category,
+            memory_key=candidate.memory_key,
             content=candidate.content,
             summary=candidate.summary,
             importance=candidate.importance,
@@ -262,6 +303,7 @@ def _parse_judge_response(
         action=action,
         existing_memory_id=existing_memory_id,
         category=candidate.category,
+        memory_key=str(payload.get("memory_key") or candidate.memory_key).strip().lower()[:120],
         content=str(payload.get("content") or candidate.content).strip()[:1000],
         summary=str(payload.get("summary") or candidate.summary).strip()[:300],
         importance=_clamp_float(payload.get("importance", candidate.importance)),
@@ -302,6 +344,7 @@ def _skip_decision(
         action="skip",
         existing_memory_id=existing_memory_id,
         category=candidate.category,
+        memory_key=candidate.memory_key,
         content=candidate.content,
         summary=candidate.summary,
         importance=candidate.importance,
@@ -325,6 +368,19 @@ def _normalize_similarity_text(value: str) -> str:
     for token in ("正在", "打算", "计划中", "目前", "现在"):
         normalized = normalized.replace(token, "")
     return normalized
+
+
+def _needs_cross_category_slot_recall(candidate: NormalizedMemoryCandidate) -> bool:
+    """判断是否需要跨 category 召回潜在冲突记忆。
+
+    称呼、姓名、身份偏好这类信息经常被模型分到不同 category；只查同类会漏掉
+    “用户希望被称为小刘”与“用户希望被称为家炫”这种同槽位更新。
+    """
+
+    if candidate.category in {"identity", "preference", "instruction"}:
+        return True
+    text = f"{candidate.content} {candidate.summary}"
+    return any(token in text for token in ("称呼", "叫我", "叫作", "叫做", "昵称", "名字"))
 
 
 def _clamp_float(value: Any) -> float:

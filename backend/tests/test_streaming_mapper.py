@@ -63,6 +63,25 @@ def test_maps_non_answer_llm_token_to_internal_token() -> None:
     assert events[0]["node"] == "build_l3_retrieved_memory"
 
 
+def test_maps_elf_bubble_answer_token_to_bubble_delta() -> None:
+    events = map_langgraph_stream_chunk(
+        "messages",
+        (
+            FakeTokenChunk(content='{"bubbles":'),
+            {"langgraph_node": "generate_elf_bubble_answer"},
+        ),
+    )
+
+    assert events == [
+        {
+            "event": "bubble_delta",
+            "node": "generate_elf_bubble_answer",
+            "content": '{"bubbles":',
+            "metadata": {"langgraph_node": "generate_elf_bubble_answer"},
+        }
+    ]
+
+
 def test_extracts_text_from_list_content() -> None:
     events = map_langgraph_stream_chunk(
         "messages",

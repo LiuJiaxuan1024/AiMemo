@@ -20,6 +20,7 @@ MEMORY_CHAT_NODE_ORDER = [
     "build_l0_current_input",
     "merge_prompt_context",
     "generate_answer",
+    "generate_elf_bubble_answer",
     "persist_messages",
 ]
 

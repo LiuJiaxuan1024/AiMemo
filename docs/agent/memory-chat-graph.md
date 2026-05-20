@@ -18,20 +18,25 @@ flowchart TD
     Dispatch --> L2[build_l2_summary]
     Dispatch --> L1[build_l1_recent_messages]
     Dispatch --> L0[build_l0_current_input]
+    Dispatch --> LocalOperator[build_local_operator_context]
     L4 --> Merge[merge_prompt_context]
     L3 --> Merge
     L2 --> Merge
     L1 --> Merge
     L0 --> Merge
-    Merge --> Generate[generate_answer]
+    LocalOperator --> Merge
+    Merge --> RouteAnswer{route_answer_mode}
+    RouteAnswer -->|text| Generate[generate_answer]
+    RouteAnswer -->|elf_bubble| BubbleGenerate[generate_elf_bubble_answer]
     Generate --> Persist[persist_messages]
+    BubbleGenerate --> Persist
     Persist --> MaybeSummary[enqueue summary job if needed]
     MaybeSummary --> End([END])
     MaybeSummary -. async job .-> SummaryGraph[[conversation_summary_graph]]
     MaybeSummary -. async job .-> MemoryGraph[[conversation_memory_graph]]
 
     Load -. checkpoint .-> CP1[(checkpoint)]
-    Dispatch -. Send .-> Workers[(L0-L4 workers)]
+    Dispatch -. Send .-> Workers[(L0-L4 + Local Operator workers)]
     Merge -. checkpoint .-> CP2[(checkpoint)]
     Generate -. checkpoint .-> CP3[(checkpoint)]
     Persist -. checkpoint .-> CP4[(checkpoint)]
@@ -47,8 +52,9 @@ load_turn_state
   中排除这两条本轮草稿，避免当前输入被重复放入上下文。
 
 dispatch_context_workers
-  使用 LangGraph Send 分发 L0-L4 五个上下文 worker。
+  使用 LangGraph Send 分发 L0-L4 五个上下文 worker 和 Local Operator worker。
   每个 worker 独立生成一层 context_l*_layer。
+  Local Operator worker 独立生成 local_operator_context。
 
 build_l4_core_memory
   读取 longtermmemory 中 active 且 level=4 的核心长期记忆。
@@ -66,8 +72,22 @@ build_l1_recent_messages
 build_l0_current_input
   构建当前用户输入层。
 
+build_local_operator_context
+  本地 read-only 工具上下文 worker。
+  该 worker 内部调用 Local Operator Graph。普通聊天会被子图 plan_read_operation
+  快速判定为不需要读取；当用户明确要求读取、列目录、搜索文件或搜索内容时，
+  子图会直接进入 read 工具执行链路。
+  当用户表达比较自然、规则不确定但像本地操作时，子图会调用 qwen-turbo planner
+  做结构化判断，再决定是否进入 read 工具链路。
+  工具结果会整理为 local_operator_context。
+
 merge_prompt_context
-  按 L4 -> L0 顺序合并 worker 结果，输出 prompt_context。
+  按 L4 -> L0 顺序合并金字塔 worker 结果，并在末尾追加 local_operator_context。
+  输出最终 prompt_context。
+
+route_answer_mode
+  根据 `answer_mode` 选择回答生成分支。
+  `text` 用于 AiMemo 内置普通聊天；`elf_bubble` 用于桌面精灵外置聊天。
 
 generate_answer
   调用 qwen3.5-plus 生成回答。
@@ -75,6 +95,15 @@ generate_answer
   回答节点消费 merge_prompt_context 生成的 prompt_context。
   system prompt 由 build_memory_chat_answer_system_prompt 统一维护。
   该节点输出会进入 checkpoint；如果模型调用后中断，恢复时不会重复生成。
+
+generate_elf_bubble_answer
+  桌面精灵外置聊天的专用回答分支。
+  该节点要求模型输出结构化 JSON：`bubbles: [{ text, emoji }]`。
+  每个 bubble 是一个语义完整的气泡片段，emoji 用于驱动精灵表情。
+  一个 bubble 只承载一种主要情绪；如果模型把明显情绪转折塞入同一气泡，
+  后端会按句子和转折词做轻量二次切分，并重新推断 emoji。
+  该节点同样写入 `assistant_answer`，把所有 bubble text 合并为最终消息文本，
+  因此下游 `persist_messages` 可以和普通回答分支共用。
 
 persist_messages
   优先更新服务层预创建的 user/assistant 草稿消息，把 assistant 改为 completed。
@@ -148,8 +177,11 @@ context_l3_layer
 context_l2_layer
 context_l1_layer
 context_l0_layer
+local_operator_context
 prompt_context
+answer_mode
 assistant_answer
+elf_bubble_answer_parts
 user_message_id
 assistant_message_id
 graph_checkpoint_id
@@ -205,6 +237,29 @@ GET /api/conversations/{conversation_id}/messages/{assistant_message_id}/graph
 如果浏览器刷新，消息列表会从 `chatmessage` 表恢复，至少不会丢失本轮用户输入和
 已经生成的 assistant 草稿。后续如果要做到“刷新后自动继续生成”，需要增加
 `running ChatTurn` 的恢复调度器，重新接管对应 checkpoint。
+
+外置精灵聊天的 SSE 语义：
+
+```text
+POST /api/elf/chat/stream
+  内部仍执行 memory_chat_graph。
+  输入 answer_mode = elf_bubble。
+  service 关闭精灵工作状态播报，避免“开始检索/长期记忆提取完成”等气泡打断直接对话。
+
+bubble_delta
+  generate_elf_bubble_answer 节点的原始 JSON token。
+  第一版桌面端不直接展示 token，只等待 done.bubbles。
+
+done.bubbles
+  最终结构化气泡列表：[{ text, emoji }]。
+  桌面精灵按这些气泡依次展示，并根据 emoji 切换表情。当前表情枚举与
+  `frontend/public/elf/memo/*.png` 对齐：
+  `idle_soft`、`thinking`、`working_focus`、`success_smile`、
+  `error_worried`、`sleepy`、`curious`、`memory_glow`、`shy_blush`、
+  `angry_pout`、`surprised`、`sad_teary`、`wronged_pout`、`confused`、
+  `proud`、`playful_wink`、`serious`、`relaxed`、`encouraging`、
+  `speechless`。旧值 `soft/happy/worried/memory` 会在后端和桌面端归一化。
+```
 
 ## 性能埋点
 
@@ -316,7 +371,7 @@ poor / none
 
 ## 金字塔上下文构建
 
-当前实现已经把回答上下文从 `generate_answer` 中拆出，并使用 LangGraph `Send` worker 并行构建 L0-L4 五层上下文。
+当前实现已经把回答上下文从 `generate_answer` 中拆出，并使用 LangGraph `Send` worker 并行构建 L0-L4 五层上下文，同时并行运行 Local Operator worker。
 
 ```mermaid
 flowchart TD
@@ -325,16 +380,72 @@ flowchart TD
     Dispatch --> L2[L2 worker<br/>对话摘要]
     Dispatch --> L1[L1 worker<br/>近期对话窗口]
     Dispatch --> L0[L0 worker<br/>当前输入]
+    Dispatch --> LocalOperator[Local Operator worker<br/>read-only tool context]
 
     L4 --> Merge[merge_prompt_context]
     L3 --> Merge
     L2 --> Merge
     L1 --> Merge
     L0 --> Merge
+    LocalOperator --> Merge
 
     Merge --> Prompt[prompt_context]
-    Prompt --> Generate[generate_answer]
+    Prompt --> RouteAnswer{route_answer_mode}
+    RouteAnswer -->|text| Generate[generate_answer]
+    RouteAnswer -->|elf_bubble| BubbleGenerate[generate_elf_bubble_answer]
 ```
+
+Local Operator worker 内部流程：
+
+```mermaid
+flowchart TD
+    LocalStart([Local Operator START]) --> Plan[plan_read_operation]
+    Plan --> NeedRead{需要本地读取?}
+    NeedRead -->|no| Finish[finish_without_tool]
+    NeedRead -->|yes| Select[select_read_tool]
+    Select --> Run[run_read_tool]
+    Run --> Observe[observe_tool_result]
+    Observe --> More{还需要继续读取?}
+    More -->|yes| Select
+    More -->|no| Summarize[summarize_findings]
+    Finish --> LocalEnd([Local Operator END])
+    Summarize --> LocalEnd
+```
+
+这里的“选择边进入工具子图”发生在 Local Operator Graph 内部，而不是 Memory Chat Graph
+主干上直接串行等待工具。这样 L0/L1/L2/L3/L4 仍然可以和本地工具判断并行执行。
+
+第一版 Local Operator 只开放 read-only 工具：
+
+```text
+list_dir
+read_file
+search_files
+search_text
+get_file_info
+```
+
+工具调用规则：
+
+```text
+普通聊天
+  -> plan_read_operation 快速返回 need_local_read = false。
+
+明确本地读取请求
+  -> 规则快路径直接生成工具 action
+  -> select_read_tool
+  -> run_read_tool
+  -> 写入 agent_operations 审计表
+  -> summarize_findings
+  -> local_operator_context
+
+模糊本地操作候选
+  -> qwen-turbo planner 返回结构化 JSON
+  -> 低置信度或不需要本地读取时跳过
+  -> 高置信度 read-only action 进入同一条工具链路
+```
+
+所有路径都会被限制在授权 workspace 内，`.env`、密钥、数据库文件等敏感文件默认拒绝读取。
 
 L3 worker 内部流程：
 
@@ -380,6 +491,7 @@ context_l3_layer
 context_l2_layer
 context_l1_layer
 context_l0_layer
+local_operator_context
 ```
 
 这里没有使用 `context_layers` 列表 reducer。原因是聊天 graph 使用同一个 `conversation:{id}` thread 跨轮执行，列表 reducer 容易把上一轮 layer 追加进本轮。独立字段更明确，也更利于 checkpoint 调试。
@@ -452,13 +564,16 @@ content_hash 不重复
 - 不做多 query rewrite。
 - 不做 LLM 检索结果评分。
 - 不做多源检索 worker 和 LLM rerank worker。
+- Local Operator 当前只做 read-only；planner 已支持规则快路径 + qwen-turbo 兜底，
+  但 write/exec 尚未接入。
 - 不做消息编辑和状态树 UI。
 - SSE 使用 LangGraph `stream_mode=["updates", "messages"]`：
   - `updates` 表示节点已经完成，映射为 succeeded 节点状态事件。
   - `messages` 中仅 `generate_answer` 节点的 token 映射为用户可见回答。
+  - `generate_elf_bubble_answer` 节点的 token 映射为 `bubble_delta`，最终结构化结果放在 `done.bubbles`。
   - 其他 LLM 节点 token 视为 internal_token，默认不暴露给前端。
 - `dispatch_context_workers` 使用 LangGraph `Send` worker 模式。代码中显式给
-  `add_conditional_edges` 传入 L0-L4 worker 目标列表，让 LangGraph Mermaid 能画出
+  `add_conditional_edges` 传入 L0-L4 和 Local Operator worker 目标列表，让 LangGraph Mermaid 能画出
   真实的并行扇出结构。
 
 ## LangSmith tracing

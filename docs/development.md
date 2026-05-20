@@ -67,16 +67,32 @@ http://127.0.0.1:8000/docs
 
 ## 前端启动
 
+常规开发建议先构建前端，由后端网关托管 `/app`：
+
+```powershell
+cd frontend
+npm install
+npm run build
+```
+
+访问：
+
+```text
+http://127.0.0.1:8000/app
+```
+
+如果你正在调试 React 组件，需要热更新，再启动 Vite：
+
 ```powershell
 cd frontend
 npm install
 npm run dev
 ```
 
-前端默认地址：
+Vite 开发服务地址：
 
 ```text
-http://127.0.0.1:5173
+http://127.0.0.1:5173/app/
 ```
 
 ## 验证命令

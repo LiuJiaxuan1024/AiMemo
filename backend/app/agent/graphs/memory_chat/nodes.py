@@ -2,6 +2,8 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 import logging
+from pathlib import Path
+import re
 from typing import Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -9,6 +11,7 @@ from langgraph.types import Send
 from sqlmodel import Session, desc, select
 
 from app.ai.json_utils import parse_json_object
+from app.agent.graphs.local_operator.graph import run_local_operator_graph
 from app.agent.context import (
     ContextBudget,
     PyramidPromptContext,
@@ -22,11 +25,13 @@ from app.agent.context import (
 from app.agent.graphs.memory_chat.state import (
     ChatMessagePayload,
     ContextLayerPayload,
+    ElfBubblePayload,
     MemoryChatGraphState,
     RetrievedChunkPayload,
 )
 from app.agent.context import build_memory_chat_prompt_context
 from app.agent.model import get_agent_chat_model, get_planner_chat_model
+from app.core.config import settings
 from app.core.timing import elapsed_ms, emit_timing, now_counter
 from app.models.chat_message import ChatMessage
 from app.models.conversation import Conversation
@@ -60,6 +65,10 @@ class RetrievalPlan:
 AnswerGenerator = Callable[
     [str, list[ChatMessagePayload], list[RetrievedChunkPayload], bool, str],
     str,
+]
+ElfBubbleAnswerGenerator = Callable[
+    [str, list[ChatMessagePayload], list[RetrievedChunkPayload], bool, str],
+    list[ElfBubblePayload],
 ]
 RetrievalPlanner = Callable[[str, list[ChatMessagePayload]], RetrievalPlan]
 NoteRetriever = Callable[..., list[NoteSearchResult]]
@@ -123,8 +132,11 @@ def build_load_turn_state_node(
                 "context_l2_layer": {},
                 "context_l3_layer": {},
                 "context_l4_layer": {},
+                "local_operator_context": "",
                 "prompt_context": "",
+                "answer_mode": state.get("answer_mode", "text"),
                 "assistant_answer": "",
+                "elf_bubble_answer_parts": [],
                 # 保留服务层预创建的消息 ID，最终 persist_messages 会更新这些草稿消息。
                 "user_message_id": int(state.get("user_message_id") or 0),
                 "assistant_message_id": int(state.get("assistant_message_id") or 0),
@@ -149,6 +161,7 @@ def dispatch_context_workers(state: MemoryChatGraphState) -> list[Send]:
         Send("build_l2_summary", state),
         Send("build_l1_recent_messages", state),
         Send("build_l0_current_input", state),
+        Send("build_local_operator_context", state),
     ]
 
 
@@ -271,6 +284,85 @@ def build_l0_current_input_node():
     return build_l0_current_input
 
 
+def build_local_operator_context_node(session_factory: SessionFactory):
+    """构建本轮本地 read-only 工具上下文。
+
+    这个 worker 和 L0-L4 并行执行。普通聊天会被 Local Operator 的规则 planner
+    快速判定为不需要读取；只有用户明确要求查看/搜索本地文件时，才会执行 read 工具。
+    """
+
+    def build_local_operator_context(state: MemoryChatGraphState) -> MemoryChatGraphState:
+        result = run_local_operator_graph(
+            session_factory=session_factory,
+            conversation_id=_resolve_conversation_id(state),
+            turn_id=None,
+            user_input=_resolve_user_message(state),
+            workspace_roots=_default_local_operator_workspace_roots(),
+        )
+        return {
+            "local_operator_context": result.get("final_answer", ""),
+        }
+
+    return build_local_operator_context
+
+
+def _default_local_operator_workspace_roots() -> list[str]:
+    """返回默认本地读取 workspace roots。
+
+    启动脚本会 `cd backend` 后再启动 uvicorn；如果直接使用 Path.cwd()，
+    Local Operator 就读不到 docs/frontend/desktop 等仓库根目录内容。
+    这里根据当前文件位置反推出仓库根目录，并默认加入当前用户 Home。
+
+    读取本身没有 write/exec 的副作用，所以 read-only 阶段默认开放本机固定盘符。
+    真正的安全边界放在 LocalOperatorPolicy/LocalFilesystemService：
+    敏感文件、数据库、设备路径、UNC 网络路径和大小限制仍会被拦截。
+    """
+
+    roots = [Path(__file__).resolve().parents[5], Path.home(), *_local_fixed_drive_roots()]
+    roots.extend(Path(root).expanduser() for root in _configured_local_operator_workspace_roots())
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for root in roots:
+        resolved = str(root.resolve())
+        if resolved not in seen:
+            normalized.append(resolved)
+            seen.add(resolved)
+    return normalized
+
+
+def _local_fixed_drive_roots() -> list[Path]:
+    r"""返回本机固定盘符根目录，用于 read-only Local Operator。
+
+    Windows 上用户经常直接给 `C:\...`、`D:\...` 这样的绝对路径。如果默认只授权
+    Home，模型就会在回答层误以为自己“看不到 C 盘”。参考 Claude Code 的设计：
+    读取能力应由工具真实执行并返回错误，而不是由模型预先拒绝。
+    """
+
+    import os
+
+    if os.name != "nt":
+        return [Path("/")]
+    roots: list[Path] = []
+    for code in range(ord("A"), ord("Z") + 1):
+        root = Path(f"{chr(code)}:/")
+        if root.exists():
+            roots.append(root)
+    return roots
+
+
+def _configured_local_operator_workspace_roots() -> list[str]:
+    """解析用户在 .env 中追加的 Local Operator read 根目录。
+
+    支持分号或逗号分隔，例如：
+      LOCAL_OPERATOR_WORKSPACE_ROOTS=E:\\Ai记;D:\\资料;~/Documents
+    """
+
+    raw_value = settings.local_operator_workspace_roots.strip()
+    if not raw_value:
+        return []
+    return [part.strip() for part in re.split(r"[;,]", raw_value) if part.strip()]
+
+
 def build_merge_prompt_context_node():
     """汇总 L0-L4 worker 结果，生成最终 prompt_context。"""
 
@@ -284,7 +376,11 @@ def build_merge_prompt_context_node():
         ]
         layers = [context_layer_from_payload(dict(payload)) for payload in payloads]
         context = PyramidPromptContext(layers=layers)
-        return {"prompt_context": context.to_prompt()}
+        prompt_context = context.to_prompt()
+        local_operator_context = str(state.get("local_operator_context") or "").strip()
+        if local_operator_context:
+            prompt_context = f"{prompt_context}\n\n{local_operator_context}"
+        return {"prompt_context": prompt_context}
 
     return merge_prompt_context
 
@@ -327,6 +423,69 @@ def build_generate_answer_node(
         }
 
     return generate_answer
+
+
+def route_answer_mode(state: MemoryChatGraphState) -> str:
+    """根据 answer_mode 选择回答生成分支。
+
+    普通 AiMemo 页面需要传统 token 流；桌面精灵外置聊天需要按气泡输出。
+    两条分支最后都必须写入 assistant_answer，确保 persist_messages 可以复用。
+    """
+
+    if state.get("answer_mode") == "elf_bubble":
+        return "generate_elf_bubble_answer"
+    return "generate_answer"
+
+
+def build_generate_elf_bubble_answer_node(
+    bubble_answer_generator: ElfBubbleAnswerGenerator | None = None,
+):
+    """生成桌面精灵气泡回复。
+
+    该节点是 generate_answer 的并行替代分支：它面向外置精灵，要求模型把回答拆成
+    多个语义完整的气泡，并为每个气泡给出 emoji。为了让下游持久化保持简单，
+    节点仍会把所有气泡 text 合并为 assistant_answer。
+    """
+
+    def generate_elf_bubble_answer(state: MemoryChatGraphState) -> MemoryChatGraphState:
+        user_message = _resolve_user_message(state)
+        recent_messages = state.get("recent_messages", [])
+        retrieved_chunks = state.get("retrieved_chunks", [])
+        needs_retrieval = bool(state.get("needs_retrieval", False))
+        retrieval_grade = state.get("retrieval_grade", "none")
+        if bubble_answer_generator is None:
+            parts = generate_memory_chat_elf_bubble_answer(
+                user_message,
+                recent_messages,
+                retrieved_chunks,
+                needs_retrieval,
+                retrieval_grade,
+                prompt_context=state.get("prompt_context", ""),
+            )
+        else:
+            raw_parts = bubble_answer_generator(
+                user_message,
+                recent_messages,
+                retrieved_chunks,
+                needs_retrieval,
+                retrieval_grade,
+            )
+            # 测试桩或后续替代生成器可能直接返回旧版 emoji；这里统一归一化，
+            # 保证 graph state、持久化消息和桌面端展示使用同一套表情枚举。
+            parts = [
+                {
+                    "text": part["text"],
+                    "emoji": _normalize_elf_emoji(str(part.get("emoji") or "idle_soft")),
+                }
+                for part in raw_parts
+                if part.get("text")
+            ]
+        return {
+            "elf_bubble_answer_parts": parts,
+            "assistant_answer": "\n\n".join(part["text"] for part in parts if part.get("text")),
+        }
+
+    return generate_elf_bubble_answer
 
 
 def build_persist_messages_node(session_factory: SessionFactory):
@@ -644,6 +803,39 @@ def generate_memory_chat_answer(
     return str(response.content)
 
 
+def generate_memory_chat_elf_bubble_answer(
+    user_message: str,
+    recent_messages: list[ChatMessagePayload],
+    retrieved_chunks: list[RetrievedChunkPayload],
+    needs_retrieval: bool,
+    retrieval_grade: str,
+    *,
+    prompt_context: str = "",
+) -> list[ElfBubblePayload]:
+    """为外置桌面精灵生成结构化气泡回复。
+
+    第一版使用同一个主回答模型，但要求 JSON 输出。后续可以把该节点换成更专门的
+    bubble writer，或让模型通过 custom stream 直接逐个气泡发出。
+    """
+
+    model = get_agent_chat_model()
+    context = prompt_context or build_memory_chat_prompt_context(
+        user_message=user_message,
+        recent_messages=recent_messages,
+        conversation_summary="",
+        retrieved_chunks=retrieved_chunks,
+        needs_retrieval=needs_retrieval,
+        retrieval_grade=retrieval_grade,  # type: ignore[arg-type]
+    ).to_prompt()
+    response = model.invoke(
+        [
+            SystemMessage(content=build_elf_bubble_answer_system_prompt()),
+            HumanMessage(content=context),
+        ]
+    )
+    return _parse_elf_bubble_parts(str(response.content))
+
+
 def build_memory_chat_answer_system_prompt() -> str:
     """构建 Memory Chat Graph 的回答提示词。
 
@@ -663,6 +855,12 @@ def build_memory_chat_answer_system_prompt() -> str:
         "- poor 或 none 时不要编造用户经历；可以直接基于常识回答，或自然地说明“我现在还没找到相关记忆”。\n"
         "- 不要反复强调“基于有限片段”“检索质量较弱”“记忆质量不足”等内部评估词，"
         "除非用户明确要求调试或追问依据。\n\n"
+        "本地文件读取规则：\n"
+        "- 如果 prompt 中出现“本地文件读取结果”，说明 Local Operator 已经实际调用只读工具。\n"
+        "- 回答必须优先基于这些工具结果，而不是凭空说你不能访问用户电脑、硬盘、C 盘或系统日志。\n"
+        "- 如果工具结果显示读取成功，直接总结读到的内容，并说明路径或匹配结果。\n"
+        "- 如果工具结果显示失败或被拦截，只能复述真实错误原因，例如路径不存在、不是文本文件、敏感文件被拦截。\n"
+        "- 不要要求用户复制文件内容，除非工具明确返回无法读取且没有其他可用路径。\n\n"
         "个人画像类问题的风格：\n"
         "- 当用户问“你觉得我是怎样的人”“你了解我吗”“评价我”时，优先给出温和、具体的人格印象。\n"
         "- 可以引用一两个自然证据，但不要机械罗列检索片段。\n"
@@ -674,6 +872,219 @@ def build_memory_chat_answer_system_prompt() -> str:
         "- 如果用户问的是事实型记忆，优先直接给答案，再补充依据。\n"
         "- 不暴露 graph、L0-L4、retrieval_grade、chunk、score 等内部实现细节。"
     )
+
+
+def build_elf_bubble_answer_system_prompt() -> str:
+    """构建外置精灵气泡回答提示词。"""
+
+    return (
+        "你是 Memo Elf，一个在用户桌面上的记忆精灵。你正在直接和用户聊天。\n"
+        "你需要输出 JSON，不要输出 Markdown，不要输出代码块，不要输出额外解释。\n\n"
+        "JSON 格式必须是：\n"
+        "{"
+        "\"bubbles\":["
+        "{\"text\":\"一段语义完整、适合放进气泡的话\",\"emoji\":\"soft\"}"
+        "]"
+        "}\n\n"
+        "气泡规则：\n"
+        "- 每个 text 是一段完整语义，尽量 20-80 个中文字。\n"
+        "- 回答较长时拆成 2-5 个 bubbles。\n"
+        "- 一个 bubble 只能表达一种主要情绪。开心后转为担心、解释后转为鼓励、回忆后转为提问，都必须拆成不同 bubbles。\n"
+        "- 遇到 但是、不过、然而、可、突然、同时、另一方面、如果、所以 等语气或情绪转折时，优先拆成新 bubble。\n"
+        "- 每个 bubble 的 emoji 必须和 text 的主要情绪一致，不要让一个 happy 气泡里包含明显 worried 内容。\n"
+        "- 不要逐 token 拆分，不要把半句话放进一个 bubble。\n"
+        "- text 使用自然中文，像在轻声聊天。\n\n"
+        "本地文件读取规则：\n"
+        "- 如果 prompt 中出现“本地文件读取结果”，说明 Local Operator 已经实际调用只读工具。\n"
+        "- 你必须基于这些工具结果回答，不要凭空说自己不能访问用户电脑、硬盘、C 盘或系统日志。\n"
+        "- 如果工具读取成功，直接用气泡总结读到的内容；如果失败，只说明真实错误原因。\n"
+        "- 不要要求用户复制文件内容，除非工具明确返回无法读取且没有其他可用路径。\n\n"
+        "emoji 可选值：\n"
+        "- idle_soft：普通温和回应、轻松陪伴。\n"
+        "- thinking：思考、推理、谨慎判断。\n"
+        "- working_focus：正在认真处理任务、专注工作。\n"
+        "- success_smile：完成、肯定、开心地确认。\n"
+        "- error_worried：抱歉、失败、担心、无法完成。\n"
+        "- sleepy：困倦、放松、轻微疲惫。\n"
+        "- curious：疑问、好奇、想继续了解。\n"
+        "- memory_glow：提到用户记忆、笔记、回忆、长期偏好。\n"
+        "- shy_blush：害羞、被夸、不好意思。\n"
+        "- angry_pout：轻微生气、可爱吐槽、不满但不攻击。\n"
+        "- surprised：惊讶、突然发现、意外。\n"
+        "- sad_teary：难过、委屈、共情低落。\n"
+        "- wronged_pout：被误解、委屈撒娇、想被安慰。\n"
+        "- confused：困惑、不确定、没听懂。\n"
+        "- proud：小得意、自信、完成后有点骄傲。\n"
+        "- playful_wink：调皮、开玩笑、轻松俏皮。\n"
+        "- serious：严肃、可靠、需要认真对待。\n"
+        "- relaxed：平静、放松、安心。\n"
+        "- encouraging：鼓励、支持、给用户打气。\n"
+        "- speechless：无语、尴尬、短暂愣住。\n\n"
+        "记忆使用规则：不要编造用户记忆；如果没有可靠记忆，就自然说明现在还不确定。"
+    )
+
+
+def _parse_elf_bubble_parts(raw_content: str) -> list[ElfBubblePayload]:
+    """解析模型输出的气泡 JSON，失败时降级为单气泡。"""
+
+    try:
+        payload = parse_json_object(raw_content)
+        raw_bubbles = payload.get("bubbles", [])
+        if not isinstance(raw_bubbles, list):
+            raise ValueError("bubbles must be a list.")
+        parts: list[ElfBubblePayload] = []
+        for raw_part in raw_bubbles:
+            if not isinstance(raw_part, dict):
+                continue
+            text = str(raw_part.get("text") or "").strip()
+            if not text:
+                continue
+            emoji = _normalize_elf_emoji(str(raw_part.get("emoji") or "soft"))
+            parts.extend(_normalize_elf_bubble_part(text, emoji))
+        if parts:
+            return parts
+    except Exception:
+        logger.exception("Failed to parse elf bubble answer JSON.")
+    return [{"text": raw_content.strip() or "我刚才有点走神了，再说一次好吗？", "emoji": "soft"}]
+
+
+def _normalize_elf_emoji(emoji: str) -> str:
+    """把模型输出的表情值收敛到前端/桌面端真实存在的素材枚举。
+
+    这里同时兼容旧版 emoji 名称，避免旧 checkpoint 或测试桩返回 soft/happy 等旧值时
+    桌面端找不到对应表情图。
+    """
+
+    aliases = {
+        "soft": "idle_soft",
+        "happy": "success_smile",
+        "worried": "error_worried",
+        "memory": "memory_glow",
+    }
+    normalized = aliases.get(emoji, emoji)
+    allowed = {
+        "idle_soft",
+        "thinking",
+        "working_focus",
+        "success_smile",
+        "error_worried",
+        "sleepy",
+        "curious",
+        "memory_glow",
+        "shy_blush",
+        "angry_pout",
+        "surprised",
+        "sad_teary",
+        "wronged_pout",
+        "confused",
+        "proud",
+        "playful_wink",
+        "serious",
+        "relaxed",
+        "encouraging",
+        "speechless",
+    }
+    return normalized if normalized in allowed else "idle_soft"
+
+
+def _normalize_elf_bubble_part(text: str, emoji: str) -> list[ElfBubblePayload]:
+    """规整单个气泡，避免一个气泡承载多种情绪。
+
+    LLM 偶尔会把“先开心，后担心/转折”的内容塞进一个 bubble。桌面精灵表情
+    只能对应当前气泡，所以这里按明显转折词做轻量二次切分，并重新推断 emoji。
+    """
+
+    clauses = _split_bubble_by_emotion_shift(text)
+    if len(clauses) <= 1:
+        return [{"text": text, "emoji": _infer_elf_emoji(text, fallback=emoji)}]
+    return [
+        {
+            "text": clause,
+            "emoji": _infer_elf_emoji(clause, fallback=emoji),
+        }
+        for clause in clauses
+    ]
+
+
+def _split_bubble_by_emotion_shift(text: str) -> list[str]:
+    """按情绪/语气转折拆气泡。
+
+    这是规则兜底，不替代 prompt 约束。只处理明显转折，避免把普通短句拆得太碎。
+    """
+
+    sentences = _split_chinese_sentences(text)
+    if len(sentences) <= 1:
+        return sentences
+
+    result: list[str] = []
+    current = ""
+    for sentence in sentences:
+        if current and _starts_emotion_shift(sentence):
+            result.append(current)
+            current = sentence
+            continue
+        if current and _has_different_emotion(current, sentence):
+            result.append(current)
+            current = sentence
+            continue
+        current = f"{current}{sentence}" if current else sentence
+    if current:
+        result.append(current)
+    return result
+
+
+def _split_chinese_sentences(text: str) -> list[str]:
+    import re
+
+    return [part.strip() for part in re.findall(r"[^。！？!?；;]+[。！？!?；;]?", text) if part.strip()]
+
+
+def _starts_emotion_shift(sentence: str) -> bool:
+    normalized = sentence.strip()
+    shift_markers = ("但是", "不过", "然而", "可是", "可", "突然", "同时", "另一方面", "如果", "所以", "只是")
+    return normalized.startswith(shift_markers)
+
+
+def _has_different_emotion(left: str, right: str) -> bool:
+    return _infer_elf_emoji(left, fallback="soft") != _infer_elf_emoji(right, fallback="soft")
+
+
+def _infer_elf_emoji(text: str, *, fallback: str) -> str:
+    if any(keyword in text for keyword in ["无语", "尴尬", "愣住", "不知道说什么", "沉默"]):
+        return "speechless"
+    if any(keyword in text for keyword in ["惊讶", "没想到", "突然", "居然", "哇", "诶", "咦"]):
+        return "surprised"
+    if any(keyword in text for keyword in ["委屈", "被误解", "冤枉", "想被安慰"]):
+        return "wronged_pout"
+    if any(keyword in text for keyword in ["难过", "伤心", "失落", "低落", "想哭"]):
+        return "sad_teary"
+    if any(keyword in text for keyword in ["抱歉", "失败", "错误", "担心", "心急", "不安", "不能", "没法"]):
+        return "error_worried"
+    if any(keyword in text for keyword in ["生气", "哼", "不满", "气鼓鼓", "吐槽"]):
+        return "angry_pout"
+    if any(keyword in text for keyword in ["害羞", "不好意思", "脸红", "被夸"]):
+        return "shy_blush"
+    if any(keyword in text for keyword in ["记得", "记忆", "笔记", "回忆", "想起", "长期", "知识库"]):
+        return "memory_glow"
+    if any(keyword in text for keyword in ["完成", "成功", "搞定", "太好了", "真好", "棒"]):
+        return "success_smile"
+    if any(keyword in text for keyword in ["鼓励", "加油", "可以的", "支持你", "别急", "慢慢来"]):
+        return "encouraging"
+    if any(keyword in text for keyword in ["骄傲", "厉害吧", "我做到了", "有点得意"]):
+        return "proud"
+    if any(keyword in text for keyword in ["开玩笑", "嘿嘿", "逗你", "调皮"]):
+        return "playful_wink"
+    if any(keyword in text for keyword in ["严肃", "认真", "重要", "风险", "必须", "需要注意"]):
+        return "serious"
+    if any(keyword in text for keyword in ["困", "困了", "想睡", "睡觉", "疲惫"]):
+        return "sleepy"
+    if any(keyword in text for keyword in ["放松", "安心", "平静", "慢慢", "舒服"]):
+        return "relaxed"
+    if any(keyword in text for keyword in ["为什么", "怎么", "吗", "呢", "？", "?"]):
+        return "curious"
+    if any(keyword in text for keyword in ["可能", "我想", "我觉得", "推测", "考虑", "判断", "分析"]):
+        return "thinking"
+    return _normalize_elf_emoji(fallback)
 
 
 def _grade_retrieval_chunks(

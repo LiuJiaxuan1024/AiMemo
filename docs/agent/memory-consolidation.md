@@ -604,3 +604,43 @@ extract 后中断恢复不重复调用 extractor。
 consolidate 后中断恢复不重复调用 judge。
 模型 JSON 解析异常降级为空记忆。
 ```
+
+### 2026-05-19：memory_key 槽位归并
+
+已实现：
+
+```text
+longtermmemory 增加 memory_key 字段。
+记忆抽取 JSON 增加 memory_key。
+consolidate_memories 优先按 memory_key 召回 active L4 记忆。
+identity / preference / instruction 等易混类型支持跨 category 候选召回。
+LLM judge 提示词增加“同 memory_key 表示同一稳定槽位”的规则。
+write_memories create/update 会写入或保留 memory_key。
+```
+
+典型场景：
+
+```text
+existing:
+  category = identity
+  memory_key = user.preferred_name
+  content = 用户希望被称呼为小刘。
+
+candidate:
+  category = preference
+  memory_key = user.preferred_name
+  content = 用户希望被称呼为家炫，而不是小刘。
+
+expected:
+  action = update
+  只保留一条 L4 记忆，内容更新为更明确的新称呼。
+```
+
+当前仍未实现：
+
+```text
+memory embedding 表。
+memory_versions 版本历史。
+memory_consolidation_events 归并事件审计。
+append/conflict 独立 action。
+```

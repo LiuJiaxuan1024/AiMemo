@@ -34,7 +34,9 @@ Memory Chat Graph 对话
 LangGraph checkpoint 持久化
 本地 job 队列与启动恢复
 任务 graph 可视化
-右下角 Live2D 精灵助手
+桌面外置精灵助手
+桌面精灵气泡对话与多表情切换
+Local Operator read-only 本地文件读取子图
 前端 Markdown 渲染和基础调试面板
 ```
 
@@ -62,7 +64,7 @@ TypeScript
 TanStack Query
 Mermaid
 react-markdown
-OhMyLive2D
+React Router
 lucide-react
 ```
 
@@ -74,6 +76,7 @@ backend/
     agent/       LangGraph graph、模型、streaming、上下文构建
     api/         FastAPI 路由
     jobs/        本地任务队列、worker、reconciler
+    local_operator/ read-only 本地文件工具、权限策略和审计
     models/      SQLModel 数据模型
     rag/         chunking、hash、vector store、search
     services/    业务服务层
@@ -128,7 +131,64 @@ nano .env
 DASHSCOPE_API_KEY=你的百炼 API Key
 ```
 
-### 3. 启动后端
+### 3. 一键开发启动
+
+开发时推荐一键启动前后端。脚本会分别启动：
+
+```text
+后端 FastAPI: http://127.0.0.1:8000
+前端 Vite:    http://127.0.0.1:5173/app/
+桌面精灵:      Memo Elf Tauri 窗口
+```
+
+Windows PowerShell：
+
+```powershell
+.\scripts\start-dev.ps1
+```
+
+Linux / macOS：
+
+```bash
+chmod +x scripts/start-dev.sh scripts/start-backend.sh scripts/start-frontend.sh
+./scripts/start-dev.sh
+```
+
+依赖已经安装好时：
+
+```powershell
+.\scripts\start-dev.ps1 -SkipInstall
+```
+
+```bash
+./scripts/start-dev.sh --skip-install
+```
+
+后端脚本会确保 `backend/.venv` 使用 Python 3.12。如果已有虚拟环境不是 Python 3.12，会自动重建；Windows 会尝试通过 `winget` 安装 Python 3.12。
+
+如果只想调试 Web，不启动桌面精灵：
+
+```powershell
+.\scripts\start-dev.ps1 -NoDesktop
+```
+
+```bash
+./scripts/start-dev.sh --no-desktop
+```
+
+停止所有开发进程：
+
+```powershell
+.\scripts\stop-dev.ps1
+```
+
+```bash
+./scripts/stop-dev.sh
+```
+
+`stop-dev` 会停止后端、Vite 前端、Tauri desktop webview 和残留的 Memo Elf 桌面进程，避免重复启动后出现多个精灵。
+
+### 4. 单独启动后端
 
 推荐使用脚本启动。脚本会自动创建 `backend/.venv` 并安装后端依赖：
 
@@ -151,15 +211,36 @@ chmod +x scripts/start-backend.sh scripts/start-frontend.sh
 http://127.0.0.1:8000
 ```
 
+AiMemo 统一入口：
+
+```text
+http://127.0.0.1:8000/app
+```
+
 API 文档：
 
 ```text
 http://127.0.0.1:8000/docs
 ```
 
-### 4. 启动前端
+### 5. 构建前端
 
-另开一个终端窗口。
+后端会托管 `frontend/dist`，所以正常使用前需要先构建前端：
+
+```powershell
+cd frontend
+npm install
+npm run build
+cd ..
+```
+
+构建完成后访问：
+
+```text
+http://127.0.0.1:8000/app
+```
+
+如果你正在开发前端，需要热更新，再另开一个终端窗口启动 Vite。
 
 Windows PowerShell：
 
@@ -176,17 +257,17 @@ Linux / macOS：
 前端默认地址：
 
 ```text
-http://127.0.0.1:5173
+http://127.0.0.1:5173/app/
 ```
 
-### 5. 验证
+### 6. 验证
 
 打开前端后，可以先创建一条笔记。如果后端和模型配置正常，稍等片刻后会看到：
 
 ```text
 笔记摘要 / 标签生成
 笔记进入向量化任务
-右下角精灵显示后台任务状态
+进入工坊查看后台任务状态
 对话窗口可以基于笔记回答问题
 ```
 
@@ -226,7 +307,13 @@ python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 http://127.0.0.1:8000
 ```
 
-### 前端
+AiMemo 统一入口：
+
+```text
+http://127.0.0.1:8000/app
+```
+
+### 前端开发服务
 
 ```powershell
 cd frontend
@@ -234,10 +321,10 @@ npm install
 npm run dev -- --host 127.0.0.1
 ```
 
-前端默认地址：
+前端开发服务地址：
 
 ```text
-http://127.0.0.1:5173
+http://127.0.0.1:5173/app/
 ```
 
 ## 环境变量说明
@@ -302,8 +389,7 @@ npm run build
 ```text
 当前仍是早期开发项目，接口和数据结构可能频繁变化。
 本地数据库、checkpoint、日志、虚拟环境和 node_modules 不会提交到仓库。
-Live2D 当前使用远程示例模型，仅用于开发验证。
-开源发布前需要替换为版权明确、允许分发的本地模型资源。
+当前精灵使用本地 PNG 表情资源，后续如接入 Live2D，需要确认模型资源版权和分发许可。
 ```
 
 ## License

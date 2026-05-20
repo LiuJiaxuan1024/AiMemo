@@ -28,6 +28,19 @@ class AnswerDeltaEvent(TypedDict):
     metadata: dict[str, Any]
 
 
+class BubbleDeltaEvent(TypedDict):
+    """外置精灵气泡回答 token 事件。
+
+    只有 `generate_elf_bubble_answer` 节点产生的 LLM token 会被映射为该事件。
+    第一版 token 内容仍是 JSON 片段，service 会在 done 时提供最终 bubbles。
+    """
+
+    event: Literal["bubble_delta"]
+    node: str
+    content: str
+    metadata: dict[str, Any]
+
+
 class InternalTokenEvent(TypedDict):
     """内部 LLM token 事件。
 
@@ -41,4 +54,4 @@ class InternalTokenEvent(TypedDict):
     metadata: dict[str, Any]
 
 
-AiJiStreamEvent = NodeUpdateEvent | AnswerDeltaEvent | InternalTokenEvent
+AiJiStreamEvent = NodeUpdateEvent | AnswerDeltaEvent | BubbleDeltaEvent | InternalTokenEvent

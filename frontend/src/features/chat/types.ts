@@ -30,12 +30,12 @@ export interface ChatMessage {
   checkpoint_id: string | null;
   status: string;
   token_count: number;
+  turn_id?: number | null;
   created_at: string;
   updated_at: string;
 }
 
 export interface ChatMessageWithTurn extends ChatMessage {
-  turn_id?: number;
   isStreaming?: boolean;
 }
 
@@ -111,5 +111,12 @@ export type ChatStreamEvent =
     }
   | { event: "node"; data: { node: string; node_statuses: Record<string, string> } }
   | { event: "answer_delta"; data: { content: string } }
-  | { event: "done"; data: { turn_id: number; response: ChatResponse } }
+  | {
+      event: "done";
+      data: {
+        turn_id: number;
+        response: ChatResponse;
+        bubbles?: Array<{ text: string; emoji: string }>;
+      };
+    }
   | { event: "error"; data: { turn_id?: number; message: string; node_statuses?: Record<string, string> } };

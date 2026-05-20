@@ -4,6 +4,7 @@ export interface Memory {
   id: number;
   level: number;
   category: string;
+  memory_key: string;
   content: string;
   summary: string;
   importance: number;
@@ -31,6 +32,7 @@ export interface MemoryDetail extends Memory {
 
 export interface MemoryUpdateInput {
   category?: string;
+  memory_key?: string;
   content?: string;
   summary?: string;
   importance?: number;

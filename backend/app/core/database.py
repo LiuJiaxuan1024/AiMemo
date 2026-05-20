@@ -6,7 +6,7 @@ from sqlalchemy import inspect, text
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.core.config import settings
-from app.models import ChatMessage, ChatTurn, Conversation, Job, LongTermMemory, Note, NoteChunk
+from app.models import AgentOperation, ChatMessage, ChatTurn, Conversation, Job, LongTermMemory, Note, NoteChunk
 from app.rag.hashing import content_hash
 
 
@@ -104,6 +104,7 @@ def migrate_existing_sqlite_schema() -> None:
             LongTermMemory.__tablename__,
             {
                 "category": "VARCHAR(40) DEFAULT 'fact'",
+                "memory_key": "VARCHAR(120) DEFAULT ''",
                 "summary": "TEXT DEFAULT ''",
             },
         )

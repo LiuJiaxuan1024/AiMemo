@@ -58,9 +58,115 @@ DASHSCOPE_EMBEDDING_MODEL=text-embedding-v4
 EMBEDDING_DIMENSIONS=1024
 ```
 
+Local Operator read-only 默认允许读取仓库根目录和当前用户 Home 目录。需要追加更多目录时，
+可以在 `.env` 中配置：
+
+```text
+LOCAL_OPERATOR_WORKSPACE_ROOTS=E:\Ai记;D:\资料;~/Documents
+```
+
+多个路径可用分号或逗号分隔。敏感文件、数据库文件和密钥文件仍会被默认拦截。
+
 `.env` 放在仓库根目录即可。后端配置会同时兼容从仓库根目录或 `backend/` 目录启动。
 
-## 3. 启动后端
+## 3. 一键开发启动
+
+开发时推荐用一键脚本同时启动后端、Vite 前端和桌面外置精灵。
+
+Windows PowerShell：
+
+```powershell
+.\scripts\start-dev.ps1
+```
+
+Linux / macOS：
+
+```bash
+chmod +x scripts/start-dev.sh scripts/start-backend.sh scripts/start-frontend.sh
+./scripts/start-dev.sh
+```
+
+启动后访问：
+
+```text
+后端 API:     http://127.0.0.1:8000
+前端开发页:   http://127.0.0.1:5173/app/
+API 文档:     http://127.0.0.1:8000/docs
+桌面精灵:     Memo Elf Tauri 透明窗口
+```
+
+依赖已经安装好时，可以跳过安装：
+
+Windows PowerShell：
+
+```powershell
+.\scripts\start-dev.ps1 -SkipInstall
+```
+
+Linux / macOS：
+
+```bash
+./scripts/start-dev.sh --skip-install
+```
+
+如果只想调试 Web，不启动桌面精灵：
+
+Windows PowerShell：
+
+```powershell
+.\scripts\start-dev.ps1 -NoDesktop
+```
+
+Linux / macOS：
+
+```bash
+./scripts/start-dev.sh --no-desktop
+```
+
+停止所有开发进程：
+
+Windows PowerShell：
+
+```powershell
+.\scripts\stop-dev.ps1
+```
+
+Linux / macOS：
+
+```bash
+./scripts/stop-dev.sh
+```
+
+`stop-dev` 会停止后端、Vite 前端、Tauri desktop webview 和残留的 Memo Elf 桌面进程，避免重复启动后出现多个精灵。
+
+### Python 3.12 虚拟环境策略
+
+后端必须使用 Python 3.12。启动脚本会检查 `backend/.venv`：
+
+```text
+backend/.venv 不存在
+  -> 用 Python 3.12 创建。
+
+backend/.venv 存在但不是 Python 3.12
+  -> 删除旧虚拟环境并用 Python 3.12 重建。
+```
+
+Windows 下如果没有 Python 3.12，脚本会尝试用 `winget install Python.Python.3.12` 安装。
+
+Linux / macOS 下脚本不会静默安装系统 Python，而是提示用户安装。示例：
+
+```bash
+# Ubuntu / Debian
+sudo apt install python3.12 python3.12-venv
+
+# Fedora
+sudo dnf install python3.12
+
+# macOS
+brew install python@3.12
+```
+
+## 4. 单独启动后端
 
 推荐使用脚本：
 
@@ -111,9 +217,26 @@ Linux / macOS：
 ./scripts/start-backend.sh --skip-install
 ```
 
-## 4. 启动前端
+## 5. 构建并访问前端
 
-另开一个终端窗口。
+后端网关会托管 `frontend/dist`，正常使用不需要单独启动 Vite。先构建前端：
+
+Windows PowerShell / Linux / macOS：
+
+```powershell
+cd frontend
+npm install
+npm run build
+cd ..
+```
+
+构建完成后，访问后端统一入口：
+
+```text
+http://127.0.0.1:8000/app
+```
+
+如果你正在开发前端，需要热更新，再另开一个终端窗口启动 Vite。
 
 Windows PowerShell：
 
@@ -127,12 +250,19 @@ Linux / macOS：
 ./scripts/start-frontend.sh
 ```
 
-脚本会安装前端依赖并启动 Vite。
-
-前端地址：
+脚本会安装前端依赖并启动 Vite dev server。
 
 ```text
-http://127.0.0.1:5173
+http://127.0.0.1:5173/app/
+```
+
+主要前端路由：
+
+```text
+/app/memo
+/app/chat
+/app/workshop/jobs
+/app/workshop/memories
 ```
 
 后续依赖已经装好时，可以跳过安装：
@@ -149,7 +279,7 @@ Linux / macOS：
 ./scripts/start-frontend.sh --skip-install
 ```
 
-## 5. 手动启动
+## 6. 手动启动
 
 后端：
 
@@ -175,12 +305,12 @@ python -m pip install -e ".[dev]"
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-前端：
+前端生产构建：
 
 ```powershell
 cd frontend
 npm install
-npm run dev -- --host 127.0.0.1
+npm run build
 ```
 
 Linux / macOS 同样使用：
@@ -188,7 +318,20 @@ Linux / macOS 同样使用：
 ```bash
 cd frontend
 npm install
+npm run build
+```
+
+如果你正在开发前端，需要热更新，可以使用 Vite dev server：
+
+```powershell
+cd frontend
 npm run dev -- --host 127.0.0.1
+```
+
+开发服务地址：
+
+```text
+http://127.0.0.1:5173/app/
 ```
 
 ## 6. 验证
@@ -216,10 +359,10 @@ curl http://127.0.0.1:8000/api/health
 前端验证：
 
 ```text
-打开 http://127.0.0.1:5173
+打开 http://127.0.0.1:8000/app
 创建一条笔记
-等待右下角精灵提示后台任务
-进入对话窗口，询问与笔记相关的问题
+进入 /app/workshop/jobs 查看后台任务
+进入 /app/chat 询问与笔记相关的问题
 ```
 
 ## 常见问题
@@ -272,8 +415,27 @@ Get-NetTCPConnection -LocalPort 8000 -State Listen
 http://127.0.0.1:8000/api/health
 ```
 
-如果前端不是 `http://127.0.0.1:5173`，需要在后端 CORS 配置中加入对应 origin。
+正常入口是 `http://127.0.0.1:8000/app`，前端会使用同源 `/api/*`。
+如果你使用 Vite dev server，请确认 `VITE_API_BASE_URL` 指向后端，或后端 CORS 配置包含开发服务 origin。
 
-### Live2D 精灵加载较慢
+### 精灵没有显示或连接失败
 
-当前第一版精灵使用远程示例模型。网络较慢时会显示“精灵加载中”。后续计划支持本地模型资源，减少首次加载等待。
+当前推荐使用桌面外置精灵。确认后端健康检查正常，并确认桌面端监听：
+
+```text
+http://127.0.0.1:1420
+```
+
+如果只启动后端和 Vite 前端，不会显示外置精灵。外置精灵由 `desktop/`
+里的 Tauri 进程提供。推荐直接使用：
+
+```powershell
+.\scripts\start-dev.ps1
+```
+
+浏览器内精灵默认关闭，因为主精灵已经迁移到桌面外置窗口。需要调试旧 Web 精灵时，可以临时设置：
+
+```powershell
+$env:VITE_ENABLE_WEB_ELF="true"
+.\scripts\start-frontend.ps1
+```

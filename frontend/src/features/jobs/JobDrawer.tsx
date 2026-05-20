@@ -1,19 +1,22 @@
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Brain, Hammer, Pin, PinOff } from "lucide-react";
+import { Brain, Hammer, Pin, PinOff, Sparkles } from "lucide-react";
 
 import { ElfAssistant } from "../elf/ElfAssistant";
 import { countActiveJobs, countFailedJobs } from "../elf/elfState";
 import { MemoryPanel } from "../memories/MemoryPanel";
-import { Button, PanelHeader, SegmentedTabs } from "../../shared/ui";
+import { Button, EmptyState, PanelHeader, SegmentedTabs } from "../../shared/ui";
 import { getJobGraph, listJobs } from "./jobsApi";
 import { JobDetail } from "./JobDetail";
-import { JobGraphView } from "./JobGraphView";
 import { JobList } from "./JobList";
-import type { Job, JobGraph } from "./types";
+import type { Job } from "./types";
 
 const ACTIVE_STATUSES = new Set(["pending", "running"]);
+const ENABLE_WEB_ELF = import.meta.env.VITE_ENABLE_WEB_ELF === "true";
 type DrawerTab = "jobs" | "memories";
+const JobGraphView = lazy(() =>
+  import("./JobGraphView").then((module) => ({ default: module.JobGraphView })),
+);
 
 export function JobDrawer() {
   const [isOpen, setIsOpen] = useState(false);
@@ -63,15 +66,28 @@ export function JobDrawer() {
 
   return (
     <>
-      <ElfAssistant
-        activeCount={activeCount}
-        failedCount={failedCount}
-        isWorkshopOpen={isOpen}
-        jobs={jobs}
-        onToggleWorkshop={() => setIsOpen((value) => !value)}
-      />
+      {ENABLE_WEB_ELF ? (
+        <ElfAssistant
+          activeCount={activeCount}
+          failedCount={failedCount}
+          isWorkshopOpen={isOpen}
+          jobs={jobs}
+          onToggleWorkshop={() => setIsOpen((value) => !value)}
+        />
+      ) : null}
 
       <aside className={isOpen ? "job-drawer open" : "job-drawer"}>
+      {!ENABLE_WEB_ELF ? (
+        <button
+          aria-label={isOpen ? "收起精灵工坊" : "打开精灵工坊"}
+          className="job-drawer-handle"
+          onClick={() => setIsOpen((value) => !value)}
+          type="button"
+        >
+          <Sparkles aria-hidden="true" size={18} />
+          {activeCount > 0 ? <span>{activeCount}</span> : null}
+        </button>
+      ) : null}
       <div className="job-drawer-panel">
         <PanelHeader
           actions={
@@ -110,7 +126,9 @@ export function JobDrawer() {
             <JobList jobs={jobs} selectedJobId={selectedJob?.id ?? null} onSelect={setSelectedJob} />
             <div className="job-inspector">
               <JobDetail job={selectedJob} />
-              <JobGraphView graph={graphQuery.data ?? null} isLoading={graphQuery.isFetching} />
+              <Suspense fallback={<EmptyState>正在加载 graph 渲染器...</EmptyState>}>
+                <JobGraphView graph={graphQuery.data ?? null} isLoading={graphQuery.isFetching} />
+              </Suspense>
             </div>
           </div>
         ) : (

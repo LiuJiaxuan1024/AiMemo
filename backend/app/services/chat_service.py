@@ -13,6 +13,7 @@ from app.models.conversation import Conversation
 from app.models.note import utc_now
 from app.rag.chunking.tokenizer import count_tokens
 from app.schemas.chat import ChatResponse
+from app.schemas.elf import ElfEventCreate
 from app.schemas.conversation import ChatMessageRead
 from app.schemas.search import NoteSearchResult
 from app.services.chat_turn_service import (
@@ -25,6 +26,7 @@ from app.services.chat_turn_service import (
 )
 from app.services.conversation_summary_service import enqueue_conversation_summary_job_if_needed
 from app.services.conversation_service import _to_chat_message_read
+from app.services.elf_event_service import emit_elf_event
 from app.services.long_term_memory_service import enqueue_conversation_memory_job_if_needed
 
 
@@ -114,6 +116,8 @@ def stream_conversation_chat_events(
     message: str,
     session_factory: SessionFactory = session_scope,
     checkpoint_path: str | None = None,
+    emit_status_events: bool = True,
+    answer_mode: str = "text",
 ):
     """生成一轮聊天的 SSE 事件。
 
@@ -122,6 +126,9 @@ def stream_conversation_chat_events(
       message: 用户本轮输入。
       session_factory: 数据库 session 工厂，测试可替换。
       checkpoint_path: LangGraph checkpoint 数据库路径。
+      emit_status_events: 是否向精灵事件中心播报“开始思考/开始回答/完成”等状态。
+        桌面精灵外置聊天会关闭它，因为用户正在直接和精灵对话，不需要额外工作播报。
+      answer_mode: 回答生成模式。text 走普通 generate_answer；elf_bubble 走气泡回答分支。
 
     事件：
       - turn: 创建 graph_run_id，前端可立即建立调试入口。
@@ -169,6 +176,19 @@ def stream_conversation_chat_events(
 
     node_statuses = initial_node_statuses()
     _mark_debug_event(debug_payload, started_at, "turn_created")
+    if emit_status_events:
+        emit_elf_event(
+            ElfEventCreate(
+                source="chat",
+                mood="thinking",
+                motion="thinking",
+                message="我在整理这次问题的上下文。",
+                priority=20,
+                ttl_ms=3200,
+                dedupe_key=f"chat:{turn_id}:started",
+                metadata={"conversation_id": conversation_id, "turn_id": turn_id},
+            )
+        )
     yield _sse(
         "turn",
         {
@@ -189,6 +209,7 @@ def stream_conversation_chat_events(
             checkpoint_path=checkpoint_path or settings.langgraph_checkpoint_path,
             user_message_id=user_message_id,
             assistant_message_id=assistant_message_id,
+            answer_mode=answer_mode,
         ):
             if event["event"] == "node":
                 node_name = str(event["node"])
@@ -218,6 +239,19 @@ def stream_conversation_chat_events(
                 _mark_node_running(node_statuses, node_name)
                 _mark_answer_token_timing(debug_payload, started_at)
                 if should_emit_node:
+                    if emit_status_events:
+                        emit_elf_event(
+                            ElfEventCreate(
+                                source="chat",
+                                mood="talking",
+                                motion="nod",
+                                message="我开始回答了。",
+                                priority=35,
+                                ttl_ms=2500,
+                                dedupe_key=f"chat:{turn_id}:answer-started",
+                                metadata={"conversation_id": conversation_id, "turn_id": turn_id},
+                            )
+                        )
                     _mark_node_timing(
                         debug_payload,
                         started_at,
@@ -246,6 +280,10 @@ def stream_conversation_chat_events(
                 # 内部 LLM token 例如 planner JSON，默认不暴露给前端。
                 # 后续如果做“调试模式”，可以在这里转成 internal_token SSE。
                 continue
+            elif event["event"] == "bubble_delta":
+                # 外置精灵气泡 JSON token 不直接发给普通 Web 聊天。
+                # 专用 /api/elf/chat/stream 会使用 answer_mode=elf_bubble 并在 done 中消费最终 bubbles。
+                continue
             elif event["event"] == "done":
                 final_state = event["state"]
                 _mark_debug_event(debug_payload, started_at, "graph_done")
@@ -263,7 +301,21 @@ def stream_conversation_chat_events(
                 node_statuses[node_name] = "skipped"
 
         _mark_debug_event(debug_payload, started_at, "turn_completed")
+        if emit_status_events:
+            emit_elf_event(
+                ElfEventCreate(
+                    source="chat",
+                    mood="success",
+                    motion="success",
+                    message="这轮对话完成了。",
+                    priority=30,
+                    ttl_ms=2800,
+                    dedupe_key=f"chat:{turn_id}:completed",
+                    metadata={"conversation_id": conversation_id, "turn_id": turn_id},
+                )
+            )
         context_layers = _extract_context_layers(final_state)
+        elf_bubbles = list(final_state.get("elf_bubble_answer_parts", []))
         retrieved_chunks = list(final_state.get("retrieved_chunks", []))
         final_assistant_content = str(final_state.get("assistant_answer") or assistant_content)
         debug_payload["summary"]["answer_chars"] = len(final_assistant_content)
@@ -323,7 +375,10 @@ def stream_conversation_chat_events(
                     for chunk in retrieved_chunks
                 ],
             )
-        yield _sse("done", {"turn_id": turn_id, "response": response.model_dump(mode="json")})
+        done_payload = {"turn_id": turn_id, "response": response.model_dump(mode="json")}
+        if answer_mode == "elf_bubble":
+            done_payload["bubbles"] = elf_bubbles
+        yield _sse("done", done_payload)
     except Exception as exc:
         for node_name, node_status in list(node_statuses.items()):
             if node_status == "running":
@@ -335,6 +390,19 @@ def stream_conversation_chat_events(
                     status="failed",
                 )
         _mark_debug_event(debug_payload, started_at, "turn_failed")
+        if emit_status_events:
+            emit_elf_event(
+                ElfEventCreate(
+                    source="chat",
+                    mood="error",
+                    motion="error",
+                    message="这轮对话执行失败了，我记录了错误。",
+                    priority=90,
+                    ttl_ms=6000,
+                    dedupe_key=f"chat:{turn_id}:failed",
+                    metadata={"conversation_id": conversation_id, "turn_id": turn_id, "error": str(exc)},
+                )
+            )
         with session_factory() as session:
             _update_streaming_assistant_message(
                 session,

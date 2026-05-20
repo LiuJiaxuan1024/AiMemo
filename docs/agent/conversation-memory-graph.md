@@ -42,9 +42,11 @@ extract_memories
 
 consolidate_memories
   将抽取出的候选记忆和已有 active L4 记忆做归并判断。
+  memory_key 相同的记忆会优先召回，即使 category 不同也进入同一轮判断。
+  称呼、昵称、身份偏好等容易跨 category 的记忆会做跨类候选召回。
   content_hash 完全重复时直接 skip。
   明显高相似记忆由本地规则直接 skip。
-  其他同 category 候选交给 planner LLM judge，判断 skip/create/update。
+  其他候选交给 planner LLM judge，判断 skip/create/update。
   输出 consolidation_result，并写入 LangGraph checkpoint。
 
 write_memories
@@ -82,6 +84,16 @@ content 非空
 content_hash 不重复
 ```
 
+`memory_key` 是长期记忆的稳定槽位键，用来表达“这条记忆属于哪个可更新槽位”。
+例如：
+
+```text
+user.preferred_name
+```
+
+如果用户先说“叫我小刘”，后面又说“以后叫我家炫，不要叫我小刘”，
+两条候选都应归入 `user.preferred_name`。归并节点会优先更新旧记忆，而不是创建两条互相冲突的 L4 记忆。
+
 支持的 `category`：
 
 ```text
@@ -118,6 +130,7 @@ source_id = assistant_message_id
 如果 write_memories 被重复执行：
   create 会再次检查 content_hash。
   update 会按 existing_memory_id 更新已有 active 记忆。
+  update 会保留或写入 memory_key，避免恢复后丢失槽位信息。
 ```
 
 ## JSON 解析容错
@@ -148,8 +161,6 @@ source_id = assistant_message_id
 
 ```text
 长期记忆向量化
-语义级记忆归并
-记忆冲突检测
 用户确认机制
 记忆编辑 UI
 多 worker 分类抽取

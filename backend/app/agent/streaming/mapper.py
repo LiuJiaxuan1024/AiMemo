@@ -4,6 +4,7 @@ from app.agent.streaming.events import AiJiStreamEvent
 
 
 VISIBLE_ANSWER_NODE = "generate_answer"
+VISIBLE_BUBBLE_NODE = "generate_elf_bubble_answer"
 
 
 def map_langgraph_stream_chunk(
@@ -11,6 +12,7 @@ def map_langgraph_stream_chunk(
     chunk: Any,
     *,
     visible_answer_node: str = VISIBLE_ANSWER_NODE,
+    visible_bubble_node: str = VISIBLE_BUBBLE_NODE,
 ) -> list[AiJiStreamEvent]:
     """把 LangGraph 原始 stream chunk 映射为 Ai 记内部事件。
 
@@ -31,7 +33,11 @@ def map_langgraph_stream_chunk(
     if mode == "updates":
         return _map_updates_chunk(chunk)
     if mode in {"messages", "messages-tuple"}:
-        event = _map_messages_chunk(chunk, visible_answer_node=visible_answer_node)
+        event = _map_messages_chunk(
+            chunk,
+            visible_answer_node=visible_answer_node,
+            visible_bubble_node=visible_bubble_node,
+        )
         return [event] if event else []
     return []
 
@@ -58,6 +64,7 @@ def _map_messages_chunk(
     chunk: Any,
     *,
     visible_answer_node: str,
+    visible_bubble_node: str,
 ) -> AiJiStreamEvent | None:
     if not isinstance(chunk, tuple) or len(chunk) != 2:
         return None
@@ -73,6 +80,13 @@ def _map_messages_chunk(
     if node_name == visible_answer_node:
         return {
             "event": "answer_delta",
+            "node": node_name,
+            "content": content,
+            "metadata": metadata,
+        }
+    if node_name == visible_bubble_node:
+        return {
+            "event": "bubble_delta",
             "node": node_name,
             "content": content,
             "metadata": metadata,

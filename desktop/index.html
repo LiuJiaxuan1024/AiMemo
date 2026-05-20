@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Memo Elf</title>
+  </head>
+  <body>
+    <main id="app">
+      <section class="bubble" id="bubble">正在连接 AiMemo...</section>
+      <button class="elf" id="elf" type="button" aria-label="打开 AiMemo">
+        <img id="elf-image" src="/elf/memo/01_idle_soft.png" alt="" draggable="false" />
+      </button>
+      <section class="elf-menu" id="elf-menu" aria-hidden="true">
+        <button id="chat-toggle" type="button">和我聊聊</button>
+        <button id="open-app" type="button">打开 AiMemo</button>
+      </section>
+      <form class="chat-panel" id="chat-panel" aria-hidden="true">
+        <textarea id="chat-input" maxlength="500" placeholder="想和我说什么？" rows="1"></textarea>
+        <button id="chat-send" type="submit">发送</button>
+      </form>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

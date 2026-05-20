@@ -78,6 +78,10 @@ export function MemoryDetailPanel({
               </dd>
             </div>
             <div>
+              <dt>槽位</dt>
+              <dd>{detail.memory_key || "-"}</dd>
+            </div>
+            <div>
               <dt>Hash</dt>
               <dd title={detail.content_hash}>{detail.content_hash.slice(0, 12)}...</dd>
             </div>

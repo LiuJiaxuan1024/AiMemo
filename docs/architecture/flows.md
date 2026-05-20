@@ -31,8 +31,8 @@ flowchart LR
     EmbeddingGraph --> Vectors[(sqlite-vec vec_note_chunks)]
 
     Frontend -->|轮询 processing_status| API
-    JobDrawer[Job Drawer] -->|GET /api/jobs| API
-    JobDrawer -->|GET /api/jobs/:id/graph| API
+    Workshop[Workshop Jobs] -->|GET /api/jobs| API
+    Workshop -->|GET /api/jobs/:id/graph| API
 ```
 
 ## 创建笔记与 AI 整理

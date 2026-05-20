@@ -6,6 +6,7 @@ from app.agent.graphs.memory_chat.graph import build_memory_chat_graph, run_memo
 from app.agent.graphs.memory_chat.nodes import RetrievalPlan
 from app.agent.graphs.memory_chat.nodes import build_memory_chat_answer_system_prompt
 from app.agent.graphs.memory_chat.nodes import default_retrieval_planner
+from app.agent.graphs.memory_chat.nodes import _parse_elf_bubble_parts
 from app.models.chat_message import ChatMessage
 from app.models.long_term_memory import LongTermMemory
 from app.rag.hashing import content_hash
@@ -61,7 +62,9 @@ def test_memory_chat_graph_main_flow_is_flat_context_worker_graph(session_factor
     assert "load_turn_state" in mermaid
     assert "dispatch_context_workers" in mermaid
     assert "build_l3_retrieved_memory" in mermaid
+    assert "build_local_operator_context" in mermaid
     assert "merge_prompt_context" in mermaid
+    assert "generate_elf_bubble_answer" in mermaid
     assert "plan_retrieval" not in mermaid
     assert "retrieve_notes" not in mermaid
     assert "grade_retrieval" not in mermaid
@@ -136,6 +139,59 @@ def test_memory_chat_graph_retrieves_notes_when_needed(
     assert "L3 RAG 检索记忆" in result["prompt_context"]
     assert "今天中午我想点炸鸡吃" in result["prompt_context"]
     assert result["retrieved_chunks"][0]["content"] == "今天中午我想点炸鸡吃"
+
+
+def test_memory_chat_graph_elf_bubble_mode_persists_joined_bubbles(
+    session,
+    session_factory,
+    tmp_path: Path,
+):
+    conversation = create_conversation(session, ConversationCreate(title="精灵气泡"))
+
+    def fake_bubbles(user_message, recent_messages, retrieved_chunks, needs_retrieval, retrieval_grade):
+        assert user_message == "在吗"
+        return [
+            {"text": "我在呀。", "emoji": "happy"},
+            {"text": "想聊什么都可以。", "emoji": "soft"},
+        ]
+
+    result = run_memory_chat_graph(
+        conversation_id=conversation.id,
+        user_message="在吗",
+        session_factory=session_factory,
+        checkpoint_path=str(tmp_path / "checkpoints.db"),
+        bubble_answer_generator=fake_bubbles,
+        answer_mode="elf_bubble",
+    )
+
+    messages = session.exec(select(ChatMessage).order_by(ChatMessage.id)).all()
+    assert result["elf_bubble_answer_parts"][0]["emoji"] == "success_smile"
+    assert result["assistant_answer"] == "我在呀。\n\n想聊什么都可以。"
+    assert messages[-1].content == "我在呀。\n\n想聊什么都可以。"
+
+
+def test_elf_bubble_parser_splits_obvious_emotion_shift():
+    parts = _parse_elf_bubble_parts(
+        '{"bubbles":[{"text":"当然开心呀，小刘！但是我也有点担心你今天太累了。","emoji":"happy"}]}'
+    )
+
+    assert [part["text"] for part in parts] == [
+        "当然开心呀，小刘！",
+        "但是我也有点担心你今天太累了。",
+    ]
+    assert [part["emoji"] for part in parts] == ["success_smile", "error_worried"]
+
+
+def test_elf_bubble_parser_accepts_expanded_expression_emoji():
+    parts = _parse_elf_bubble_parts(
+        '{"bubbles":['
+        '{"text":"这件事我会认真看。","emoji":"serious"},'
+        '{"text":"不过你也别急，我们慢慢来。","emoji":"encouraging"},'
+        '{"text":"诶，这个结果有点出乎意料。","emoji":"surprised"}'
+        "]}"
+    )
+
+    assert [part["emoji"] for part in parts] == ["serious", "encouraging", "surprised"]
 
 
 def test_memory_chat_graph_uses_planned_retrieval_query(

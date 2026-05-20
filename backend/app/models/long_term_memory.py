@@ -15,6 +15,7 @@ class LongTermMemory(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     level: int = Field(default=4, index=True)
     category: str = Field(default="fact", index=True, max_length=40)
+    memory_key: str = Field(default="", index=True, max_length=120)
     content: str
     summary: str = ""
     importance: float = Field(default=0.0, index=True)

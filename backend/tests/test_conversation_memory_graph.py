@@ -197,6 +197,84 @@ def test_conversation_memory_graph_skips_semantic_duplicate_memory(
     assert memories[0].content == "用户计划开发名为 Ai 记 的智能化笔记软件。"
 
 
+def test_conversation_memory_graph_updates_cross_category_memory_key_conflict(
+    session,
+    session_factory,
+    tmp_path: Path,
+):
+    """同一 memory_key 即使 category 不同，也应更新旧记忆而不是新增重复记忆。"""
+
+    existing = LongTermMemory(
+        level=4,
+        category="identity",
+        memory_key="user.preferred_name",
+        content="用户希望被称呼为小刘。",
+        summary="用户昵称是小刘",
+        importance=0.9,
+        confidence=1.0,
+        source_type="chat_message",
+        source_id=44,
+        status="active",
+        content_hash=build_memory_content_hash("identity", "用户希望被称呼为小刘。"),
+        updated_at=utc_now(),
+    )
+    session.add(existing)
+    session.commit()
+    session.refresh(existing)
+
+    conversation = create_conversation(session, ConversationCreate(title="称呼更新"))
+    user = _add_message(session, conversation.id, "user", "以后叫我家炫，不要叫我小刘。")
+    assistant = _add_message(session, conversation.id, "assistant", "好的，我会称呼你为家炫。", user.id)
+    job = _enqueue_memory_job(session, conversation.id, user.id, assistant.id)
+    judge_seen_ids: list[int] = []
+
+    def fake_extractor(messages):
+        return {
+            "memories": [
+                {
+                    "should_write": True,
+                    "category": "preference",
+                    "memory_key": "user.preferred_name",
+                    "content": "用户希望被称呼为家炫，而不是小刘。",
+                    "summary": "偏好称呼：家炫",
+                    "importance": 0.9,
+                    "confidence": 1.0,
+                }
+            ]
+        }
+
+    def fake_judge(candidate, existing_memories):
+        judge_seen_ids.extend(memory.id for memory in existing_memories if memory.id is not None)
+        return {
+            "action": "update",
+            "existing_memory_id": existing.id,
+            "category": "preference",
+            "memory_key": "user.preferred_name",
+            "content": "用户希望被称呼为家炫，而不是小刘。",
+            "summary": "偏好称呼：家炫",
+            "importance": 0.9,
+            "confidence": 1.0,
+            "reason": "同一称呼槽位出现更新。",
+        }
+
+    run_conversation_memory_graph(
+        job,
+        session_factory=session_factory,
+        checkpoint_path=str(tmp_path / "checkpoints.db"),
+        memory_extractor=fake_extractor,
+        consolidation_judge=fake_judge,
+    )
+
+    session.expire_all()
+    memories = session.exec(select(LongTermMemory)).all()
+    assert judge_seen_ids == [existing.id]
+    assert len(memories) == 1
+    assert memories[0].id == existing.id
+    assert memories[0].category == "preference"
+    assert memories[0].memory_key == "user.preferred_name"
+    assert memories[0].content == "用户希望被称呼为家炫，而不是小刘。"
+
+
 def test_conversation_memory_graph_resumes_after_consolidation_without_rejudging(
     session,
     session_factory,

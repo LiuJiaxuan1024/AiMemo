@@ -18,7 +18,17 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     chat_model: str = ""
     embedding_model: str = ""
-    cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    # Local Operator read-only 默认允许仓库根目录和当前用户 Home。
+    # 这里可以追加更多根目录，使用分号或逗号分隔，例如：
+    # LOCAL_OPERATOR_WORKSPACE_ROOTS=E:\Ai记;D:\资料;~/Documents
+    local_operator_workspace_roots: str = ""
+    cors_origins: list[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:1420",
+        "http://127.0.0.1:1420",
+        "tauri://localhost",
+    ]
 
     model_config = SettingsConfigDict(
         # 支持两种常见启动方式：
