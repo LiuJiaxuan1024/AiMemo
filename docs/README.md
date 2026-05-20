@@ -55,6 +55,7 @@
 - [精灵助手](./frontend/elf-assistant.md)
 - [精灵事件总线](./frontend/elf-event-bus.md)
 - [原创精灵设计](./frontend/elf-character-design.md)
+- [精灵图片生成提示词模板](./frontend/elf-image-prompts.md)
 
 ### 桌面精灵
 
