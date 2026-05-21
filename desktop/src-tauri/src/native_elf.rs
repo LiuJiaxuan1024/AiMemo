@@ -16,9 +16,12 @@ use gtk::prelude::*;
 const ELF_WIDTH: i32 = 260;
 const BUBBLE_HEIGHT: i32 = 124;
 const CHAT_HEIGHT: i32 = 46;
+const MENU_WIDTH: i32 = 142;
+const MENU_HEIGHT: i32 = 78;
 const WINDOW_PADDING: i32 = 8;
 const ALPHA_THRESHOLD: u8 = 12;
 const DEV_MEMO_URL: &str = "http://127.0.0.1:5173/app/memo";
+const DEV_WORKSHOP_URL: &str = "http://127.0.0.1:5173/app/workshop/jobs";
 const ELF_CHAT_URL: &str = "http://127.0.0.1:8000/api/elf/chat/stream";
 const ELF_EVENTS_URL: &str = "http://127.0.0.1:8000/api/elf/events";
 const DEFAULT_EXPRESSION: &str = "01_idle_soft.png";
@@ -27,6 +30,7 @@ const DEFAULT_EXPRESSION: &str = "01_idle_soft.png";
 enum NativeUiMessage {
     Bubble { text: String, expression: String },
     Expression { expression: String },
+    HideBubble,
 }
 
 #[derive(Debug)]
@@ -73,8 +77,11 @@ fn main() {
 
     let bubble_visible = Rc::new(Cell::new(true));
     let chat_visible = Rc::new(Cell::new(false));
-    let bubble_text = Rc::new(RefCell::new(String::from("我在这里，点气泡和我说话。")));
+    let menu_visible = Rc::new(Cell::new(false));
+    let bubble_text = Rc::new(RefCell::new(String::from("我在这里，点我打开菜单。")));
     let current_pixbuf = Rc::new(RefCell::new(pixbuf.clone()));
+    let drag_origin = Rc::new(RefCell::new(None::<(f64, f64)>));
+    let drag_started = Rc::new(Cell::new(false));
     let drawing_area = gtk::DrawingArea::builder()
         .app_paintable(true)
         .width_request(width)
@@ -119,9 +126,24 @@ fn main() {
     chat_entry.set_no_show_all(true);
     fixed.put(&chat_entry, WINDOW_PADDING, height - CHAT_HEIGHT + 5);
 
+    let action_menu = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    action_menu.style_context().add_class("native-action-menu");
+    action_menu.set_no_show_all(true);
+    let chat_button = gtk::Button::with_label("和我聊聊");
+    chat_button.style_context().add_class("native-menu-button");
+    let open_button = gtk::Button::with_label("打开工坊");
+    open_button.style_context().add_class("native-menu-button");
+    action_menu.pack_start(&chat_button, false, false, 0);
+    action_menu.pack_start(&open_button, false, false, 0);
+    fixed.put(
+        &action_menu,
+        width - MENU_WIDTH - WINDOW_PADDING,
+        BUBBLE_HEIGHT + WINDOW_PADDING,
+    );
+
     let drag_window = window.clone();
-    let press_chat_visible = Rc::clone(&chat_visible);
-    let press_entry = chat_entry.clone();
+    let press_drag_origin = Rc::clone(&drag_origin);
+    let press_drag_started = Rc::clone(&drag_started);
     drawing_area.connect_button_press_event(move |_, event| {
         if event.button() != 1 {
             return glib::Propagation::Proceed;
@@ -130,35 +152,68 @@ fn main() {
             open_aimemo();
             return glib::Propagation::Stop;
         }
-        if event.position().1 <= BUBBLE_HEIGHT as f64 {
-            let is_visible = !press_chat_visible.get();
-            press_chat_visible.set(is_visible);
-            if is_visible {
-                press_entry.show();
-                press_entry.grab_focus();
-            } else {
-                press_entry.hide();
-            }
-            return glib::Propagation::Stop;
-        }
-        let (root_x, root_y) = event.root();
-        drag_window.begin_move_drag(
-            event.button() as i32,
-            root_x as i32,
-            root_y as i32,
-            event.time(),
-        );
+        *press_drag_origin.borrow_mut() = Some(event.position());
+        press_drag_started.set(false);
         glib::Propagation::Stop
     });
 
-    let click_bubble_visible = Rc::clone(&bubble_visible);
-    let click_area = drawing_area.clone();
-    drawing_area.connect_button_release_event(move |_, event| {
-        if event.button() == 1 && event.position().1 > BUBBLE_HEIGHT as f64 {
-            click_bubble_visible.set(!click_bubble_visible.get());
-            click_area.queue_draw();
+    let motion_drag_origin = Rc::clone(&drag_origin);
+    let motion_drag_started = Rc::clone(&drag_started);
+    let motion_menu_visible = Rc::clone(&menu_visible);
+    let motion_menu = action_menu.clone();
+    drawing_area.connect_motion_notify_event(move |_, event| {
+        let Some((start_x, start_y)) = *motion_drag_origin.borrow() else {
+            return glib::Propagation::Proceed;
+        };
+        if motion_drag_started.get() {
+            return glib::Propagation::Stop;
         }
-        glib::Propagation::Proceed
+        let (current_x, current_y) = event.position();
+        if (current_x - start_x).abs() <= 5.0 && (current_y - start_y).abs() <= 5.0 {
+            return glib::Propagation::Proceed;
+        }
+        let (root_x, root_y) = event.root();
+        motion_drag_started.set(true);
+        motion_menu.hide();
+        motion_menu_visible.set(false);
+        drag_window.begin_move_drag(1, root_x as i32, root_y as i32, event.time());
+        glib::Propagation::Stop
+    });
+
+    let release_drag_origin = Rc::clone(&drag_origin);
+    let release_drag_started = Rc::clone(&drag_started);
+    let release_menu_visible = Rc::clone(&menu_visible);
+    let release_menu = action_menu.clone();
+    drawing_area.connect_button_release_event(move |_, event| {
+        if event.button() == 1
+            && release_drag_origin.borrow().is_some()
+            && !release_drag_started.get()
+        {
+            toggle_action_menu(&release_menu, &release_menu_visible);
+        }
+        *release_drag_origin.borrow_mut() = None;
+        release_drag_started.set(false);
+        glib::Propagation::Stop
+    });
+
+    let chat_button_entry = chat_entry.clone();
+    let chat_button_menu = action_menu.clone();
+    let chat_button_chat_visible = Rc::clone(&chat_visible);
+    let chat_button_menu_visible = Rc::clone(&menu_visible);
+    chat_button.connect_clicked(move |_| {
+        chat_button_menu.hide();
+        chat_button_menu_visible.set(false);
+        chat_button_chat_visible.set(true);
+        chat_button_entry.show();
+        chat_button_entry.grab_focus();
+    });
+
+    let open_button_menu = action_menu.clone();
+    let open_button_menu_visible = Rc::clone(&menu_visible);
+    open_button.connect_clicked(move |_| {
+        open_button_menu.hide();
+        open_button_menu_visible.set(false);
+        open_workshop();
     });
 
     let (sender, receiver) = glib::MainContext::channel::<NativeUiMessage>(Priority::DEFAULT);
@@ -166,6 +221,8 @@ fn main() {
     let entry_bubble_text = Rc::clone(&bubble_text);
     let entry_bubble_visible = Rc::clone(&bubble_visible);
     let entry_chat_visible = Rc::clone(&chat_visible);
+    let entry_menu_visible = Rc::clone(&menu_visible);
+    let entry_menu = action_menu.clone();
     let entry_pixbuf = Rc::clone(&current_pixbuf);
     let entry_window = window.clone();
     let chat_sender = sender.clone();
@@ -176,6 +233,8 @@ fn main() {
         }
         entry.set_text("");
         entry.hide();
+        entry_menu.hide();
+        entry_menu_visible.set(false);
         entry_chat_visible.set(false);
         entry_bubble_visible.set(true);
         *entry_bubble_text.borrow_mut() = String::from("嗯，我听着。");
@@ -206,6 +265,7 @@ fn main() {
                     let _ = sender.send(NativeUiMessage::Expression {
                         expression: DEFAULT_EXPRESSION.to_string(),
                     });
+                    let _ = sender.send(NativeUiMessage::HideBubble);
                 }
                 Err(error) => {
                     let _ = sender.send(NativeUiMessage::Bubble {
@@ -246,6 +306,17 @@ fn main() {
                     &expression,
                 );
             }
+            NativeUiMessage::HideBubble => {
+                receive_bubble_visible.set(false);
+                set_expression(
+                    &receive_window,
+                    &receive_pixbuf,
+                    &receive_area,
+                    width,
+                    height,
+                    DEFAULT_EXPRESSION,
+                );
+            }
         }
         receive_area.queue_draw();
         ControlFlow::Continue
@@ -281,6 +352,22 @@ fn install_css() {
               color: #0f172a;
               padding: 8px 10px;
             }
+
+            box.native-action-menu {
+              background: rgba(255, 255, 255, 0.96);
+              border: 1px solid rgba(124, 179, 255, 0.86);
+              border-radius: 10px;
+              padding: 8px;
+            }
+
+            button.native-menu-button {
+              min-height: 26px;
+              background: rgba(237, 246, 255, 0.96);
+              border: 1px solid rgba(124, 179, 255, 0.54);
+              border-radius: 8px;
+              color: #0f172a;
+              padding: 4px 10px;
+            }
             ",
         )
         .expect("failed to install native elf CSS");
@@ -290,6 +377,18 @@ fn install_css() {
             &provider,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+    }
+}
+
+fn toggle_action_menu(menu: &gtk::Box, is_visible: &Rc<Cell<bool>>) {
+    let next_visible = !is_visible.get();
+    is_visible.set(next_visible);
+    if next_visible {
+        // GTK 原生菜单是 Linux 桌宠路径的轻量替代：避免再把“点击气泡”直接绑定到聊天输入，
+        // 也方便后续继续增加工坊、设置、退出等动作入口。
+        menu.show_all();
+    } else {
+        menu.hide();
     }
 }
 
@@ -432,6 +531,12 @@ fn apply_window_shape(window: &gtk::Window, pixbuf: &Pixbuf, width: i32, _height
         BUBBLE_HEIGHT + WINDOW_PADDING * 2,
     ));
     let _ = region.union_rectangle(&RectangleInt::new(
+        width - MENU_WIDTH - WINDOW_PADDING,
+        BUBBLE_HEIGHT + WINDOW_PADDING,
+        MENU_WIDTH,
+        MENU_HEIGHT,
+    ));
+    let _ = region.union_rectangle(&RectangleInt::new(
         WINDOW_PADDING,
         _height - CHAT_HEIGHT,
         width - WINDOW_PADDING * 2,
@@ -492,6 +597,10 @@ fn union_pixbuf_alpha_runs(region: &Region, pixbuf: &Pixbuf, offset_x: i32, offs
 
 fn open_aimemo() {
     let _ = Command::new("xdg-open").arg(DEV_MEMO_URL).spawn();
+}
+
+fn open_workshop() {
+    let _ = Command::new("xdg-open").arg(DEV_WORKSHOP_URL).spawn();
 }
 
 fn send_elf_chat(
