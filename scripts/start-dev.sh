@@ -71,9 +71,28 @@ stop_port_processes() {
   fi
 }
 
+ensure_frontend_dist_for_backend_app() {
+  local frontend_dir="$REPO_ROOT/frontend"
+  local index_html="$frontend_dir/dist/index.html"
+
+  if [[ -f "$index_html" ]]; then
+    return 0
+  fi
+
+  echo "Building frontend once for backend-hosted /app entry..."
+  (
+    cd "$frontend_dir"
+    if [[ "$SKIP_INSTALL" -eq 0 || ! -d "node_modules" ]]; then
+      npm install
+    fi
+    npm run build
+  )
+}
+
 "$SCRIPT_DIR/stop-dev.sh"
 warn_linux_file_watch_limit
 warn_invalid_proxy_scheme
+ensure_frontend_dist_for_backend_app
 
 ARGS=()
 if [[ "$SKIP_INSTALL" -eq 1 ]]; then
