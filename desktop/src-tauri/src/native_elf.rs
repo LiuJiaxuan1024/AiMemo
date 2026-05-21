@@ -20,8 +20,8 @@ const MENU_WIDTH: i32 = 142;
 const MENU_HEIGHT: i32 = 78;
 const WINDOW_PADDING: i32 = 8;
 const ALPHA_THRESHOLD: u8 = 12;
-const DEV_MEMO_URL: &str = "http://127.0.0.1:5173/app/memo";
-const DEV_WORKSHOP_URL: &str = "http://127.0.0.1:5173/app/workshop/jobs";
+const MEMO_URL: &str = "http://127.0.0.1:8000/app/memo";
+const WORKSHOP_URL: &str = "http://127.0.0.1:8000/app/workshop/jobs";
 const ELF_CHAT_URL: &str = "http://127.0.0.1:8000/api/elf/chat/stream";
 const ELF_EVENTS_URL: &str = "http://127.0.0.1:8000/api/elf/events";
 const DEFAULT_EXPRESSION: &str = "01_idle_soft.png";
@@ -53,6 +53,8 @@ fn main() {
         .expect("failed to scale Memo Elf image");
     let width = pixbuf.width() + WINDOW_PADDING * 2;
     let height = pixbuf.height() + BUBBLE_HEIGHT + CHAT_HEIGHT + WINDOW_PADDING * 2;
+    let elf_top = BUBBLE_HEIGHT + WINDOW_PADDING;
+    let elf_bottom = elf_top + pixbuf.height();
 
     let window = gtk::Window::builder()
         .title("Memo Elf")
@@ -149,8 +151,12 @@ fn main() {
             return glib::Propagation::Proceed;
         }
         if event.event_type() == gdk::EventType::DoubleButtonPress {
-            open_aimemo();
+            // Linux 原生桌宠使用单击菜单作为主交互，双击不再执行打开页面，避免误触。
             return glib::Propagation::Stop;
+        }
+        let (_x, y) = event.position();
+        if y < elf_top as f64 || y > elf_bottom as f64 {
+            return glib::Propagation::Proceed;
         }
         *press_drag_origin.borrow_mut() = Some(event.position());
         press_drag_started.set(false);
@@ -596,11 +602,11 @@ fn union_pixbuf_alpha_runs(region: &Region, pixbuf: &Pixbuf, offset_x: i32, offs
 }
 
 fn open_aimemo() {
-    let _ = Command::new("xdg-open").arg(DEV_MEMO_URL).spawn();
+    let _ = Command::new("xdg-open").arg(MEMO_URL).spawn();
 }
 
 fn open_workshop() {
-    let _ = Command::new("xdg-open").arg(DEV_WORKSHOP_URL).spawn();
+    let _ = Command::new("xdg-open").arg(WORKSHOP_URL).spawn();
 }
 
 fn send_elf_chat(
