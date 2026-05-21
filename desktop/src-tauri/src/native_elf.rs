@@ -14,7 +14,7 @@ use gtk::glib::{self, ControlFlow, Priority};
 use gtk::prelude::*;
 
 const ELF_WIDTH: i32 = 260;
-const BUBBLE_HEIGHT: i32 = 54;
+const BUBBLE_HEIGHT: i32 = 124;
 const CHAT_HEIGHT: i32 = 46;
 const WINDOW_PADDING: i32 = 8;
 const ALPHA_THRESHOLD: u8 = 12;
@@ -142,7 +142,12 @@ fn main() {
             return glib::Propagation::Stop;
         }
         let (root_x, root_y) = event.root();
-        drag_window.begin_move_drag(event.button() as i32, root_x as i32, root_y as i32, event.time());
+        drag_window.begin_move_drag(
+            event.button() as i32,
+            root_x as i32,
+            root_y as i32,
+            event.time(),
+        );
         glib::Propagation::Stop
     });
 
@@ -186,17 +191,29 @@ fn main() {
 
         let sender = chat_sender.clone();
         thread::spawn(move || {
-            let message = match send_elf_chat(&message) {
-                Ok(part) => NativeUiMessage::Bubble {
-                    text: part.text,
-                    expression: part.expression,
-                },
-                Err(error) => NativeUiMessage::Bubble {
-                    text: format!("刚才没连上对话服务：{error}"),
-                    expression: expression_from_mood("error").to_string(),
-                },
-            };
-            let _ = sender.send(message);
+            match send_elf_chat(&message) {
+                Ok(parts) => {
+                    // Linux 原生桌宠没有 Web 侧的 DOM/CSS 动画，这里在后台线程按气泡顺序投递 UI 消息，
+                    // 让 GTK 主线程逐段刷新气泡，避免多个 bubbles 被合并后只显示第一小段。
+                    for part in parts {
+                        let ttl_ms = bubble_duration_ms(&part.text);
+                        let _ = sender.send(NativeUiMessage::Bubble {
+                            text: part.text,
+                            expression: part.expression,
+                        });
+                        thread::sleep(Duration::from_millis(ttl_ms));
+                    }
+                    let _ = sender.send(NativeUiMessage::Expression {
+                        expression: DEFAULT_EXPRESSION.to_string(),
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(NativeUiMessage::Bubble {
+                        text: format!("刚才没连上对话服务：{error}"),
+                        expression: expression_from_mood("error").to_string(),
+                    });
+                }
+            }
         });
     });
 
@@ -210,10 +227,24 @@ fn main() {
             NativeUiMessage::Bubble { text, expression } => {
                 *receive_bubble_text.borrow_mut() = text;
                 receive_bubble_visible.set(true);
-                set_expression(&receive_window, &receive_pixbuf, &receive_area, width, height, &expression);
+                set_expression(
+                    &receive_window,
+                    &receive_pixbuf,
+                    &receive_area,
+                    width,
+                    height,
+                    &expression,
+                );
             }
             NativeUiMessage::Expression { expression } => {
-                set_expression(&receive_window, &receive_pixbuf, &receive_area, width, height, &expression);
+                set_expression(
+                    &receive_window,
+                    &receive_pixbuf,
+                    &receive_area,
+                    width,
+                    height,
+                    &expression,
+                );
             }
         }
         receive_area.queue_draw();
@@ -254,7 +285,11 @@ fn install_css() {
         )
         .expect("failed to install native elf CSS");
     if let Some(screen) = gdk::Screen::default() {
-        gtk::StyleContext::add_provider_for_screen(&screen, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        gtk::StyleContext::add_provider_for_screen(
+            &screen,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
     }
 }
 
@@ -301,41 +336,87 @@ fn clear_context(context: &Context) {
 }
 
 fn draw_bubble(context: &Context, width: i32, text: &str) {
-    let bubble_width = 226.0;
-    let bubble_height = 36.0;
+    let lines = wrap_bubble_text(text);
+    let longest_line_chars = lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(1);
+    let bubble_width = ((longest_line_chars as f64 * 13.0) + 32.0).clamp(132.0, 238.0);
+    let bubble_height = (lines.len() as f64 * 20.0 + 20.0).clamp(40.0, 108.0);
     let x = ((width as f64 - bubble_width) / 2.0).round();
     let y = 6.0;
 
     rounded_rect(context, x, y, bubble_width, bubble_height, 7.0);
     context.set_source_rgba(0.93, 0.97, 1.0, 0.96);
-    context.fill_preserve().expect("failed to fill native elf bubble");
+    context
+        .fill_preserve()
+        .expect("failed to fill native elf bubble");
     context.set_source_rgba(0.49, 0.70, 1.0, 0.88);
     context.set_line_width(1.0);
-    context.stroke().expect("failed to stroke native elf bubble");
+    context
+        .stroke()
+        .expect("failed to stroke native elf bubble");
 
     context.move_to(x + bubble_width - 54.0, y + bubble_height - 1.0);
     context.line_to(x + bubble_width - 44.0, y + bubble_height + 9.0);
     context.line_to(x + bubble_width - 34.0, y + bubble_height - 1.0);
     context.close_path();
     context.set_source_rgba(0.93, 0.97, 1.0, 0.96);
-    context.fill_preserve().expect("failed to fill native elf bubble tail");
+    context
+        .fill_preserve()
+        .expect("failed to fill native elf bubble tail");
     context.set_source_rgba(0.49, 0.70, 1.0, 0.88);
-    context.stroke().expect("failed to stroke native elf bubble tail");
+    context
+        .stroke()
+        .expect("failed to stroke native elf bubble tail");
 
-    context.select_font_face("Sans", gdk::cairo::FontSlant::Normal, gdk::cairo::FontWeight::Normal);
+    context.select_font_face(
+        "Sans",
+        gdk::cairo::FontSlant::Normal,
+        gdk::cairo::FontWeight::Normal,
+    );
     context.set_font_size(13.0);
     context.set_source_rgb(0.10, 0.29, 0.66);
-    context.move_to(x + 13.0, y + 22.0);
-    let _ = context.show_text(&ellipsize(text, 18));
+    // Cairo 手绘文本不会像浏览器一样自动换行，所以这里按字符宽度做轻量分行。
+    // 中文桌宠气泡的目标是“读得完”，不是严格排版，后续可再切到 Pango 做更精确的文本布局。
+    for (index, line) in lines.iter().enumerate() {
+        context.move_to(x + 14.0, y + 24.0 + index as f64 * 20.0);
+        let _ = context.show_text(line);
+    }
 }
 
 fn rounded_rect(context: &Context, x: f64, y: f64, width: f64, height: f64, radius: f64) {
     let degrees = std::f64::consts::PI / 180.0;
     context.new_sub_path();
-    context.arc(x + width - radius, y + radius, radius, -90.0 * degrees, 0.0 * degrees);
-    context.arc(x + width - radius, y + height - radius, radius, 0.0 * degrees, 90.0 * degrees);
-    context.arc(x + radius, y + height - radius, radius, 90.0 * degrees, 180.0 * degrees);
-    context.arc(x + radius, y + radius, radius, 180.0 * degrees, 270.0 * degrees);
+    context.arc(
+        x + width - radius,
+        y + radius,
+        radius,
+        -90.0 * degrees,
+        0.0 * degrees,
+    );
+    context.arc(
+        x + width - radius,
+        y + height - radius,
+        radius,
+        0.0 * degrees,
+        90.0 * degrees,
+    );
+    context.arc(
+        x + radius,
+        y + height - radius,
+        radius,
+        90.0 * degrees,
+        180.0 * degrees,
+    );
+    context.arc(
+        x + radius,
+        y + radius,
+        radius,
+        180.0 * degrees,
+        270.0 * degrees,
+    );
     context.close_path();
 }
 
@@ -344,9 +425,24 @@ fn apply_window_shape(window: &gtk::Window, pixbuf: &Pixbuf, width: i32, _height
         return;
     };
 
-    let region = Region::create_rectangle(&RectangleInt::new(0, 0, width, BUBBLE_HEIGHT + WINDOW_PADDING * 2));
-    let _ = region.union_rectangle(&RectangleInt::new(WINDOW_PADDING, _height - CHAT_HEIGHT, width - WINDOW_PADDING * 2, CHAT_HEIGHT));
-    union_pixbuf_alpha_runs(&region, pixbuf, WINDOW_PADDING, BUBBLE_HEIGHT + WINDOW_PADDING);
+    let region = Region::create_rectangle(&RectangleInt::new(
+        0,
+        0,
+        width,
+        BUBBLE_HEIGHT + WINDOW_PADDING * 2,
+    ));
+    let _ = region.union_rectangle(&RectangleInt::new(
+        WINDOW_PADDING,
+        _height - CHAT_HEIGHT,
+        width - WINDOW_PADDING * 2,
+        CHAT_HEIGHT,
+    ));
+    union_pixbuf_alpha_runs(
+        &region,
+        pixbuf,
+        WINDOW_PADDING,
+        BUBBLE_HEIGHT + WINDOW_PADDING,
+    );
     gdk_window.shape_combine_region(Some(&region), 0, 0);
     gdk_window.input_shape_combine_region(&region, 0, 0);
 }
@@ -372,25 +468,35 @@ fn union_pixbuf_alpha_runs(region: &Region, pixbuf: &Pixbuf, offset_x: i32, offs
             match (run_start, is_opaque) {
                 (None, true) => run_start = Some(x),
                 (Some(start), false) => {
-                    let _ = region.union_rectangle(&RectangleInt::new(offset_x + start, offset_y + y, x - start, 1));
+                    let _ = region.union_rectangle(&RectangleInt::new(
+                        offset_x + start,
+                        offset_y + y,
+                        x - start,
+                        1,
+                    ));
                     run_start = None;
                 }
                 _ => {}
             }
         }
         if let Some(start) = run_start {
-            let _ = region.union_rectangle(&RectangleInt::new(offset_x + start, offset_y + y, width - start, 1));
+            let _ = region.union_rectangle(&RectangleInt::new(
+                offset_x + start,
+                offset_y + y,
+                width - start,
+                1,
+            ));
         }
     }
 }
 
 fn open_aimemo() {
-    let _ = Command::new("xdg-open")
-        .arg(DEV_MEMO_URL)
-        .spawn();
+    let _ = Command::new("xdg-open").arg(DEV_MEMO_URL).spawn();
 }
 
-fn send_elf_chat(message: &str) -> Result<ChatBubblePart, Box<dyn std::error::Error + Send + Sync>> {
+fn send_elf_chat(
+    message: &str,
+) -> Result<Vec<ChatBubblePart>, Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(90))
         .build()?;
@@ -407,7 +513,7 @@ fn send_elf_chat(message: &str) -> Result<ChatBubblePart, Box<dyn std::error::Er
     Ok(parse_elf_sse_answer(&body))
 }
 
-fn parse_elf_sse_answer(body: &str) -> ChatBubblePart {
+fn parse_elf_sse_answer(body: &str) -> Vec<ChatBubblePart> {
     let mut answer = String::new();
     let mut bubbles: Vec<ChatBubblePart> = Vec::new();
     for block in body.split("\n\n") {
@@ -434,16 +540,18 @@ fn parse_elf_sse_answer(body: &str) -> ChatBubblePart {
                 }
             }
             "done" => {
-                if let Some(raw_bubbles) = value.get("bubbles").and_then(|bubbles| bubbles.as_array()) {
+                if let Some(raw_bubbles) =
+                    value.get("bubbles").and_then(|bubbles| bubbles.as_array())
+                {
                     bubbles.extend(raw_bubbles.iter().filter_map(parse_chat_bubble));
                 }
             }
             "error" => {
                 if let Some(message) = value.get("message").and_then(|message| message.as_str()) {
-                    return ChatBubblePart {
+                    return vec![ChatBubblePart {
                         text: message.to_string(),
                         expression: expression_from_mood("error").to_string(),
-                    };
+                    }];
                 }
             }
             _ => {}
@@ -451,25 +559,18 @@ fn parse_elf_sse_answer(body: &str) -> ChatBubblePart {
     }
 
     if !bubbles.is_empty() {
-        let expression = bubbles
-            .first()
-            .map(|bubble| bubble.expression.clone())
-            .unwrap_or_else(|| DEFAULT_EXPRESSION.to_string());
-        return ChatBubblePart {
-            text: bubbles.into_iter().map(|bubble| bubble.text).collect::<Vec<_>>().join(" "),
-            expression,
-        };
+        return bubbles;
     }
     if answer.trim().is_empty() {
-        ChatBubblePart {
+        vec![ChatBubblePart {
             text: String::from("我刚才有点走神了，再说一次好吗？"),
             expression: expression_from_emoji("confused").to_string(),
-        }
+        }]
     } else {
-        ChatBubblePart {
+        vec![ChatBubblePart {
             text: answer.trim().to_string(),
             expression: expression_from_mood("talking").to_string(),
-        }
+        }]
     }
 }
 
@@ -500,7 +601,9 @@ fn start_event_polling(sender: glib::Sender<NativeUiMessage>) {
         let mut last_event_id = 0_i64;
         loop {
             if let Ok(response) = client
-                .get(format!("{ELF_EVENTS_URL}?after_id={last_event_id}&limit=20"))
+                .get(format!(
+                    "{ELF_EVENTS_URL}?after_id={last_event_id}&limit=20"
+                ))
                 .send()
             {
                 if let Ok(body) = response.text() {
@@ -508,14 +611,20 @@ fn start_event_polling(sender: glib::Sender<NativeUiMessage>) {
                         thread::sleep(Duration::from_secs(1));
                         continue;
                     };
-                    if let Some(events) = payload.get("events").and_then(|events| events.as_array()) {
+                    if let Some(events) = payload.get("events").and_then(|events| events.as_array())
+                    {
                         for event in events {
                             if let Some(id) = event.get("id").and_then(|id| id.as_i64()) {
                                 last_event_id = last_event_id.max(id);
                             }
-                            let mood = event.get("mood").and_then(|mood| mood.as_str()).unwrap_or("idle");
+                            let mood = event
+                                .get("mood")
+                                .and_then(|mood| mood.as_str())
+                                .unwrap_or("idle");
                             let expression = expression_from_mood(mood).to_string();
-                            if let Some(message) = event.get("message").and_then(|message| message.as_str()) {
+                            if let Some(message) =
+                                event.get("message").and_then(|message| message.as_str())
+                            {
                                 if !message.trim().is_empty() {
                                     let _ = sender.send(NativeUiMessage::Bubble {
                                         text: message.trim().to_string(),
@@ -575,11 +684,37 @@ fn expression_from_emoji(emoji: &str) -> &'static str {
     }
 }
 
-fn ellipsize(text: &str, max_chars: usize) -> String {
-    let mut chars = text.chars();
-    let mut result: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        result.push('…');
+fn wrap_bubble_text(text: &str) -> Vec<String> {
+    let clean_text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut lines = Vec::new();
+    for paragraph in clean_text.split('\n') {
+        let mut line = String::new();
+        for ch in paragraph.chars() {
+            line.push(ch);
+            if line.chars().count() >= 16 {
+                lines.push(line);
+                line = String::new();
+            }
+        }
+        if !line.is_empty() {
+            lines.push(line);
+        }
     }
-    result
+    if lines.is_empty() {
+        lines.push(String::from("……"));
+    }
+    if lines.len() > 4 {
+        let mut visible = lines.into_iter().take(4).collect::<Vec<_>>();
+        if let Some(last) = visible.last_mut() {
+            last.push('…');
+        }
+        visible
+    } else {
+        lines
+    }
+}
+
+fn bubble_duration_ms(text: &str) -> u64 {
+    let char_count = text.chars().count() as u64;
+    (1800 + char_count * 95).clamp(2600, 9000)
 }
