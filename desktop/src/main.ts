@@ -15,6 +15,11 @@ const chatSendButton = document.querySelector<HTMLButtonElement>("#chat-send");
 const currentWindow = getCurrentWindow();
 const ELF_EVENTS_URL = "http://127.0.0.1:8000/api/elf/events";
 const ELF_CHAT_STREAM_URL = "http://127.0.0.1:8000/api/elf/chat/stream";
+const isLinuxElfWindow = navigator.userAgent.includes("Linux");
+
+if (isLinuxElfWindow) {
+  document.documentElement.classList.add("linux-elf-window");
+}
 
 let dragStart:
   | {

@@ -22,6 +22,44 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+warn_linux_file_watch_limit() {
+  [[ "$(uname -s)" == "Linux" ]] || return 0
+
+  local max_watches max_instances
+  max_watches="$(cat /proc/sys/fs/inotify/max_user_watches 2>/dev/null || echo 0)"
+  max_instances="$(cat /proc/sys/fs/inotify/max_user_instances 2>/dev/null || echo 0)"
+
+  if (( max_watches < 262144 || max_instances < 512 )); then
+    cat >&2 <<EOF
+Warning: Linux file watch limits look low for Vite + Tauri dev.
+Current: fs.inotify.max_user_watches=$max_watches, fs.inotify.max_user_instances=$max_instances
+If startup fails with ENOSPC / OS file watch limit reached, run:
+  sudo sysctl -w fs.inotify.max_user_watches=524288 fs.inotify.max_user_instances=1024
+
+To make it persistent:
+  printf 'fs.inotify.max_user_watches=524288\nfs.inotify.max_user_instances=1024\n' | sudo tee /etc/sysctl.d/99-aimemo-dev.conf
+  sudo sysctl --system
+
+EOF
+  fi
+}
+
+warn_invalid_proxy_scheme() {
+  local proxy_var proxy_value
+  for proxy_var in ALL_PROXY all_proxy HTTP_PROXY http_proxy HTTPS_PROXY https_proxy; do
+    proxy_value="${!proxy_var:-}"
+    if [[ "$proxy_value" == socks://* ]]; then
+      cat >&2 <<EOF
+Warning: $proxy_var uses unsupported proxy scheme: $proxy_value
+Use socks5:// instead, or unset it and use HTTP_PROXY/HTTPS_PROXY.
+Example:
+  export $proxy_var="${proxy_value/socks:\/\//socks5://}"
+
+EOF
+    fi
+  done
+}
+
 stop_port_processes() {
   local port="$1"
   local name="$2"
@@ -34,6 +72,8 @@ stop_port_processes() {
 }
 
 "$SCRIPT_DIR/stop-dev.sh"
+warn_linux_file_watch_limit
+warn_invalid_proxy_scheme
 
 ARGS=()
 if [[ "$SKIP_INSTALL" -eq 1 ]]; then
@@ -63,10 +103,17 @@ FRONTEND_PID=$!
 if [[ "$NO_DESKTOP" -eq 0 ]]; then
   (
     cd "$REPO_ROOT/desktop"
-    if [[ "$SKIP_INSTALL" -eq 0 || ! -d "node_modules" ]]; then
+    if [[ "$(uname -s)" != "Linux" && ( "$SKIP_INSTALL" -eq 0 || ! -d "node_modules" ) ]]; then
       npm install
     fi
-    npm run dev
+    if [[ "$(uname -s)" == "Linux" ]]; then
+      (
+        cd "$REPO_ROOT/desktop/src-tauri"
+        cargo run --bin memo-elf-native
+      )
+    else
+      npm run dev
+    fi
   ) &
   DESKTOP_PID=$!
 fi

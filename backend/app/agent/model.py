@@ -58,8 +58,18 @@ def warmup_agent_models() -> None:
         emit_timing("agent.model_warmup_skipped", reason="missing_dashscope_api_key")
         return
     started_at = now_counter()
-    get_planner_chat_model()
-    get_agent_chat_model()
+    try:
+        get_planner_chat_model()
+        get_agent_chat_model()
+    except Exception as exc:
+        reset_agent_models()
+        emit_timing(
+            "agent.model_warmup_failed",
+            total_ms=elapsed_ms(started_at),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return
     emit_timing("agent.model_warmup_completed", total_ms=elapsed_ms(started_at))
 
 

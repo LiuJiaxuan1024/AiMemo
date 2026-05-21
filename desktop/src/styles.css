@@ -16,6 +16,11 @@ body {
     sans-serif;
 }
 
+html.linux-elf-window,
+html.linux-elf-window body {
+  background: #f8fafc;
+}
+
 #app {
   align-items: end;
   box-sizing: border-box;
@@ -25,6 +30,14 @@ body {
   justify-items: end;
   padding: 10px;
   width: 100vw;
+}
+
+html.linux-elf-window #app {
+  background: #f8fafc;
+  border: 1px solid #dbeafe;
+  grid-template-rows: auto 1fr;
+  justify-items: center;
+  padding: 8px;
 }
 
 .bubble {
@@ -64,6 +77,16 @@ body {
   width: 9px;
 }
 
+html.linux-elf-window .bubble {
+  box-shadow: none;
+  margin-right: 0;
+  max-width: 250px;
+}
+
+html.linux-elf-window .bubble::after {
+  right: 32px;
+}
+
 .elf {
   align-items: end;
   animation: memo-breathe 5.8s ease-in-out infinite;
@@ -76,6 +99,12 @@ body {
   padding: 0;
   transform-origin: 52% 92%;
   width: 240px;
+}
+
+html.linux-elf-window .elf {
+  height: 318px;
+  justify-content: center;
+  width: 260px;
 }
 
 .elf:active {
@@ -109,6 +138,10 @@ body {
   pointer-events: none;
   user-select: none;
   width: auto;
+}
+
+html.linux-elf-window .elf img {
+  filter: none;
 }
 
 .elf-menu {
@@ -171,6 +204,16 @@ body {
     opacity 140ms ease,
     transform 140ms ease;
   width: 240px;
+}
+
+html.linux-elf-window .elf-menu,
+html.linux-elf-window .chat-panel {
+  box-shadow: none;
+  right: 18px;
+}
+
+html.linux-elf-window .chat-panel {
+  width: 250px;
 }
 
 .chat-panel.open {

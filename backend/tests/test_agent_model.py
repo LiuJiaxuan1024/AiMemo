@@ -55,3 +55,16 @@ def test_warmup_agent_models_creates_cached_instances(monkeypatch):
 
     assert get_agent_chat_model().model_name == AGENT_CHAT_MODEL
     assert get_planner_chat_model().model_name == PLANNER_CHAT_MODEL
+
+
+def test_warmup_agent_models_does_not_raise_on_client_init_failure(monkeypatch):
+    """模型 client 预热失败不应阻断 FastAPI startup。"""
+
+    reset_agent_models()
+    monkeypatch.setattr(settings, "dashscope_api_key", "test-key")
+    monkeypatch.setattr(
+        "app.agent.model.get_planner_chat_model",
+        lambda: (_ for _ in ()).throw(ValueError("bad proxy")),
+    )
+
+    warmup_agent_models()
