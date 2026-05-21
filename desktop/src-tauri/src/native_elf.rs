@@ -393,6 +393,7 @@ fn toggle_action_menu(menu: &gtk::Box, is_visible: &Rc<Cell<bool>>) {
         // GTK 原生菜单是 Linux 桌宠路径的轻量替代：避免再把“点击气泡”直接绑定到聊天输入，
         // 也方便后续继续增加工坊、设置、退出等动作入口。
         menu.show_all();
+        menu.queue_draw();
     } else {
         menu.hide();
     }
@@ -547,6 +548,12 @@ fn apply_window_shape(window: &gtk::Window, pixbuf: &Pixbuf, width: i32, _height
         _height - CHAT_HEIGHT,
         width - WINDOW_PADDING * 2,
         CHAT_HEIGHT,
+    ));
+    let _ = region.union_rectangle(&RectangleInt::new(
+        WINDOW_PADDING,
+        BUBBLE_HEIGHT + WINDOW_PADDING,
+        pixbuf.width(),
+        pixbuf.height(),
     ));
     union_pixbuf_alpha_runs(
         &region,
