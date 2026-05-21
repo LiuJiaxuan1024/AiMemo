@@ -20,7 +20,6 @@ const MENU_WIDTH: i32 = 142;
 const MENU_HEIGHT: i32 = 78;
 const WINDOW_PADDING: i32 = 8;
 const ALPHA_THRESHOLD: u8 = 12;
-const MEMO_URL: &str = "http://127.0.0.1:8000/app/memo";
 const WORKSHOP_URL: &str = "http://127.0.0.1:8000/app/workshop/jobs";
 const ELF_CHAT_URL: &str = "http://127.0.0.1:8000/api/elf/chat/stream";
 const ELF_EVENTS_URL: &str = "http://127.0.0.1:8000/api/elf/events";
@@ -53,8 +52,6 @@ fn main() {
         .expect("failed to scale Memo Elf image");
     let width = pixbuf.width() + WINDOW_PADDING * 2;
     let height = pixbuf.height() + BUBBLE_HEIGHT + CHAT_HEIGHT + WINDOW_PADDING * 2;
-    let elf_top = BUBBLE_HEIGHT + WINDOW_PADDING;
-    let elf_bottom = elf_top + pixbuf.height();
 
     let window = gtk::Window::builder()
         .title("Memo Elf")
@@ -89,7 +86,14 @@ fn main() {
         .width_request(width)
         .height_request(height)
         .build();
-    drawing_area.add_events(
+
+    let elf_event_box = gtk::EventBox::builder()
+        .app_paintable(true)
+        .width_request(pixbuf.width())
+        .height_request(pixbuf.height())
+        .build();
+    elf_event_box.set_visible_window(false);
+    elf_event_box.add_events(
         gdk::EventMask::BUTTON_PRESS_MASK
             | gdk::EventMask::BUTTON_RELEASE_MASK
             | gdk::EventMask::POINTER_MOTION_MASK,
@@ -118,6 +122,7 @@ fn main() {
         .height_request(height)
         .build();
     fixed.put(&drawing_area, 0, 0);
+    fixed.put(&elf_event_box, WINDOW_PADDING, BUBBLE_HEIGHT + WINDOW_PADDING);
 
     let chat_entry = gtk::Entry::builder()
         .placeholder_text("想和我说什么？回车发送")
@@ -130,11 +135,14 @@ fn main() {
 
     let action_menu = gtk::Box::new(gtk::Orientation::Vertical, 6);
     action_menu.style_context().add_class("native-action-menu");
+    action_menu.set_size_request(MENU_WIDTH, MENU_HEIGHT);
     action_menu.set_no_show_all(true);
     let chat_button = gtk::Button::with_label("和我聊聊");
     chat_button.style_context().add_class("native-menu-button");
+    chat_button.set_size_request(MENU_WIDTH - 16, 28);
     let open_button = gtk::Button::with_label("打开工坊");
     open_button.style_context().add_class("native-menu-button");
+    open_button.set_size_request(MENU_WIDTH - 16, 28);
     action_menu.pack_start(&chat_button, false, false, 0);
     action_menu.pack_start(&open_button, false, false, 0);
     fixed.put(
@@ -146,17 +154,19 @@ fn main() {
     let drag_window = window.clone();
     let press_drag_origin = Rc::clone(&drag_origin);
     let press_drag_started = Rc::clone(&drag_started);
-    drawing_area.connect_button_press_event(move |_, event| {
+    elf_event_box.connect_button_press_event(move |_, event| {
+        eprintln!(
+            "[memo-elf-native] button-press button={} type={:?} pos={:?}",
+            event.button(),
+            event.event_type(),
+            event.position()
+        );
         if event.button() != 1 {
             return glib::Propagation::Proceed;
         }
         if event.event_type() == gdk::EventType::DoubleButtonPress {
             // Linux 原生桌宠使用单击菜单作为主交互，双击不再执行打开页面，避免误触。
             return glib::Propagation::Stop;
-        }
-        let (_x, y) = event.position();
-        if y < elf_top as f64 || y > elf_bottom as f64 {
-            return glib::Propagation::Proceed;
         }
         *press_drag_origin.borrow_mut() = Some(event.position());
         press_drag_started.set(false);
@@ -167,7 +177,7 @@ fn main() {
     let motion_drag_started = Rc::clone(&drag_started);
     let motion_menu_visible = Rc::clone(&menu_visible);
     let motion_menu = action_menu.clone();
-    drawing_area.connect_motion_notify_event(move |_, event| {
+    elf_event_box.connect_motion_notify_event(move |_, event| {
         let Some((start_x, start_y)) = *motion_drag_origin.borrow() else {
             return glib::Propagation::Proceed;
         };
@@ -175,13 +185,19 @@ fn main() {
             return glib::Propagation::Stop;
         }
         let (current_x, current_y) = event.position();
+        eprintln!(
+            "[memo-elf-native] motion pos=({current_x:.1},{current_y:.1}) delta=({:.1},{:.1})",
+            current_x - start_x,
+            current_y - start_y
+        );
         if (current_x - start_x).abs() <= 5.0 && (current_y - start_y).abs() <= 5.0 {
-            return glib::Propagation::Proceed;
+            return glib::Propagation::Stop;
         }
         let (root_x, root_y) = event.root();
         motion_drag_started.set(true);
         motion_menu.hide();
         motion_menu_visible.set(false);
+        eprintln!("[memo-elf-native] drag-start root=({root_x:.1},{root_y:.1})");
         drag_window.begin_move_drag(1, root_x as i32, root_y as i32, event.time());
         glib::Propagation::Stop
     });
@@ -190,7 +206,14 @@ fn main() {
     let release_drag_started = Rc::clone(&drag_started);
     let release_menu_visible = Rc::clone(&menu_visible);
     let release_menu = action_menu.clone();
-    drawing_area.connect_button_release_event(move |_, event| {
+    elf_event_box.connect_button_release_event(move |_, event| {
+        eprintln!(
+            "[memo-elf-native] button-release button={} origin={} dragged={} pos={:?}",
+            event.button(),
+            release_drag_origin.borrow().is_some(),
+            release_drag_started.get(),
+            event.position()
+        );
         if event.button() == 1
             && release_drag_origin.borrow().is_some()
             && !release_drag_started.get()
@@ -389,10 +412,21 @@ fn install_css() {
 fn toggle_action_menu(menu: &gtk::Box, is_visible: &Rc<Cell<bool>>) {
     let next_visible = !is_visible.get();
     is_visible.set(next_visible);
+    eprintln!("[memo-elf-native] action-menu visible={next_visible}");
     if next_visible {
         // GTK 原生菜单是 Linux 桌宠路径的轻量替代：避免再把“点击气泡”直接绑定到聊天输入，
         // 也方便后续继续增加工坊、设置、退出等动作入口。
-        menu.show_all();
+        menu.show();
+        for child in menu.children() {
+            child.show();
+        }
+        eprintln!(
+            "[memo-elf-native] action-menu allocated={}x{} mapped={} visible={}",
+            menu.allocation().width(),
+            menu.allocation().height(),
+            menu.is_mapped(),
+            menu.is_visible()
+        );
         menu.queue_draw();
     } else {
         menu.hide();
@@ -606,10 +640,6 @@ fn union_pixbuf_alpha_runs(region: &Region, pixbuf: &Pixbuf, offset_x: i32, offs
             ));
         }
     }
-}
-
-fn open_aimemo() {
-    let _ = Command::new("xdg-open").arg(MEMO_URL).spawn();
 }
 
 fn open_workshop() {
