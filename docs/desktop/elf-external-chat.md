@@ -200,6 +200,21 @@ serious
 relaxed
 encouraging
 speechless
+tsundere_pout
+smug_grin
+chin_thinking
+head_tilt_curious
+starry_eyes
+deadpan
+teasing_smile
+determined
+panicked
+comforting_soft
+praying_please
+tongue_out
+mouth_x
+dark_aura
+sparkle_success
 ```
 
 这些值与 `frontend/public/elf/memo/*.png` 一一对应。后端仍兼容旧值：

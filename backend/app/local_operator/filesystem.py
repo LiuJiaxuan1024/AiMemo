@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from difflib import get_close_matches
 from fnmatch import fnmatch
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Iterable
@@ -33,7 +34,7 @@ FAST_READ_LIMIT_BYTES = 10 * 1024 * 1024
 
 
 class LocalFilesystemService:
-    """read-only 文件系统服务。
+    """本地文件系统服务。
 
     这个类只负责确定性文件操作，不知道 LangChain，也不写审计表。
     所有入口都先走 LocalOperatorPolicy，防止模型通过相对路径、软链接等方式逃逸。
@@ -244,6 +245,86 @@ class LocalFilesystemService:
             },
         )
 
+    def write_file(
+        self,
+        path: str,
+        *,
+        content: str,
+        overwrite: bool = False,
+        known_existing_paths: set[str] | None = None,
+    ) -> ToolResult:
+        """整文件写入或创建文本文件。
+
+        参数：
+          path: 目标文件路径，必须位于授权 workspace 内。
+          content: 要写入的完整文本内容。
+          overwrite: 是否允许覆盖已有文件。
+          known_existing_paths: 本轮 graph 已经读取或查看过的路径集合。覆盖已有文件时
+            必须命中该集合，借鉴 Claude Code 的 read-before-write 防覆盖策略。
+        """
+
+        try:
+            resolved = self._resolve_writable_path(path)
+        except LocalFilesystemError as exc:
+            return _error("write_file", exc.error_code, exc.message, blocked=_is_policy_block(exc.error_code))
+        if self.policy.is_sensitive_path(resolved):
+            return _error("write_file", "SENSITIVE_FILE_BLOCKED", "该路径命中敏感文件规则，已拒绝写入。", blocked=True)
+        placeholder_reason = _placeholder_write_reason(content)
+        if placeholder_reason:
+            return _error(
+                "write_file",
+                "PLACEHOLDER_CONTENT_REJECTED",
+                f"拒绝写入明显的占位或模板内容：{placeholder_reason}。请先生成真实正文，再调用写入工具。",
+                blocked=True,
+            )
+        if resolved.exists() and resolved.is_dir():
+            return _error("write_file", "PATH_IS_DIRECTORY", "目标路径是目录，不能写入文件。")
+        if resolved.exists() and not overwrite:
+            return _error("write_file", "OVERWRITE_NOT_ALLOWED", "目标文件已存在，如需覆盖必须显式设置 overwrite=true。")
+
+        existed_before = resolved.exists()
+        known_existing_paths = known_existing_paths or set()
+        if existed_before and not _is_known_existing_path(resolved, known_existing_paths):
+            return _error(
+                "write_file",
+                "READ_BEFORE_WRITE_REQUIRED",
+                "覆盖已有文件前必须先读取或查看该文件，避免覆盖用户刚修改的内容。",
+                blocked=True,
+            )
+
+        original_content = ""
+        if existed_before:
+            known_existing_paths.add(self.policy.relative_path(resolved))
+            blocked = self._validate_readable_text_file("write_file", resolved)
+            if blocked:
+                return blocked
+            original_content = _decode_text_bytes(resolved.read_bytes())
+
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        resolved.write_text(content, encoding="utf-8", newline="\n")
+        written_bytes = len(content.encode("utf-8"))
+        return _ok(
+            "write_file",
+            {
+                "path": resolved.as_posix(),
+                "relative_path": self.policy.relative_path(resolved),
+                "type": "update" if existed_before else "create",
+                "bytes_written": written_bytes,
+                "line_count": len(content.splitlines()),
+                "content_hash": _sha256_text(content),
+                "previous_content_hash": _sha256_text(original_content) if existed_before else "",
+                "modified_at": _iso_mtime(resolved),
+            },
+        )
+
+    def _resolve_writable_path(self, raw_path: str) -> Path:
+        try:
+            resolved = self.policy.resolve_authorized_path(raw_path)
+        except PermissionError as exc:
+            error_code = str(exc)
+            raise LocalFilesystemError(error_code, _policy_error_message(error_code)) from exc
+        return resolved
+
     def _resolve_existing(self, raw_path: str) -> Path:
         try:
             resolved = self.policy.resolve_authorized_path(raw_path)
@@ -369,6 +450,51 @@ def _is_policy_block(error_code: str) -> bool:
         "DEVICE_PATH_BLOCKED",
         "UNC_PATH_BLOCKED",
     }
+
+
+def _is_known_existing_path(path: Path, known_paths: set[str]) -> bool:
+    resolved = path.resolve()
+    normalized_known_paths = {Path(item).as_posix() for item in known_paths}
+    return (
+        resolved.as_posix() in known_paths
+        or str(resolved) in known_paths
+        or path.name in known_paths
+        or any(str(item).endswith(path.name) for item in normalized_known_paths)
+    )
+
+
+def _placeholder_write_reason(content: str) -> str:
+    """识别明显不应该直接落盘的占位内容。
+
+    write_file 是有副作用的工具。planner 如果没有拿到真实正文，偶尔会生成
+    “此处填写...” 这类模板文本；这会让用户误以为 AI 已经完成了真正内容。
+    这里作为最后一道硬保护，只拦截高度确定的占位表达，不阻止正常短文本写入。
+    """
+
+    normalized = content.strip()
+    if not normalized:
+        return "内容为空"
+    placeholder_patterns = [
+        "此处填写",
+        "待填写",
+        "待补充",
+        "TODO",
+        "TBD",
+        "placeholder",
+        "fill in",
+        "your content here",
+        "<填写",
+        "[填写",
+    ]
+    lowered = normalized.lower()
+    for pattern in placeholder_patterns:
+        if pattern.lower() in lowered:
+            return f"包含 `{pattern}`"
+    return ""
+
+
+def _sha256_text(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 def _read_text_file_in_range(

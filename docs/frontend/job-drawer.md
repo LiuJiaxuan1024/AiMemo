@@ -74,3 +74,17 @@ category 筛选
 前端使用共享 `MermaidGraphView` 渲染流程图。`JobGraphView` 和 Mermaid 本身都按需 lazy load，只有打开 graph 时才加载，避免首屏加载过重。
 
 后端负责返回 LangGraph 原生 Mermaid，并追加当前节点高亮样式。
+
+共享渲染器提供统一的 graph 操作：
+
+```text
+鼠标滚轮：围绕鼠标位置缩放
+点击空白区域：放大
+Ctrl + 点击空白区域：缩小
+按住拖动：移动画布
+双击空白区域：重置缩放和位置
+```
+
+因此工坊里的 Job Graph 和对话里的 Chat Graph 行为保持一致。后续如果某类 job graph 也需要
+“点击节点进入子图”，可以复用 `MermaidGraphView.onNodeClick`，由后端在对应 graph API 中返回
+可展开的子图映射。

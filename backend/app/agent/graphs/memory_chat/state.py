@@ -79,8 +79,10 @@ class MemoryChatGraphState(TypedDict, total=False):
     context_l2_layer: ContextLayerPayload
     context_l3_layer: ContextLayerPayload
     context_l4_layer: ContextLayerPayload
-    # 本轮本地 read-only 工具结果。为空表示没有触发 Local Operator。
+    # 本轮本地工具结果。为空表示没有触发 Local Operator。
     local_operator_context: str
+    # Local Operator 子图的节点状态。用于 Chat Graph 调试面板展开子图时染色。
+    local_operator_node_statuses: dict[str, str]
     prompt_context: str
     # answer_mode 控制回答生成分支：普通 AiMemo 对话走 text，外置精灵走 elf_bubble。
     answer_mode: Literal["text", "elf_bubble"]

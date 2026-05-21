@@ -4,6 +4,8 @@ from fastapi import HTTPException, status
 from sqlmodel import Session, select
 
 from app.agent.graphs.memory_chat.graph import get_memory_chat_graph_mermaid
+from app.agent.graphs.local_operator.graph import get_local_operator_graph_mermaid
+from app.core.database import session_scope
 from app.models.chat_turn import ChatTurn
 from app.models.note import utc_now
 from app.schemas.chat import ChatTurnGraphRead
@@ -214,6 +216,7 @@ def get_chat_turn_graph_by_turn(
 
 def _to_chat_turn_graph_read(turn: ChatTurn) -> ChatTurnGraphRead:
     node_statuses = _decode_json_object(turn.node_statuses)
+    debug_payload = _decode_json_any(turn.debug_payload, fallback={})
     mermaid = _highlight_memory_chat_mermaid(get_memory_chat_graph_mermaid(), node_statuses)
     return ChatTurnGraphRead(
         turn_id=turn.id or 0,
@@ -225,11 +228,17 @@ def _to_chat_turn_graph_read(turn: ChatTurn) -> ChatTurnGraphRead:
         status=turn.status,
         node_statuses=node_statuses,
         mermaid=mermaid,
+        subgraphs={
+            "build_local_operator_context": _highlight_graph_mermaid(
+                get_local_operator_graph_mermaid(session_factory=session_scope),
+                _subgraph_node_statuses(debug_payload, "build_local_operator_context"),
+            ),
+        },
         context_layers=_decode_json_list(turn.context_layers),
         retrieved_chunks=[
             NoteSearchResult(**chunk) for chunk in _decode_json_list(turn.retrieved_chunks)
         ],
-        debug_payload=_decode_json_any(turn.debug_payload, fallback={}),
+        debug_payload=debug_payload,
         error=turn.error,
     )
 
@@ -239,6 +248,19 @@ def _highlight_memory_chat_mermaid(mermaid: str, node_statuses: dict[str, str]) 
 
     Mermaid 图结构仍然来自 LangGraph，状态染色由业务层维护，这样既可信又方便调试。
     """
+
+    lines = _highlight_graph_mermaid(mermaid, node_statuses).splitlines()
+    lines.extend(
+        [
+            "classDef subgraphNode fill:#eef2ff,stroke:#7c3aed,stroke-width:3px,color:#4c1d95;",
+            "class build_local_operator_context subgraphNode;",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _highlight_graph_mermaid(mermaid: str, node_statuses: dict[str, str]) -> str:
+    """给 Mermaid 源码注入通用状态 class。"""
 
     lines = [
         mermaid.rstrip(),
@@ -260,6 +282,19 @@ def _highlight_memory_chat_mermaid(mermaid: str, node_statuses: dict[str, str]) 
         if class_name:
             lines.append(f"class {node_name} {class_name};")
     return "\n".join(lines)
+
+
+def _subgraph_node_statuses(debug_payload: dict, node_name: str) -> dict[str, str]:
+    """读取某个主图节点记录的子图节点状态。"""
+
+    nodes = debug_payload.get("nodes")
+    if not isinstance(nodes, dict):
+        return {}
+    node_payload = nodes.get(node_name)
+    if not isinstance(node_payload, dict):
+        return {}
+    statuses = node_payload.get("subgraph_node_statuses")
+    return statuses if isinstance(statuses, dict) else {}
 
 
 def _get_turn_or_404(session: Session, turn_id: int) -> ChatTurn:

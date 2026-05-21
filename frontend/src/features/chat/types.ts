@@ -66,6 +66,7 @@ export interface ChatTurnGraph {
   status: string;
   node_statuses: Record<string, string>;
   mermaid: string;
+  subgraphs?: Record<string, string>;
   context_layers: Array<{
     level: number;
     name: string;

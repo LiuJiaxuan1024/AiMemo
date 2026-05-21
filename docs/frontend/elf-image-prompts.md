@@ -179,6 +179,21 @@ Avoid heavy props, complex background, extreme perspective, cropped face, hidden
 | `18_relaxed.png` | `relaxed` | 放松 |
 | `19_encouraging.png` | `encouraging` | 鼓励 |
 | `20_speechless.png` | `speechless` | 无语、被噎住 |
+| `21_tsundere_pout.png` | `tsundere_pout` | 傲娇、嘴硬 |
+| `22_smug_grin.png` | `smug_grin` | 小坏笑、得逞 |
+| `23_chin_thinking.png` | `chin_thinking` | 托腮思考 |
+| `24_head_tilt_curious.png` | `head_tilt_curious` | 歪头好奇 |
+| `25_starry_eyes.png` | `starry_eyes` | 星星眼、崇拜 |
+| `26_deadpan.png` | `deadpan` | 面无表情吐槽 |
+| `27_teasing_smile.png` | `teasing_smile` | 调侃、逗用户 |
+| `28_determined.png` | `determined` | 下定决心 |
+| `29_panicked.png` | `panicked` | 慌张 |
+| `30_comforting_soft.png` | `comforting_soft` | 温柔安慰 |
+| `31_praying_please.png` | `praying_please` | 拜托、撒娇请求 |
+| `32_tongue_out.png` | `tongue_out` | 吐舌、俏皮 |
+| `33_mouth_x.png` | `mouth_x` | 保密、闭嘴 |
+| `34_dark_aura.png` | `dark_aura` | 阴沉怨念、黑线吐槽 |
+| `35_sparkle_success.png` | `sparkle_success` | 闪亮成功 |
 
 ## 常用扩展表情 Prompt
 

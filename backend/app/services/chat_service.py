@@ -320,6 +320,7 @@ def stream_conversation_chat_events(
         final_assistant_content = str(final_state.get("assistant_answer") or assistant_content)
         debug_payload["summary"]["answer_chars"] = len(final_assistant_content)
         debug_payload["summary"]["retrieved_count"] = len(retrieved_chunks)
+        _mark_subgraph_node_statuses_from_final_state(debug_payload, final_state)
         with session_factory() as session:
             _update_streaming_assistant_message(
                 session,
@@ -527,6 +528,25 @@ def _mark_node_timing(
         retrieval_debug = state.get("retrieval_debug")
         if isinstance(retrieval_debug, dict):
             node_payload["retrieval_debug"] = retrieval_debug
+    if state and node_name == "build_local_operator_context":
+        local_operator_node_statuses = state.get("local_operator_node_statuses")
+        if isinstance(local_operator_node_statuses, dict):
+            node_payload["subgraph_node_statuses"] = local_operator_node_statuses
+
+
+def _mark_subgraph_node_statuses_from_final_state(debug_payload: dict, final_state: dict) -> None:
+    """从最终 state 兜底写入子图节点状态。
+
+    并行 worker 的 updates 事件在不同 LangGraph 版本中可能不会稳定携带完整最终 state。
+    因此 graph 完成后再从 final_state 读取一次，确保调试面板展开子图时一定能看到内部路径。
+    """
+
+    local_operator_node_statuses = final_state.get("local_operator_node_statuses")
+    if isinstance(local_operator_node_statuses, dict):
+        debug_payload.setdefault("nodes", {}).setdefault(
+            "build_local_operator_context",
+            {},
+        )["subgraph_node_statuses"] = local_operator_node_statuses
 
 
 def _mark_answer_token_timing(debug_payload: dict, started_at: float) -> None:

@@ -16,6 +16,7 @@ from app.local_operator.schemas import (
     SearchFilesInput,
     SearchTextInput,
     ToolResult,
+    WriteFileInput,
 )
 
 
@@ -28,23 +29,39 @@ def create_read_tools(
     policy: LocalOperatorPolicy,
     conversation_id: int | None,
     turn_id: int | None,
+    known_existing_paths: set[str] | None = None,
 ) -> dict[str, BaseTool]:
-    """创建 read-only LangChain 工具集合。
+    """创建 Local Operator LangChain 工具集合。
 
     工具本身是标准 `@tool`，但内部显式调用 filesystem service 和 audit。
     这样第一版可以通过 `tool.invoke()` 受控执行，后续也能直接交给 ToolNode。
     """
 
     filesystem = LocalFilesystemService(policy)
+    known_existing_paths = known_existing_paths or set()
 
-    def run_with_audit(tool_name: str, arguments: dict[str, Any], action) -> str:
+    def run_with_audit(
+        tool_name: str,
+        arguments: dict[str, Any],
+        action,
+        *,
+        operation_type: str = "read",
+        risk_level: str = "low",
+        approval_required: bool = False,
+    ) -> str:
         with session_factory() as session:
             audit = AgentOperationAudit(
                 session,
                 conversation_id=conversation_id,
                 turn_id=turn_id,
             )
-            operation = audit.start(tool_name=tool_name, arguments=arguments)
+            operation = audit.start(
+                tool_name=tool_name,
+                arguments=arguments,
+                operation_type=operation_type,
+                risk_level=risk_level,
+                approval_required=approval_required,
+            )
             try:
                 result: ToolResult = action()
             except LocalFilesystemError as exc:
@@ -59,7 +76,7 @@ def create_read_tools(
                 result = ToolResult(
                     ok=False,
                     tool_name=tool_name,
-                    error_code="READ_FAILED",
+                    error_code=f"{operation_type.upper()}_FAILED",
                     message=str(exc),
                     blocked=False,
                 )
@@ -167,10 +184,30 @@ def create_read_tools(
         args = {"path": path}
         return run_with_audit("get_file_info", args, lambda: filesystem.get_file_info(path))
 
+    @tool(args_schema=WriteFileInput)
+    def write_file(path: str, content: str, overwrite: bool = False) -> str:
+        """创建或整文件覆盖授权 workspace 内的文本文件。"""
+
+        args = {"path": path, "content": content, "overwrite": overwrite}
+        return run_with_audit(
+            "write_file",
+            args,
+            lambda: filesystem.write_file(
+                path,
+                content=content,
+                overwrite=overwrite,
+                known_existing_paths=known_existing_paths,
+            ),
+            operation_type="write",
+            risk_level="medium",
+            approval_required=False,
+        )
+
     return {
         "list_dir": list_dir,
         "read_file": read_file,
         "search_files": search_files,
         "search_text": search_text,
         "get_file_info": get_file_info,
+        "write_file": write_file,
     }

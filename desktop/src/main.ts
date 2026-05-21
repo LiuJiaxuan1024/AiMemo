@@ -459,6 +459,24 @@ function inferEmoji(text: string): ElfBubbleEmoji {
   if (/无语|尴尬|愣住|不知道说什么/.test(text)) {
     return "speechless";
   }
+  if (/傲娇|嘴硬|才不是|哼/.test(text)) {
+    return "tsundere_pout";
+  }
+  if (/坏笑|偷笑|得逞|小算盘/.test(text)) {
+    return "smug_grin";
+  }
+  if (/托腮|琢磨|沉思/.test(text)) {
+    return "chin_thinking";
+  }
+  if (/星星眼|崇拜|闪闪发光|好厉害/.test(text)) {
+    return "starry_eyes";
+  }
+  if (/慌了|糟糕|怎么办|来不及/.test(text)) {
+    return "panicked";
+  }
+  if (/拜托|求你|可以嘛|お願い/.test(text)) {
+    return "praying_please";
+  }
   if (/惊讶|没想到|突然|居然|哇|诶|咦/.test(text)) {
     return "surprised";
   }
@@ -542,37 +560,52 @@ function normalizeEmoji(emoji: string): ElfBubbleEmoji {
     "relaxed",
     "encouraging",
     "speechless",
+    "tsundere_pout",
+    "smug_grin",
+    "chin_thinking",
+    "head_tilt_curious",
+    "starry_eyes",
+    "deadpan",
+    "teasing_smile",
+    "determined",
+    "panicked",
+    "comforting_soft",
+    "praying_please",
+    "tongue_out",
+    "mouth_x",
+    "dark_aura",
+    "sparkle_success",
   ];
   return allowed.includes(emoji as ElfBubbleEmoji) ? (emoji as ElfBubbleEmoji) : "idle_soft";
 }
 
 function moodFromEmoji(emoji: ElfBubbleEmoji) {
-  if (["error_worried", "sad_teary", "wronged_pout"].includes(emoji)) {
+  if (["error_worried", "sad_teary", "wronged_pout", "panicked", "dark_aura"].includes(emoji)) {
     return "error";
   }
-  if (["curious", "thinking", "confused", "surprised", "speechless"].includes(emoji)) {
+  if (["curious", "thinking", "confused", "surprised", "speechless", "chin_thinking", "head_tilt_curious", "deadpan", "mouth_x"].includes(emoji)) {
     return "thinking";
   }
-  if (["success_smile", "memory_glow", "proud", "encouraging", "playful_wink"].includes(emoji)) {
+  if (["success_smile", "memory_glow", "proud", "encouraging", "playful_wink", "starry_eyes", "smug_grin", "teasing_smile", "comforting_soft", "sparkle_success"].includes(emoji)) {
     return "success";
   }
-  if (emoji === "working_focus" || emoji === "serious") {
+  if (emoji === "working_focus" || emoji === "serious" || emoji === "determined") {
     return "working";
   }
   return "talking";
 }
 
 function motionFromEmoji(emoji: ElfBubbleEmoji) {
-  if (["error_worried", "sad_teary", "wronged_pout"].includes(emoji)) {
+  if (["error_worried", "sad_teary", "wronged_pout", "panicked", "dark_aura"].includes(emoji)) {
     return "error";
   }
-  if (["curious", "thinking", "confused", "surprised", "speechless"].includes(emoji)) {
+  if (["curious", "thinking", "confused", "surprised", "speechless", "chin_thinking", "head_tilt_curious", "deadpan", "mouth_x"].includes(emoji)) {
     return "thinking";
   }
-  if (["success_smile", "memory_glow", "proud", "encouraging", "playful_wink"].includes(emoji)) {
+  if (["success_smile", "memory_glow", "proud", "encouraging", "playful_wink", "starry_eyes", "smug_grin", "teasing_smile", "comforting_soft", "sparkle_success"].includes(emoji)) {
     return "success";
   }
-  if (emoji === "working_focus" || emoji === "serious") {
+  if (emoji === "working_focus" || emoji === "serious" || emoji === "determined") {
     return "working";
   }
   return "nod";
@@ -618,6 +651,36 @@ function expressionFromEmoji(emoji: ElfBubbleEmoji): string {
       return "/elf/memo/19_encouraging.png";
     case "speechless":
       return "/elf/memo/20_speechless.png";
+    case "tsundere_pout":
+      return "/elf/memo/21_tsundere_pout.png";
+    case "smug_grin":
+      return "/elf/memo/22_smug_grin.png";
+    case "chin_thinking":
+      return "/elf/memo/23_chin_thinking.png";
+    case "head_tilt_curious":
+      return "/elf/memo/24_head_tilt_curious.png";
+    case "starry_eyes":
+      return "/elf/memo/25_starry_eyes.png";
+    case "deadpan":
+      return "/elf/memo/26_deadpan.png";
+    case "teasing_smile":
+      return "/elf/memo/27_teasing_smile.png";
+    case "determined":
+      return "/elf/memo/28_determined.png";
+    case "panicked":
+      return "/elf/memo/29_panicked.png";
+    case "comforting_soft":
+      return "/elf/memo/30_comforting_soft.png";
+    case "praying_please":
+      return "/elf/memo/31_praying_please.png";
+    case "tongue_out":
+      return "/elf/memo/32_tongue_out.png";
+    case "mouth_x":
+      return "/elf/memo/33_mouth_x.png";
+    case "dark_aura":
+      return "/elf/memo/34_dark_aura.png";
+    case "sparkle_success":
+      return "/elf/memo/35_sparkle_success.png";
     case "idle_soft":
     default:
       return "/elf/memo/01_idle_soft.png";
@@ -732,7 +795,22 @@ type ElfBubbleEmoji =
   | "serious"
   | "relaxed"
   | "encouraging"
-  | "speechless";
+  | "speechless"
+  | "tsundere_pout"
+  | "smug_grin"
+  | "chin_thinking"
+  | "head_tilt_curious"
+  | "starry_eyes"
+  | "deadpan"
+  | "teasing_smile"
+  | "determined"
+  | "panicked"
+  | "comforting_soft"
+  | "praying_please"
+  | "tongue_out"
+  | "mouth_x"
+  | "dark_aura"
+  | "sparkle_success";
 
 interface ChatBubblePart {
   text: string;

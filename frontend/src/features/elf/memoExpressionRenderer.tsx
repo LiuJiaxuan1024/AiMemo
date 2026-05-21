@@ -33,6 +33,21 @@ const MEMO_EXPRESSION_ASSETS = [
   "/elf/memo/18_relaxed.png",
   "/elf/memo/19_encouraging.png",
   "/elf/memo/20_speechless.png",
+  "/elf/memo/21_tsundere_pout.png",
+  "/elf/memo/22_smug_grin.png",
+  "/elf/memo/23_chin_thinking.png",
+  "/elf/memo/24_head_tilt_curious.png",
+  "/elf/memo/25_starry_eyes.png",
+  "/elf/memo/26_deadpan.png",
+  "/elf/memo/27_teasing_smile.png",
+  "/elf/memo/28_determined.png",
+  "/elf/memo/29_panicked.png",
+  "/elf/memo/30_comforting_soft.png",
+  "/elf/memo/31_praying_please.png",
+  "/elf/memo/32_tongue_out.png",
+  "/elf/memo/33_mouth_x.png",
+  "/elf/memo/34_dark_aura.png",
+  "/elf/memo/35_sparkle_success.png",
 ];
 
 interface MemoExpressionRendererProps {

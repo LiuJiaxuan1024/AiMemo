@@ -25,17 +25,25 @@ class AgentOperationAudit:
         self.conversation_id = conversation_id
         self.turn_id = turn_id
 
-    def start(self, *, tool_name: str, arguments: dict[str, Any]) -> AgentOperation:
+    def start(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        operation_type: str = "read",
+        risk_level: str = "low",
+        approval_required: bool = False,
+    ) -> AgentOperation:
         operation = AgentOperation(
             conversation_id=self.conversation_id,
             turn_id=self.turn_id,
-            operation_type="read",
+            operation_type=operation_type,
             status="running",
             tool_name=tool_name,
             input_json=_to_json(arguments),
             output_json="{}",
-            risk_level="low",
-            approval_required=False,
+            risk_level=risk_level,
+            approval_required=approval_required,
         )
         self.session.add(operation)
         self.session.commit()

@@ -187,11 +187,19 @@ def test_elf_bubble_parser_accepts_expanded_expression_emoji():
         '{"bubbles":['
         '{"text":"这件事我会认真看。","emoji":"serious"},'
         '{"text":"不过你也别急，我们慢慢来。","emoji":"encouraging"},'
-        '{"text":"诶，这个结果有点出乎意料。","emoji":"surprised"}'
+        '{"text":"诶，这个结果有点出乎意料。","emoji":"surprised"},'
+        '{"text":"哼，才不是特意帮你的哦。","emoji":"tsundere_pout"},'
+        '{"text":"大成功，漂亮完成。","emoji":"sparkle_success"}'
         "]}"
     )
 
-    assert [part["emoji"] for part in parts] == ["serious", "encouraging", "surprised"]
+    assert [part["emoji"] for part in parts] == [
+        "serious",
+        "encouraging",
+        "surprised",
+        "tsundere_pout",
+        "sparkle_success",
+    ]
 
 
 def test_memory_chat_graph_uses_planned_retrieval_query(

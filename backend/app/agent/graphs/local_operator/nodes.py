@@ -23,38 +23,51 @@ from app.local_operator.tools import create_read_tools
 SessionFactory = Callable[[], AbstractContextManager[Session]]
 ReadPlanner = Callable[[str], LocalOperatorAction | None]
 
-ALLOWED_READ_TOOLS = {"list_dir", "read_file", "search_files", "search_text", "get_file_info"}
+READ_TOOL_NAMES = {
+    "list_dir",
+    "read_file",
+    "search_files",
+    "search_text",
+    "get_file_info",
+}
+WRITE_TOOL_NAMES = {
+    "write_file",
+}
+ALLOWED_LOCAL_OPERATOR_TOOLS = READ_TOOL_NAMES | WRITE_TOOL_NAMES
 
 
 @dataclass(frozen=True)
 class PlannerDecision:
     """Local Operator planner 的结构化决策。"""
 
-    need_local_read: bool
+    needs_tool: bool
     tool_name: str
     arguments: dict[str, Any]
     confidence: float
     reason: str
 
 
-def build_plan_read_operation_node(
+def build_plan_tool_use_node(
     planner: ReadPlanner | None = None,
 ) -> Callable[[LocalOperatorState], LocalOperatorState]:
-    """规划是否需要本地读取。
+    """规划本轮是否需要调用本地工具。
 
     规划分三层：
-      1. 明确规则快路径：例如“读取文件”“列出目录”，直接选工具。
+      1. 明确规则快路径：例如“读取文件”“列出目录”“创建文件”，直接选工具。
       2. 明显无关的普通聊天：直接跳过，避免每轮都多一次 LLM 延迟。
-      3. 模糊但像本地操作的问题：调用轻量 LLM planner 判断工具和参数。
+      3. 模糊但像本地操作的问题：调用轻量 LLM planner 判断是否需要工具、工具名和参数。
     """
 
-    def plan_read_operation(state: LocalOperatorState) -> LocalOperatorState:
+    def plan_tool_use(state: LocalOperatorState) -> LocalOperatorState:
         user_input = state.get("user_input", "").strip()
         action = _rule_plan_action(user_input, workspace_roots=state.get("workspace_roots") or ["."])
         if action is None and _looks_like_local_operator_candidate(user_input):
-            action = (planner or _llm_plan_read_action)(user_input)
+            action = (planner or _llm_plan_tool_action)(user_input)
         if action is None:
             return {
+                "needs_tool": False,
+                "tool_intent": "",
+                # 兼容旧字段：历史 checkpoint/测试仍可能读取 need_local_read。
                 "need_local_read": False,
                 "read_intent": "",
                 "tool_budget": 0,
@@ -67,11 +80,15 @@ def build_plan_read_operation_node(
                 "error": "",
             }
 
+        planned_actions = _expand_planned_actions(action)
         return {
+            "needs_tool": True,
+            "tool_intent": action.get("reason", ""),
+            # 兼容旧字段：含 write_file 时这个字段表示“需要 Local Operator 工具”。
             "need_local_read": True,
             "read_intent": action.get("reason", ""),
             "tool_budget": int(state.get("tool_budget") or 4),
-            "planned_actions": [action],
+            "planned_actions": planned_actions,
             "next_action": None,
             "tool_calls": [],
             "observations": [],
@@ -80,80 +97,57 @@ def build_plan_read_operation_node(
             "error": "",
         }
 
-    return plan_read_operation
+    return plan_tool_use
 
 
-def build_select_read_tool_node() -> Callable[[LocalOperatorState], LocalOperatorState]:
-    """从计划队列中选择下一次 read 工具调用。"""
+def build_select_tool_node() -> Callable[[LocalOperatorState], LocalOperatorState]:
+    """从计划队列中选择下一次工具调用。
 
-    def select_read_tool(state: LocalOperatorState) -> LocalOperatorState:
+    这个节点只负责“取队首 action”，真正的 read/write 分流由 graph 条件边完成。
+    这样 Mermaid 图会明确展示工具路由，而不是把所有工具塞进一个 run 节点。
+    """
+
+    def select_tool(state: LocalOperatorState) -> LocalOperatorState:
         planned_actions = list(state.get("planned_actions", []))
         if not planned_actions:
             return {"next_action": None, "enough_evidence": True}
         return {"next_action": planned_actions.pop(0), "planned_actions": planned_actions}
 
-    return select_read_tool
+    return select_tool
 
 
 def build_run_read_tool_node(session_factory: SessionFactory) -> Callable[[LocalOperatorState], LocalOperatorState]:
-    """执行受控 read 工具。
+    """执行受控 read 工具分支。
 
-    这里按白名单调用 LangChain `@tool` 对象。工具内部会做权限检查和审计落库；
-    graph 节点只负责把结果写回 state，方便 checkpoint 恢复和最终回答使用。
+    写工具不会从这里执行。读写分流放在 `route_after_select_tool`，目的是让子图可视化
+    能直接看出本轮走了 read 分支还是 write 分支。
     """
 
     def run_read_tool(state: LocalOperatorState) -> LocalOperatorState:
-        action = state.get("next_action")
-        if not action:
-            return {"enough_evidence": True}
-
-        policy = LocalOperatorPolicy.from_roots(state.get("workspace_roots") or ["."])
-        tools = create_read_tools(
-            session_factory=session_factory,
-            policy=policy,
-            conversation_id=state.get("conversation_id"),
-            turn_id=state.get("turn_id"),
-        )
-        tool_name = str(action.get("tool_name") or "")
-        arguments = dict(action.get("arguments") or {})
-        if tool_name not in tools:
-            observation: LocalOperatorObservation = {
-                "tool_name": tool_name,
-                "arguments": arguments,
-                "ok": False,
-                "data": {},
-                "error_code": "INVALID_ARGUMENT",
-                "message": f"未知 read 工具：{tool_name}",
-                "blocked": True,
-            }
-        else:
-            raw_result = tools[tool_name].invoke(arguments)
-            payload = json.loads(str(raw_result))
-            observation = {
-                "tool_name": tool_name,
-                "arguments": arguments,
-                "ok": bool(payload.get("ok")),
-                "data": dict(payload.get("data") or {}),
-                "error_code": str(payload.get("error_code") or ""),
-                "message": str(payload.get("message") or ""),
-                "blocked": bool(payload.get("blocked", False)),
-            }
-
-        return {
-            "tool_calls": [*state.get("tool_calls", []), action],
-            "observations": [*state.get("observations", []), observation],
-            "tool_budget": max(int(state.get("tool_budget") or 0) - 1, 0),
-            "next_action": None,
-        }
+        return _run_tool_action(state, session_factory=session_factory, allowed_tool_names=READ_TOOL_NAMES)
 
     return run_read_tool
+
+
+def build_run_write_tool_node(session_factory: SessionFactory) -> Callable[[LocalOperatorState], LocalOperatorState]:
+    """执行受控 write 工具分支。
+
+    当前只有 `write_file`。工具内部仍会做 workspace 授权、敏感文件拦截、
+    read-before-write 保护和 agent_operations 审计。
+    """
+
+    def run_write_tool(state: LocalOperatorState) -> LocalOperatorState:
+        return _run_tool_action(state, session_factory=session_factory, allowed_tool_names=WRITE_TOOL_NAMES)
+
+    return run_write_tool
 
 
 def build_observe_tool_result_node() -> Callable[[LocalOperatorState], LocalOperatorState]:
     """判断当前工具结果是否足够。
 
-    第一版计划通常只有一次工具调用，所以成功、阻断、失败或预算耗尽都会结束。
-    以后加入多步 LLM planner 时，可以在这里根据 observation 追加 planned_actions。
+    当前循环先消费 planner 生成的工具队列；如果队列为空或预算耗尽就结束。
+    后续如果加入 ReAct 式二次规划，可以在这里根据 observation 追加 planned_actions，
+    形成“选择工具 -> 执行工具 -> 观察 -> 再决定”的完整工具循环。
     """
 
     def observe_tool_result(state: LocalOperatorState) -> LocalOperatorState:
@@ -167,7 +161,7 @@ def build_observe_tool_result_node() -> Callable[[LocalOperatorState], LocalOper
 
 
 def build_finish_without_tool_node() -> Callable[[LocalOperatorState], LocalOperatorState]:
-    """本轮不需要本地读取，快速结束。"""
+    """本轮不需要本地工具，快速结束。"""
 
     def finish_without_tool(state: LocalOperatorState) -> LocalOperatorState:
         return {"final_answer": "", "enough_evidence": True}
@@ -183,7 +177,7 @@ def build_summarize_findings_node() -> Callable[[LocalOperatorState], LocalOpera
         if not observations:
             return {"final_answer": ""}
 
-        lines = ["## 本地文件读取结果"]
+        lines = ["## 本地工具调用结果"]
         for observation in observations:
             lines.extend(_observation_to_lines(observation))
         return {"final_answer": "\n".join(lines)}
@@ -192,19 +186,112 @@ def build_summarize_findings_node() -> Callable[[LocalOperatorState], LocalOpera
 
 
 def route_after_plan(state: LocalOperatorState) -> str:
-    """plan_read_operation 后的条件边。"""
+    """plan_tool_use 后的条件边。"""
 
-    return "select_read_tool" if state.get("need_local_read") else "finish_without_tool"
+    return "select_tool" if state.get("needs_tool", state.get("need_local_read", False)) else "finish_without_tool"
+
+
+def route_after_select_tool(state: LocalOperatorState) -> str:
+    """select_tool 后按工具类型分流到 read/write 执行节点。"""
+
+    action = state.get("next_action") or {}
+    tool_name = str(action.get("tool_name") or "")
+    if tool_name in WRITE_TOOL_NAMES:
+        return "run_write_tool"
+    return "run_read_tool"
 
 
 def route_after_observe(state: LocalOperatorState) -> str:
     """observe_tool_result 后的条件边。"""
 
-    return "summarize_findings" if state.get("enough_evidence", True) else "select_read_tool"
+    return "summarize_findings" if state.get("enough_evidence", True) else "select_tool"
+
+
+def _run_tool_action(
+    state: LocalOperatorState,
+    *,
+    session_factory: SessionFactory,
+    allowed_tool_names: set[str],
+) -> LocalOperatorState:
+    """执行当前 next_action，并把标准化 observation 写回 state。
+
+    参数：
+      state: Local Operator 当前图状态，必须包含 next_action。
+      session_factory: 数据库 session 工厂，传给工具内部审计模块。
+      allowed_tool_names: 当前执行分支允许的工具名集合，用于防止路由错误或 planner 越权。
+    """
+
+    action = state.get("next_action")
+    if not action:
+        return {"enough_evidence": True}
+
+    policy = LocalOperatorPolicy.from_roots(state.get("workspace_roots") or ["."])
+    tools = create_read_tools(
+        session_factory=session_factory,
+        policy=policy,
+        conversation_id=state.get("conversation_id"),
+        turn_id=state.get("turn_id"),
+        known_existing_paths=_known_existing_paths_from_observations(state.get("observations", [])),
+    )
+    tool_name = str(action.get("tool_name") or "")
+    arguments = dict(action.get("arguments") or {})
+    if tool_name not in allowed_tool_names:
+        observation: LocalOperatorObservation = {
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "ok": False,
+            "data": {},
+            "error_code": "INVALID_ARGUMENT",
+            "message": f"工具 `{tool_name}` 不属于当前执行分支。",
+            "blocked": True,
+        }
+    elif tool_name not in tools:
+        observation = {
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "ok": False,
+            "data": {},
+            "error_code": "INVALID_ARGUMENT",
+            "message": f"未知本地工具：{tool_name}",
+            "blocked": True,
+        }
+    else:
+        raw_result = tools[tool_name].invoke(arguments)
+        payload = json.loads(str(raw_result))
+        observation = {
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "ok": bool(payload.get("ok")),
+            "data": dict(payload.get("data") or {}),
+            "error_code": str(payload.get("error_code") or ""),
+            "message": str(payload.get("message") or ""),
+            "blocked": bool(payload.get("blocked", False)),
+        }
+
+    return {
+        "tool_calls": [*state.get("tool_calls", []), action],
+        "observations": [*state.get("observations", []), observation],
+        "tool_budget": max(int(state.get("tool_budget") or 0) - 1, 0),
+        "next_action": None,
+    }
 
 
 def _rule_plan_action(user_input: str, *, workspace_roots: list[str]) -> LocalOperatorAction | None:
     normalized = user_input.strip()
+    if _looks_like_rule_write_request(normalized):
+        path = _extract_path(normalized)
+        content = _extract_write_content(normalized)
+        if not path or not content:
+            return None
+        return {
+            "tool_name": "write_file",
+            "arguments": {
+                "path": path,
+                "content": content,
+                "overwrite": _looks_like_overwrite_request(normalized),
+            },
+            "reason": "用户明确要求写入本地文件。",
+        }
     if not _looks_like_rule_read_request(normalized):
         return None
 
@@ -268,6 +355,18 @@ def _looks_like_rule_read_request(text: str) -> bool:
     ) or _looks_like_project_existence_request(text)
 
 
+def _looks_like_rule_write_request(text: str) -> bool:
+    """识别明确写文件请求。
+
+    写入有副作用，所以规则快路径要求同时出现写入动作、文件对象和可提取内容。
+    模糊请求交给 LLM planner；如果仍无法确定路径或内容，就不执行工具。
+    """
+
+    action_keywords = ["写入", "创建文件", "创建", "新建文件", "新建", "保存到", "覆盖写入", "write"]
+    object_keywords = ["文件", ".py", ".ts", ".tsx", ".md", ".txt", ".json", ".css", ".html", ".yaml", ".yml"]
+    return any(keyword in text for keyword in action_keywords) and any(keyword in text for keyword in object_keywords)
+
+
 def _looks_like_local_operator_candidate(text: str) -> bool:
     """判断是否值得调用 LLM planner。
 
@@ -300,10 +399,10 @@ def _looks_like_local_operator_candidate(text: str) -> bool:
     return any(keyword in text for keyword in candidate_keywords)
 
 
-def _llm_plan_read_action(user_input: str) -> LocalOperatorAction | None:
-    """使用轻量 LLM 判断是否需要本地 read 工具。
+def _llm_plan_tool_action(user_input: str) -> LocalOperatorAction | None:
+    """使用轻量 LLM 判断是否需要本地文件工具。
 
-    这是规则快路径的兜底，而不是安全边界。模型只能返回 read-only 工具计划；
+    这是规则快路径的兜底，而不是安全边界。模型只能返回白名单工具计划；
     真正执行时仍会经过工具白名单、workspace 权限和敏感文件拦截。
     """
 
@@ -314,37 +413,67 @@ def _llm_plan_read_action(user_input: str) -> LocalOperatorAction | None:
         decision = _parse_planner_decision(payload)
     except Exception:
         return None
-    if not decision.need_local_read or decision.confidence < 0.55:
+    if not decision.needs_tool or decision.confidence < 0.55:
         return None
-    if decision.tool_name not in ALLOWED_READ_TOOLS:
+    if decision.tool_name not in ALLOWED_LOCAL_OPERATOR_TOOLS:
         return None
     return {
         "tool_name": decision.tool_name,
         "arguments": _normalize_tool_arguments(decision.tool_name, decision.arguments),
-        "reason": f"LLM planner 判断需要本地读取：{decision.reason}",
+        "reason": f"LLM planner 判断需要本地工具：{decision.reason}",
     }
+
+
+def _expand_planned_actions(action: LocalOperatorAction) -> list[LocalOperatorAction]:
+    """把单个高层动作展开为 graph 可顺序执行的工具队列。
+
+    覆盖已有文件时，`write_file` 必须先观察目标路径。这样既保留 Claude Code
+    read-before-write 的保护思想，也避免模型直接用整文件覆盖误伤用户刚改的内容。
+    """
+
+    if action.get("tool_name") != "write_file":
+        return [action]
+    arguments = dict(action.get("arguments") or {})
+    if not arguments.get("overwrite"):
+        return [action]
+    path = str(arguments.get("path") or ".")
+    return [
+        {
+            "tool_name": "get_file_info",
+            "arguments": {"path": path},
+            "reason": "覆盖写入前先查看目标文件，满足 read-before-write 保护。",
+        },
+        action,
+    ]
 
 
 def _build_local_operator_planner_prompt(user_input: str) -> str:
     return (
-        "你是 Ai 记的 Local Operator read-only 工具规划器。判断用户这句话是否需要读取授权 workspace 内的本地文件或目录。\n"
-        "只允许规划 read-only 工具，不允许写文件，不允许执行命令，不允许访问网络。\n\n"
-        "读取能力说明：\n"
+        "你是 Ai 记的 Local Operator 本地文件工具规划器。判断用户这句话是否需要读取或写入授权 workspace 内的本地文件。\n"
+        "只能规划白名单文件工具，不能执行命令，不能访问网络。\n"
+        "规划 write_file 必须非常保守：只有用户明确要求创建/写入/覆盖本地文件，并给出目标路径和内容时才允许。\n\n"
+        "能力说明：\n"
         "- 你可以规划读取本机文件系统中的文件或目录，包括用户给出的绝对路径。\n"
+        "- 你可以规划写入授权 workspace 内的普通文本文件；写入已有文件时必须设置 overwrite=true，工具会要求先读取或查看该文件。\n"
+        "- write_file 的 content 必须是用户明确给出的正文，或用户明确要求你生成且你已经能在本节点中完整生成的正文。\n"
+        "- 不要把“用于写...”“准备写...”“创建一个...文件”理解成可以写入模板；禁止写入“此处填写”“待补充”“TODO”等占位内容。\n"
         "- 如果用户提供了路径，先假设路径值得尝试；路径不存在、不可读、敏感或越权时，工具会返回真实错误。\n"
         "- 不要因为路径在 C 盘、D 盘、系统目录或 Home 之外，就在规划阶段拒绝；是否允许由工具策略决定。\n"
-        "- 你不能凭空声称“我无法访问你的电脑/系统日志/硬盘”。需要确认时必须调用 read-only 工具。\n"
-        "- 当前工具仍是只读能力：不能写文件，不能执行命令，不能访问网络。\n\n"
+        "- 你不能凭空声称“我无法访问你的电脑/系统日志/硬盘”。需要确认时必须调用本地文件工具。\n"
+        "- 当前不能执行命令，不能访问网络。\n\n"
         "可用工具：\n"
         "- list_dir(path, max_entries, include_hidden): 列目录。\n"
         "- read_file(path, start_line, end_line, max_bytes): 读取文本文件。\n"
         "- search_files(root, pattern, max_results, include_hidden): 按文件名搜索。\n"
         "- search_text(root, query, include_glob, max_results, context_lines): 搜索文本内容。\n"
         "- get_file_info(path): 查看文件或目录是否存在、大小、修改时间。\n\n"
+        "- write_file(path, content, overwrite): 创建或整文件写入文本文件。优先用于新建文件或完整重写；局部修改暂不规划。\n\n"
         "判断原则：\n"
         "- 用户询问本机/电脑/工作区里是否存在某项目、仓库、目录或文件，需要本地读取。\n"
         "- 用户要求查看、确认、搜索、打开、列出本地文件/目录，需要本地读取。\n"
         "- 普通聊天、记忆问答、常识问题、数学题不需要本地读取。\n"
+        "- 用户只是讨论代码方案、询问如何修改时，不要写文件；只有明确要求“帮我写入/创建/保存到某文件”才使用 write_file。\n"
+        "- 如果用户只说“创建一个用于写 X 的文件”，但没有要求你现在生成 X 的正文，也没有提供正文，不要调用 write_file；应让最终回答节点说明需要先生成正文。\n"
         "- 如果用户没有给具体路径，但问的是当前项目/这个仓库/当前工作区，用 path/root = \".\"。\n"
         "- 如果用户问的是当前电脑/本机/Home/用户目录里有没有某个项目或文件，优先用 search_files，root = \"~\"。\n"
         "- 如果只是确认当前项目是否存在，优先用 get_file_info，path = \".\"。\n"
@@ -352,7 +481,7 @@ def _build_local_operator_planner_prompt(user_input: str) -> str:
         "- 不要自己编造未出现的绝对路径；但用户明确给出的绝对路径可以原样传给工具。\n\n"
         "只返回 JSON，不要输出其他文本。格式：\n"
         "{"
-        "\"need_local_read\":true,"
+        "\"needs_tool\":true,"
         "\"tool_name\":\"get_file_info\","
         "\"arguments\":{\"path\":\".\"},"
         "\"confidence\":0.8,"
@@ -364,7 +493,7 @@ def _build_local_operator_planner_prompt(user_input: str) -> str:
 
 def _parse_planner_decision(payload: dict[str, Any]) -> PlannerDecision:
     return PlannerDecision(
-        need_local_read=bool(payload.get("need_local_read", False)),
+        needs_tool=bool(payload.get("needs_tool", payload.get("need_local_read", False))),
         tool_name=str(payload.get("tool_name") or ""),
         arguments=dict(payload.get("arguments") or {}),
         confidence=float(payload.get("confidence", 0.0)),
@@ -405,6 +534,12 @@ def _normalize_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> dict
         }
     if tool_name == "get_file_info":
         return {"path": str(arguments.get("path") or ".")}
+    if tool_name == "write_file":
+        return {
+            "path": str(arguments.get("path") or "."),
+            "content": str(arguments.get("content") or ""),
+            "overwrite": bool(arguments.get("overwrite", False)),
+        }
     return {}
 
 
@@ -495,6 +630,22 @@ def _extract_search_query(text: str) -> str:
     return text
 
 
+def _extract_write_content(text: str) -> str:
+    """从用户输入中提取要写入文件的正文。"""
+
+    quoted = _extract_quoted_text(text)
+    if quoted and not ("/" in quoted or "\\" in quoted):
+        return quoted
+    for marker in ["内容是", "内容为", "写入", "保存"]:
+        if marker in text:
+            return text.split(marker, 1)[-1].strip(" ：:，。")
+    return ""
+
+
+def _looks_like_overwrite_request(text: str) -> bool:
+    return any(keyword in text for keyword in ["覆盖", "重写", "overwrite", "替换整个文件"])
+
+
 def _observation_to_lines(observation: LocalOperatorObservation) -> list[str]:
     tool_name = observation.get("tool_name", "")
     if not observation.get("ok"):
@@ -523,7 +674,28 @@ def _observation_to_lines(observation: LocalOperatorObservation) -> list[str]:
         return [
             f"- `{data.get('relative_path')}`: path={data.get('path')}, kind={data.get('kind')}, size={data.get('size')}, modified_at={data.get('modified_at')}"
         ]
+    if tool_name == "write_file":
+        return [
+            f"- 已{ '更新' if data.get('type') == 'update' else '创建' } `{data.get('relative_path')}`，写入 {data.get('bytes_written')} bytes，hash={data.get('content_hash')}。"
+        ]
     return [f"- `{tool_name}` 返回：{data}"]
+
+
+def _known_existing_paths_from_observations(observations: list[LocalOperatorObservation]) -> set[str]:
+    """收集本轮已经读取或查看过的路径，供 write_file 覆盖保护使用。"""
+
+    known_paths: set[str] = set()
+    for observation in observations:
+        if not observation.get("ok"):
+            continue
+        if observation.get("tool_name") not in {"read_file", "get_file_info"}:
+            continue
+        data = dict(observation.get("data") or {})
+        for key in ["path", "relative_path"]:
+            value = data.get(key)
+            if value:
+                known_paths.add(str(value))
+    return known_paths
 
 
 def _format_entries(entries: list[dict[str, Any]]) -> list[str]:

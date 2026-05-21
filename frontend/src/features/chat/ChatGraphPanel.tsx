@@ -1,4 +1,5 @@
 import { X } from "lucide-react";
+import { useState } from "react";
 
 import { MermaidGraphView } from "../graph/MermaidGraphView";
 import { Button, EmptyState, PanelHeader } from "../../shared/ui";
@@ -11,6 +12,9 @@ interface ChatGraphPanelProps {
 }
 
 export function ChatGraphPanel({ graph, isLoading, onClose }: ChatGraphPanelProps) {
+  const [selectedSubgraphNode, setSelectedSubgraphNode] = useState<string | null>(null);
+  const selectedSubgraph = selectedSubgraphNode ? graph?.subgraphs?.[selectedSubgraphNode] : null;
+
   return (
     <aside className="chat-debug-panel">
       <PanelHeader
@@ -34,11 +38,42 @@ export function ChatGraphPanel({ graph, isLoading, onClose }: ChatGraphPanelProp
             className="chat-graph-svg"
             errorClassName="chat-debug-error"
             renderKey={graph.turn_id}
+            onNodeClick={(nodeId) => {
+              if (graph.subgraphs?.[nodeId]) {
+                setSelectedSubgraphNode(nodeId);
+              }
+            }}
             themeVariables={{
               primaryColor: "#f8fafc",
               primaryBorderColor: "#cbd5e1",
             }}
           />
+
+          {selectedSubgraphNode && selectedSubgraph ? (
+            <section className="chat-debug-section chat-subgraph-section">
+              <div className="chat-subgraph-header">
+                <h4>子图：{selectedSubgraphNode}</h4>
+                <Button aria-label="关闭子图" onClick={() => setSelectedSubgraphNode(null)} size="sm">
+                  <X aria-hidden="true" size={15} />
+                  关闭
+                </Button>
+              </div>
+              <MermaidGraphView
+                chart={selectedSubgraph}
+                className="chat-graph-svg"
+                errorClassName="chat-debug-error"
+                renderKey={`${graph.turn_id}-${selectedSubgraphNode}`}
+                themeVariables={{
+                  primaryColor: "#f8fafc",
+                  primaryBorderColor: "#cbd5e1",
+                }}
+              />
+              <details>
+                <summary>节点调用详情</summary>
+                <pre>{JSON.stringify(graph.debug_payload?.nodes?.[selectedSubgraphNode] ?? {}, null, 2)}</pre>
+              </details>
+            </section>
+          ) : null}
 
           <section className="chat-debug-section">
             <h4>性能</h4>

@@ -133,6 +133,7 @@ def build_load_turn_state_node(
                 "context_l3_layer": {},
                 "context_l4_layer": {},
                 "local_operator_context": "",
+                "local_operator_node_statuses": {},
                 "prompt_context": "",
                 "answer_mode": state.get("answer_mode", "text"),
                 "assistant_answer": "",
@@ -285,10 +286,10 @@ def build_l0_current_input_node():
 
 
 def build_local_operator_context_node(session_factory: SessionFactory):
-    """构建本轮本地 read-only 工具上下文。
+    """构建本轮本地工具上下文。
 
     这个 worker 和 L0-L4 并行执行。普通聊天会被 Local Operator 的规则 planner
-    快速判定为不需要读取；只有用户明确要求查看/搜索本地文件时，才会执行 read 工具。
+    快速判定为不需要工具；只有用户明确要求查看、搜索或写入本地文件时，才会执行工具子图。
     """
 
     def build_local_operator_context(state: MemoryChatGraphState) -> MemoryChatGraphState:
@@ -301,9 +302,55 @@ def build_local_operator_context_node(session_factory: SessionFactory):
         )
         return {
             "local_operator_context": result.get("final_answer", ""),
+            "local_operator_node_statuses": _local_operator_node_statuses(result),
         }
 
     return build_local_operator_context
+
+
+def _local_operator_node_statuses(result: dict) -> dict[str, str]:
+    """根据 Local Operator 最终 state 还原子图节点状态。
+
+    Local Operator 当前作为 Memory Chat 的同步子图执行，外层 stream 只能看到
+    `build_local_operator_context` 这个 worker 节点。这里用子图最终 state 推导
+    走过的内部路径，让前端展开子图时能看出是否执行了 read/write 工具以及执行到哪一步。
+    """
+
+    node_statuses = {
+        "plan_tool_use": "pending",
+        "select_tool": "pending",
+        "run_read_tool": "pending",
+        "run_write_tool": "pending",
+        "observe_tool_result": "pending",
+        "finish_without_tool": "pending",
+        "summarize_findings": "pending",
+    }
+    node_statuses["plan_tool_use"] = "succeeded"
+    if not result.get("needs_tool", result.get("need_local_read")):
+        node_statuses["finish_without_tool"] = "succeeded"
+        return _skip_unvisited_local_operator_nodes(node_statuses)
+
+    node_statuses["select_tool"] = "succeeded"
+    tool_calls = result.get("tool_calls") or []
+    tool_names = {str(call.get("tool_name") or "") for call in tool_calls if isinstance(call, dict)}
+    if tool_names & {"list_dir", "read_file", "search_files", "search_text", "get_file_info"}:
+        node_statuses["run_read_tool"] = "succeeded"
+    if "write_file" in tool_names:
+        node_statuses["run_write_tool"] = "succeeded"
+    if result.get("tool_calls") or result.get("observations"):
+        node_statuses["observe_tool_result"] = "succeeded"
+    if result.get("final_answer"):
+        node_statuses["summarize_findings"] = "succeeded"
+    return _skip_unvisited_local_operator_nodes(node_statuses)
+
+
+def _skip_unvisited_local_operator_nodes(node_statuses: dict[str, str]) -> dict[str, str]:
+    """把子图中本轮没有走到的节点标记为 skipped。"""
+
+    for node_name, node_status in list(node_statuses.items()):
+        if node_status == "pending":
+            node_statuses[node_name] = "skipped"
+    return node_statuses
 
 
 def _default_local_operator_workspace_roots() -> list[str]:
@@ -855,11 +902,13 @@ def build_memory_chat_answer_system_prompt() -> str:
         "- poor 或 none 时不要编造用户经历；可以直接基于常识回答，或自然地说明“我现在还没找到相关记忆”。\n"
         "- 不要反复强调“基于有限片段”“检索质量较弱”“记忆质量不足”等内部评估词，"
         "除非用户明确要求调试或追问依据。\n\n"
-        "本地文件读取规则：\n"
-        "- 如果 prompt 中出现“本地文件读取结果”，说明 Local Operator 已经实际调用只读工具。\n"
+        "本地文件工具规则：\n"
+        "- 如果 prompt 中出现“本地工具调用结果”或旧版“本地文件读取结果”，说明 Local Operator 已经实际调用本地工具。\n"
         "- 回答必须优先基于这些工具结果，而不是凭空说你不能访问用户电脑、硬盘、C 盘或系统日志。\n"
         "- 如果工具结果显示读取成功，直接总结读到的内容，并说明路径或匹配结果。\n"
+        "- 如果工具结果显示写入成功，只能说明已创建/更新的真实路径和工具返回摘要，不要声称文件里有工具没有写入的具体内容。\n"
         "- 如果工具结果显示失败或被拦截，只能复述真实错误原因，例如路径不存在、不是文本文件、敏感文件被拦截。\n"
+        "- 如果 write_file 因 PLACEHOLDER_CONTENT_REJECTED 失败，说明系统拒绝写入占位模板；你应该直接生成真实正文，或询问用户是否要把这段正文写入文件。\n"
         "- 不要要求用户复制文件内容，除非工具明确返回无法读取且没有其他可用路径。\n\n"
         "个人画像类问题的风格：\n"
         "- 当用户问“你觉得我是怎样的人”“你了解我吗”“评价我”时，优先给出温和、具体的人格印象。\n"
@@ -894,10 +943,12 @@ def build_elf_bubble_answer_system_prompt() -> str:
         "- 每个 bubble 的 emoji 必须和 text 的主要情绪一致，不要让一个 happy 气泡里包含明显 worried 内容。\n"
         "- 不要逐 token 拆分，不要把半句话放进一个 bubble。\n"
         "- text 使用自然中文，像在轻声聊天。\n\n"
-        "本地文件读取规则：\n"
-        "- 如果 prompt 中出现“本地文件读取结果”，说明 Local Operator 已经实际调用只读工具。\n"
+        "本地文件工具规则：\n"
+        "- 如果 prompt 中出现“本地工具调用结果”或旧版“本地文件读取结果”，说明 Local Operator 已经实际调用本地工具。\n"
         "- 你必须基于这些工具结果回答，不要凭空说自己不能访问用户电脑、硬盘、C 盘或系统日志。\n"
         "- 如果工具读取成功，直接用气泡总结读到的内容；如果失败，只说明真实错误原因。\n"
+        "- 如果工具写入成功，只能说明已创建/更新的真实路径和工具返回摘要，不要声称文件里有工具没有写入的具体内容。\n"
+        "- 如果 write_file 因 PLACEHOLDER_CONTENT_REJECTED 失败，说明系统拒绝写入占位模板；你应该直接生成真实正文，或询问用户是否要把这段正文写入文件。\n"
         "- 不要要求用户复制文件内容，除非工具明确返回无法读取且没有其他可用路径。\n\n"
         "emoji 可选值：\n"
         "- idle_soft：普通温和回应、轻松陪伴。\n"
@@ -920,6 +971,22 @@ def build_elf_bubble_answer_system_prompt() -> str:
         "- relaxed：平静、放松、安心。\n"
         "- encouraging：鼓励、支持、给用户打气。\n"
         "- speechless：无语、尴尬、短暂愣住。\n\n"
+        "扩展 emoji 可选值：\n"
+        "- tsundere_pout：傲娇、嘴硬、害羞但假装不在意。\n"
+        "- smug_grin：小坏笑、得逞、带一点可爱的自信。\n"
+        "- chin_thinking：托腮思考、认真琢磨。\n"
+        "- head_tilt_curious：歪头好奇、轻轻追问。\n"
+        "- starry_eyes：星星眼、崇拜、被点燃兴趣。\n"
+        "- deadpan：面无表情吐槽、冷静无语。\n"
+        "- teasing_smile：逗用户、轻松调侃。\n"
+        "- determined：下定决心、认真推进。\n"
+        "- panicked：慌张、突然有点手忙脚乱。\n"
+        "- comforting_soft：安慰、温柔陪伴、让用户放松。\n"
+        "- praying_please：拜托、请求、撒娇式请求。\n"
+        "- tongue_out：吐舌、轻微恶作剧、俏皮认错。\n"
+        "- mouth_x：闭嘴、保密、暂时不说。\n"
+        "- dark_aura：阴沉怨念、轻微黑线吐槽，不用于攻击用户。\n"
+        "- sparkle_success：高光成功、特别开心地完成。\n\n"
         "记忆使用规则：不要编造用户记忆；如果没有可靠记忆，就自然说明现在还不确定。"
     )
 
@@ -983,6 +1050,21 @@ def _normalize_elf_emoji(emoji: str) -> str:
         "relaxed",
         "encouraging",
         "speechless",
+        "tsundere_pout",
+        "smug_grin",
+        "chin_thinking",
+        "head_tilt_curious",
+        "starry_eyes",
+        "deadpan",
+        "teasing_smile",
+        "determined",
+        "panicked",
+        "comforting_soft",
+        "praying_please",
+        "tongue_out",
+        "mouth_x",
+        "dark_aura",
+        "sparkle_success",
     }
     return normalized if normalized in allowed else "idle_soft"
 
@@ -1050,6 +1132,36 @@ def _has_different_emotion(left: str, right: str) -> bool:
 
 
 def _infer_elf_emoji(text: str, *, fallback: str) -> str:
+    if any(keyword in text for keyword in ["傲娇", "嘴硬", "才不是", "哼"]):
+        return "tsundere_pout"
+    if any(keyword in text for keyword in ["坏笑", "偷笑", "得逞", "小算盘"]):
+        return "smug_grin"
+    if any(keyword in text for keyword in ["托腮", "琢磨", "沉思", "认真想想"]):
+        return "chin_thinking"
+    if any(keyword in text for keyword in ["歪头", "好奇", "想问问"]):
+        return "head_tilt_curious"
+    if any(keyword in text for keyword in ["星星眼", "崇拜", "闪闪发光", "好厉害"]):
+        return "starry_eyes"
+    if any(keyword in text for keyword in ["冷静吐槽", "面无表情", "离谱"]):
+        return "deadpan"
+    if any(keyword in text for keyword in ["调侃", "逗你", "开个玩笑"]):
+        return "teasing_smile"
+    if any(keyword in text for keyword in ["下定决心", "一定会", "认真推进", "我来处理"]):
+        return "determined"
+    if any(keyword in text for keyword in ["慌了", "糟糕", "怎么办", "来不及"]):
+        return "panicked"
+    if any(keyword in text for keyword in ["安慰", "抱抱", "没关系", "别难过", "陪着你"]):
+        return "comforting_soft"
+    if any(keyword in text for keyword in ["拜托", "求你", "可以嘛", "お願い"]):
+        return "praying_please"
+    if any(keyword in text for keyword in ["吐舌", "诶嘿", "嘿嘿我错啦"]):
+        return "tongue_out"
+    if any(keyword in text for keyword in ["保密", "闭嘴", "不能说", "先不说"]):
+        return "mouth_x"
+    if any(keyword in text for keyword in ["怨念", "黑线", "阴沉", "碎碎念"]):
+        return "dark_aura"
+    if any(keyword in text for keyword in ["完美", "漂亮完成", "闪亮登场", "大成功"]):
+        return "sparkle_success"
     if any(keyword in text for keyword in ["无语", "尴尬", "愣住", "不知道说什么", "沉默"]):
         return "speechless"
     if any(keyword in text for keyword in ["惊讶", "没想到", "突然", "居然", "哇", "诶", "咦"]):

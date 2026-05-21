@@ -6,6 +6,7 @@ from sqlmodel import select
 from app.agent.graphs.memory_chat.nodes import _configured_local_operator_workspace_roots
 from app.agent.graphs.memory_chat.nodes import _default_local_operator_workspace_roots
 from app.agent.graphs.local_operator.nodes import _build_local_operator_planner_prompt
+from app.agent.graphs.local_operator.graph import get_local_operator_graph_mermaid
 from app.agent.graphs.local_operator.graph import run_local_operator_graph
 from app.core.config import settings
 from app.local_operator.filesystem import LocalFilesystemService
@@ -178,6 +179,54 @@ def test_search_text_finds_matches(tmp_path: Path):
     assert result.data["matches"][0]["line"] == 2
 
 
+def test_write_file_creates_parent_directories(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = LocalFilesystemService(LocalOperatorPolicy.from_roots([str(workspace)]))
+
+    result = service.write_file("docs/hello.txt", content="你好，Memo。")
+
+    assert result.ok is True
+    assert result.data["type"] == "create"
+    assert result.data["relative_path"] == "docs/hello.txt"
+    assert (workspace / "docs" / "hello.txt").read_text(encoding="utf-8") == "你好，Memo。"
+
+
+def test_write_file_requires_read_before_overwrite(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "hello.txt").write_text("old", encoding="utf-8")
+    service = LocalFilesystemService(LocalOperatorPolicy.from_roots([str(workspace)]))
+
+    blocked = service.write_file("hello.txt", content="new", overwrite=True)
+    allowed = service.write_file(
+        "hello.txt",
+        content="new",
+        overwrite=True,
+        known_existing_paths={"hello.txt"},
+    )
+
+    assert blocked.ok is False
+    assert blocked.error_code == "READ_BEFORE_WRITE_REQUIRED"
+    assert blocked.blocked is True
+    assert allowed.ok is True
+    assert allowed.data["type"] == "update"
+    assert (workspace / "hello.txt").read_text(encoding="utf-8") == "new"
+
+
+def test_write_file_rejects_placeholder_content(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = LocalFilesystemService(LocalOperatorPolicy.from_roots([str(workspace)]))
+
+    result = service.write_file("review.md", content="## 对用户的评价\n\n此处填写对用户的评价内容。")
+
+    assert result.ok is False
+    assert result.error_code == "PLACEHOLDER_CONTENT_REJECTED"
+    assert result.blocked is True
+    assert not (workspace / "review.md").exists()
+
+
 def test_local_operator_graph_reads_file_and_writes_audit(
     session,
     session_factory,
@@ -196,7 +245,7 @@ def test_local_operator_graph_reads_file_and_writes_audit(
     )
 
     operations = session.exec(select(AgentOperation)).all()
-    assert result["need_local_read"] is True
+    assert result["needs_tool"] is True
     assert "你好，Ai 记。" in result["final_answer"]
     assert len(operations) == 1
     assert operations[0].conversation_id == 7
@@ -204,6 +253,82 @@ def test_local_operator_graph_reads_file_and_writes_audit(
     assert operations[0].operation_type == "read"
     assert operations[0].status == "completed"
     assert operations[0].tool_name == "read_file"
+
+
+def test_local_operator_graph_creates_file_and_writes_audit(
+    session,
+    session_factory,
+    tmp_path: Path,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = run_local_operator_graph(
+        session_factory=session_factory,
+        conversation_id=19,
+        turn_id=23,
+        user_input="请创建文件 hello.txt 内容是 你好，AiMemo。",
+        workspace_roots=[str(workspace)],
+    )
+
+    operations = session.exec(select(AgentOperation).where(AgentOperation.conversation_id == 19)).all()
+    assert result["needs_tool"] is True
+    assert "已创建 `hello.txt`" in result["final_answer"]
+    assert (workspace / "hello.txt").read_text(encoding="utf-8") == "你好，AiMemo"
+    assert len(operations) == 1
+    assert operations[0].operation_type == "write"
+    assert operations[0].status == "completed"
+    assert operations[0].tool_name == "write_file"
+    assert operations[0].risk_level == "medium"
+
+
+def test_local_operator_graph_does_not_create_placeholder_review_file(
+    session,
+    session_factory,
+    tmp_path: Path,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = run_local_operator_graph(
+        session_factory=session_factory,
+        conversation_id=21,
+        turn_id=25,
+        user_input="请在 review.md 创建一个 markdown 文件用于写对我的评价，内容是 此处填写对用户的评价内容。",
+        workspace_roots=[str(workspace)],
+    )
+
+    operations = session.exec(select(AgentOperation).where(AgentOperation.conversation_id == 21)).all()
+    assert result["needs_tool"] is True
+    assert "PLACEHOLDER_CONTENT_REJECTED" in result["final_answer"]
+    assert not (workspace / "review.md").exists()
+    assert len(operations) == 1
+    assert operations[0].status == "blocked"
+    assert operations[0].tool_name == "write_file"
+
+
+def test_local_operator_graph_overwrites_existing_file_after_info_check(
+    session,
+    session_factory,
+    tmp_path: Path,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "hello.txt").write_text("old", encoding="utf-8")
+
+    result = run_local_operator_graph(
+        session_factory=session_factory,
+        conversation_id=20,
+        turn_id=24,
+        user_input="请覆盖写入 hello.txt 内容是 new-content",
+        workspace_roots=[str(workspace)],
+    )
+
+    operations = session.exec(select(AgentOperation).where(AgentOperation.conversation_id == 20).order_by(AgentOperation.id)).all()
+    assert result["needs_tool"] is True
+    assert (workspace / "hello.txt").read_text(encoding="utf-8") == "new-content"
+    assert [operation.tool_name for operation in operations] == ["get_file_info", "write_file"]
+    assert [operation.operation_type for operation in operations] == ["read", "write"]
 
 
 def test_local_operator_graph_detects_project_existence_question(
@@ -223,7 +348,7 @@ def test_local_operator_graph_detects_project_existence_question(
     )
 
     operations = session.exec(select(AgentOperation).where(AgentOperation.conversation_id == 8)).all()
-    assert result["need_local_read"] is True
+    assert result["needs_tool"] is True
     assert "Ai记" in result["final_answer"]
     assert len(operations) == 1
     assert operations[0].tool_name == "search_files"
@@ -247,7 +372,7 @@ def test_local_operator_graph_searches_home_for_whole_computer_project_question(
     )
 
     operations = session.exec(select(AgentOperation).where(AgentOperation.conversation_id == 18)).all()
-    assert result["need_local_read"] is True
+    assert result["needs_tool"] is True
     assert "AiMemo" in result["final_answer"]
     assert len(operations) == 1
     assert operations[0].tool_name == "search_files"
@@ -281,7 +406,7 @@ def test_local_operator_graph_uses_llm_planner_for_ambiguous_local_request(
 
     operations = session.exec(select(AgentOperation).where(AgentOperation.conversation_id == 9)).all()
     assert planner_calls == ["帮我确认这个仓库还在工作区里吗？"]
-    assert result["need_local_read"] is True
+    assert result["needs_tool"] is True
     assert operations[0].tool_name == "get_file_info"
 
 
@@ -311,7 +436,18 @@ def test_local_operator_graph_skips_planner_for_plain_chat(
     )
 
     assert planner_calls == []
-    assert result["need_local_read"] is False
+    assert result["needs_tool"] is False
+
+
+def test_local_operator_graph_mermaid_shows_read_write_tool_routes(session_factory):
+    mermaid = get_local_operator_graph_mermaid(session_factory=session_factory)
+
+    assert "plan_tool_use" in mermaid
+    assert "select_tool" in mermaid
+    assert "run_read_tool" in mermaid
+    assert "run_write_tool" in mermaid
+    assert "plan_read_operation" not in mermaid
+    assert "select_read_tool" not in mermaid
 
 
 def test_default_local_operator_workspace_roots_include_repo_and_home():

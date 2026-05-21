@@ -555,17 +555,21 @@ search_text 最多返回 50 条结果
 
 ## Local Operator Graph
 
-第一阶段 read-only graph 可以保持简单：
+当前 Local Operator Graph 已支持 read 工具和第一版 `write_file` 工具。`write_file`
+只做整文件写入，适合创建新文件或完整重写；局部 diff/edit 后续单独接入。
 
 ```mermaid
 flowchart TD
-    Start([START]) --> Plan[plan_read_operation]
-    Plan --> NeedTool{需要本地读取?}
+    Start([START]) --> Plan[plan_tool_use]
+    Plan --> NeedTool{需要调用本地工具?}
     NeedTool -->|否| Finish[finish_without_tool]
-    NeedTool -->|是| Select[select_read_tool]
-    Select --> RunTool[run_read_tool]
-    RunTool --> Observe[observe_tool_result]
-    Observe --> More{是否还需要读取}
+    NeedTool -->|是| Select[select_tool]
+    Select --> ToolType{工具类型}
+    ToolType -->|read| RunRead[run_read_tool]
+    ToolType -->|write| RunWrite[run_write_tool]
+    RunRead --> Observe[observe_tool_result]
+    RunWrite --> Observe
+    Observe --> More{是否还需要工具}
     More -->|是| Select
     More -->|否| Summarize[summarize_findings]
     Finish --> End([END])
@@ -575,50 +579,62 @@ flowchart TD
 节点职责：
 
 ```text
-plan_read_operation
-  判断用户问题是否需要本地文件读取，并给出读取目标、搜索关键词和停止条件。
+plan_tool_use
+  判断用户问题是否需要本地文件工具，并给出读取目标、搜索关键词、写入目标和停止条件。
   当前采用“规则快路径 + LLM planner 兜底”：
   - 明确读取/列目录/搜索文件等请求直接选工具，不调用 LLM。
+  - 明确创建/写入文件且给出路径和内容时，可以直接选 write_file。
   - 普通聊天快速跳过。
   - 模糊但像本地操作的问题调用 qwen-turbo planner，要求返回结构化 JSON。
 
-select_read_tool
+select_tool
   根据 plan 和已有 observations 选择下一次工具调用。
-  第一版采用白名单选择，只允许调用 read-only 工具。
+  第一版采用白名单选择，只允许调用 list_dir/read_file/search_files/search_text/get_file_info/write_file。
 
 run_read_tool
-  执行 LangChain @tool 工具。
-  该节点负责权限检查前置、工具调用、审计写入和错误归一化。
+  执行 read 类 LangChain @tool 工具。
+  该节点负责工具调用、审计写入和错误归一化；权限检查在工具内部完成。
+
+run_write_tool
+  执行 write 类 LangChain @tool 工具。
+  当前只有 write_file，工具内部会做 workspace 授权、敏感文件拦截和 read-before-write 保护。
 
 observe_tool_result
   将工具结果写入 graph state，判断结果是否足够，并扣减 tool_budget。
 
 summarize_findings
-  基于工具结果生成面向用户的回答，必要时说明哪些文件不能读取以及原因。
+  基于工具结果生成面向上层 Memory Chat Graph 的本地工具上下文。
 ```
 
 第一版可以限制最大工具轮数，例如最多 6 次，避免模型在目录里无限搜索。
 
 ### Planner 策略
 
-`plan_read_operation` 不是完全靠关键词，也不是每轮都调用 LLM。当前策略：
+`plan_tool_use` 不是完全靠关键词，也不是每轮都调用 LLM。当前策略：
 
 ```text
 规则快路径
   用户明确说“读取文件”“列出目录”“搜索文件”“搜索内容”“查看文件信息”
   -> 直接生成 read-only 工具 action。
 
+写入快路径
+  用户明确说“创建文件”“写入文件”“保存到文件”，并且可以提取路径和内容
+  -> 生成 write_file action。
+  如果是覆盖已有文件，planner 会自动拆成：
+     get_file_info -> write_file(overwrite=true)
+  这样满足 read-before-write 保护，避免直接覆盖用户刚改的文件。
+
 普通聊天
   例如闲聊、记忆问答、常识问题、数学题
-  -> 快速返回 need_local_read = false，不调用 LLM。
+  -> 快速返回 needs_tool = false，不调用 LLM。
 
 模糊本地操作候选
   例如“帮我确认这个仓库还在工作区里吗”
   -> 调用 qwen-turbo planner。
-  -> planner 只能返回 list_dir/read_file/search_files/search_text/get_file_info。
+  -> planner 只能返回 list_dir/read_file/search_files/search_text/get_file_info/write_file。
 ```
 
-LLM planner 只负责“是否需要 read-only 工具”和“用哪个工具”。它不是安全边界。
+LLM planner 只负责“是否需要本地文件工具”和“用哪个工具”。它不是安全边界。
 真正执行时仍然要经过：
 
 ```text
@@ -629,20 +645,58 @@ workspace 路径授权
 agent_operations 审计
 ```
 
+### Write File 第一版
+
+`write_file(path, content, overwrite)` 借鉴 Claude Code `Write` 工具的核心约束：
+
+```text
+整文件写入
+  模型必须给出完整 content，不做隐式 patch。
+
+创建父目录
+  目标父目录不存在时自动创建。
+
+覆盖保护
+  已存在文件必须 overwrite=true。
+  覆盖前本轮必须先 read_file 或 get_file_info 观察过同一路径。
+
+敏感文件保护
+  .env、*.key、*.pem、*.sqlite、*.db 等仍然拒绝写入。
+
+审计
+  agent_operations.operation_type = write
+  risk_level = medium
+  当前第一版 approval_required = false，后续接入 interrupt 人工确认后改为 true。
+```
+
+第一版暂不支持：
+
+```text
+局部替换
+多文件批量写入
+删除 / 移动 / 重命名
+写前 diff 确认 UI
+LangGraph interrupt 审批恢复
+```
+
 ### 条件边设计
 
 Local Operator Graph 的路由不靠字符串 if/else 散落在业务代码里，而是集中在 graph 条件边中：
 
 ```text
 route_after_plan(state)
-  need_local_read = false -> finish_without_tool
-  need_local_read = true  -> select_read_tool
+  needs_tool = false -> finish_without_tool
+  needs_tool = true  -> select_tool
+
+route_after_select_tool(state)
+  read tool  -> run_read_tool
+  write tool -> run_write_tool
 
 route_after_observe(state)
   tool_budget <= 0        -> summarize_findings
   enough_evidence = true  -> summarize_findings
   last_tool_failed = true 且无法恢复 -> summarize_findings
-  otherwise              -> select_read_tool
+  otherwise              -> select_tool
 ```
 
 这样做的好处是：Mermaid 图能准确表达真实执行路径，checkpoint 也能清楚记录当前卡在哪个节点。
@@ -666,9 +720,9 @@ class LocalOperatorState(TypedDict):
     turn_id: int | None
     user_input: str
     workspace_roots: list[str]
-    mode: Literal["read"]
-    need_local_read: bool
-    read_intent: str | None
+    mode: Literal["read", "write"]
+    needs_tool: bool
+    tool_intent: str | None
     tool_budget: int
     planned_actions: list[dict]
     next_action: dict | None

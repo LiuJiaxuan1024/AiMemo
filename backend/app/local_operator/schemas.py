@@ -49,6 +49,12 @@ class ReadFileInput(BaseModel):
     max_bytes: int = Field(default=65536, description="最大返回字节数，上限由系统策略限制。")
 
 
+class WriteFileInput(BaseModel):
+    path: str = Field(description="要写入的文件路径，必须位于授权 workspace 内。")
+    content: str = Field(description="要写入文件的完整内容。该工具会整文件写入。")
+    overwrite: bool = Field(default=False, description="是否允许覆盖已存在文件。覆盖前必须先读取或查看该文件。")
+
+
 class SearchFilesInput(BaseModel):
     root: str = Field(default=".", description="搜索根目录，必须位于授权 workspace 内。")
     pattern: str = Field(description="文件名关键词或 glob，例如 memory 或 *.py。")

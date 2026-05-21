@@ -1248,18 +1248,58 @@ textarea {
 }
 
 .job-graph-svg {
-  background: #f8fafc;
-  border: 1px solid #e6e9ef;
-  border-radius: 8px;
-  min-height: 260px;
-  overflow: auto;
+  min-height: 100%;
+  overflow: visible;
   padding: 12px;
-  scrollbar-gutter: stable;
+  transform-origin: 0 0;
 }
 
 .job-graph-svg svg {
   height: auto;
-  max-width: 100%;
+  max-width: none;
+}
+
+.mermaid-viewer {
+  position: relative;
+  display: grid;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.mermaid-zoom-indicator {
+  background: rgb(255 255 255 / 0.86);
+  border: 1px solid #d0d5dd;
+  border-radius: 999px;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1;
+  padding: 5px 8px;
+  pointer-events: none;
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  z-index: 1;
+}
+
+.mermaid-pan-surface {
+  background: #f8fafc;
+  border: 1px solid #e6e9ef;
+  border-radius: 8px;
+  cursor: zoom-in;
+  min-height: 260px;
+  min-width: 0;
+  overflow: hidden;
+  scrollbar-gutter: stable;
+  touch-action: none;
+  user-select: none;
+}
+
+.mermaid-pan-surface.is-ctrl-pressed {
+  cursor: zoom-out;
+}
+
+.mermaid-pan-surface.is-dragging {
+  cursor: grabbing;
 }
 
 .memory-panel {
@@ -1918,17 +1958,19 @@ textarea {
 }
 
 .chat-graph-svg {
-  background: #f8fafc;
-  border: 1px solid #e6e9ef;
-  border-radius: 8px;
   min-height: 260px;
-  overflow: auto;
+  overflow: visible;
   padding: 12px;
+  transform-origin: 0 0;
 }
 
 .chat-graph-svg svg {
   height: auto;
-  max-width: 100%;
+  max-width: none;
+}
+
+.chat-graph-svg g.node {
+  cursor: pointer;
 }
 
 .chat-debug-section {
@@ -1939,6 +1981,19 @@ textarea {
 .chat-debug-section h4 {
   font-size: 14px;
   margin: 0;
+}
+
+.chat-subgraph-section {
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.chat-subgraph-header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
 }
 
 .chat-debug-section details,

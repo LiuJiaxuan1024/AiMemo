@@ -73,12 +73,12 @@ build_l0_current_input
   构建当前用户输入层。
 
 build_local_operator_context
-  本地 read-only 工具上下文 worker。
-  该 worker 内部调用 Local Operator Graph。普通聊天会被子图 plan_read_operation
-  快速判定为不需要读取；当用户明确要求读取、列目录、搜索文件或搜索内容时，
-  子图会直接进入 read 工具执行链路。
+  本地工具上下文 worker。
+  该 worker 内部调用 Local Operator Graph。普通聊天会被子图 plan_tool_use
+  快速判定为不需要工具；当用户明确要求读取、列目录、搜索文件、搜索内容或写入文件时，
+  子图会进入对应的 read/write 工具执行链路。
   当用户表达比较自然、规则不确定但像本地操作时，子图会调用 qwen-turbo planner
-  做结构化判断，再决定是否进入 read 工具链路。
+  做结构化判断，再决定是否进入工具链路。
   工具结果会整理为 local_operator_context。
 
 merge_prompt_context
@@ -380,7 +380,7 @@ flowchart TD
     Dispatch --> L2[L2 worker<br/>对话摘要]
     Dispatch --> L1[L1 worker<br/>近期对话窗口]
     Dispatch --> L0[L0 worker<br/>当前输入]
-    Dispatch --> LocalOperator[Local Operator worker<br/>read-only tool context]
+    Dispatch --> LocalOperator[Local Operator worker<br/>local tool context]
 
     L4 --> Merge[merge_prompt_context]
     L3 --> Merge
@@ -399,13 +399,16 @@ Local Operator worker 内部流程：
 
 ```mermaid
 flowchart TD
-    LocalStart([Local Operator START]) --> Plan[plan_read_operation]
-    Plan --> NeedRead{需要本地读取?}
-    NeedRead -->|no| Finish[finish_without_tool]
-    NeedRead -->|yes| Select[select_read_tool]
-    Select --> Run[run_read_tool]
-    Run --> Observe[observe_tool_result]
-    Observe --> More{还需要继续读取?}
+    LocalStart([Local Operator START]) --> Plan[plan_tool_use]
+    Plan --> NeedTool{需要调用本地工具?}
+    NeedTool -->|no| Finish[finish_without_tool]
+    NeedTool -->|yes| Select[select_tool]
+    Select --> ToolType{工具类型}
+    ToolType -->|read| RunRead[run_read_tool]
+    ToolType -->|write| RunWrite[run_write_tool]
+    RunRead --> Observe[observe_tool_result]
+    RunWrite --> Observe
+    Observe --> More{还需要继续调用工具?}
     More -->|yes| Select
     More -->|no| Summarize[summarize_findings]
     Finish --> LocalEnd([Local Operator END])
@@ -415,7 +418,7 @@ flowchart TD
 这里的“选择边进入工具子图”发生在 Local Operator Graph 内部，而不是 Memory Chat Graph
 主干上直接串行等待工具。这样 L0/L1/L2/L3/L4 仍然可以和本地工具判断并行执行。
 
-第一版 Local Operator 只开放 read-only 工具：
+当前 Local Operator 已开放第一批 read/write 工具：
 
 ```text
 list_dir
@@ -423,18 +426,27 @@ read_file
 search_files
 search_text
 get_file_info
+write_file
 ```
 
 工具调用规则：
 
 ```text
 普通聊天
-  -> plan_read_operation 快速返回 need_local_read = false。
+  -> plan_tool_use 快速返回 needs_tool = false。
 
 明确本地读取请求
   -> 规则快路径直接生成工具 action
-  -> select_read_tool
+  -> select_tool
   -> run_read_tool
+  -> 写入 agent_operations 审计表
+  -> summarize_findings
+  -> local_operator_context
+
+明确本地写入请求
+  -> 规则快路径或 planner 生成 write_file action
+  -> select_tool
+  -> run_write_tool
   -> 写入 agent_operations 审计表
   -> summarize_findings
   -> local_operator_context
@@ -442,7 +454,7 @@ get_file_info
 模糊本地操作候选
   -> qwen-turbo planner 返回结构化 JSON
   -> 低置信度或不需要本地读取时跳过
-  -> 高置信度 read-only action 进入同一条工具链路
+  -> 高置信度工具 action 进入同一条工具链路
 ```
 
 所有路径都会被限制在授权 workspace 内，`.env`、密钥、数据库文件等敏感文件默认拒绝读取。

@@ -50,6 +50,7 @@ class ChatTurnGraphRead(BaseModel):
     status: str
     node_statuses: dict[str, str]
     mermaid: str
+    subgraphs: dict[str, str] = Field(default_factory=dict)
     context_layers: list[dict]
     retrieved_chunks: list[NoteSearchResult]
     debug_payload: dict
