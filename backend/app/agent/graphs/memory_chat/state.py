@@ -44,9 +44,12 @@ class AgentToolActionPayload(TypedDict, total=False):
     tool_name: str
     arguments: dict
     reason: str
+    source_step_id: str
     operation_type: str
     risk_level: str
     requires_approval: bool
+    status: Literal["READY", "EXECUTING", "COMPLETED", "FAILED", "CANCELLED", "SUPERSEDED"]
+    task_boundary: Literal["new_task", "continuation", "same_turn_followup"]
 
 
 class AgentToolObservationPayload(TypedDict, total=False):
@@ -60,6 +63,84 @@ class AgentToolObservationPayload(TypedDict, total=False):
     error_code: str
     message: str
     blocked: bool
+
+
+class TaskStepPayload(TypedDict, total=False):
+    """Dynamic Execution Graph 中的一个动态执行步骤。"""
+
+    id: str
+    description: str
+    kind: Literal["tool", "reasoning", "decision", "final"]
+    tool_name: str | None
+    arguments: dict
+    dependencies: list[str]
+    status: Literal[
+        "PENDING",
+        "READY",
+        "EXECUTING",
+        "COMPLETED",
+        "FAILED",
+        "BLOCKED",
+        "WAITING_APPROVAL",
+        "CANCELLED",
+        "SUPERSEDED",
+    ]
+    retry_count: int
+    output_ref: str | None
+    error: dict | None
+
+
+class WorldStatePayload(TypedDict, total=False):
+    """agent 对本轮任务执行世界的事实视图。"""
+
+    cwd: str | None
+    known_files: dict
+    read_files: dict
+    written_files: dict
+    generated_outputs: dict
+    observations: list[dict]
+    failures: list[dict]
+    approvals: list[dict]
+
+
+class TaskPayload(TypedDict, total=False):
+    """Dynamic Execution Graph 的任务对象。"""
+
+    id: str
+    goal: str
+    source_user_message: str
+    status: Literal[
+        "PLANNING",
+        "READY",
+        "RUNNING",
+        "WAITING_APPROVAL",
+        "WAITING_USER_INPUT",
+        "REPLANNING",
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED",
+        "SUPERSEDED",
+    ]
+    plan_version: int
+    current_step_id: str | None
+    steps: list[TaskStepPayload]
+    world_state: WorldStatePayload
+    execution_history: list[dict]
+    replan_count: int
+
+
+class TaskBoundaryPayload(TypedDict, total=False):
+    """新一轮输入和上一轮 task 之间的边界判断结果。
+
+    这个字段先存在 checkpoint state 中，后续落 `agent_tasks` 表时可以直接迁移为
+    TaskSession 的边界事件。
+    """
+
+    type: Literal["fresh", "new_task", "continuation", "expired_stale_checkpoint"]
+    reason: str
+    previous_task_id: str | None
+    active_task_id: str | None
+    expired_task_id: str | None
 
 
 class AgentThoughtPayload(TypedDict, total=False):
@@ -135,6 +216,10 @@ class MemoryChatGraphState(TypedDict, total=False):
     agent_decision: dict
     planned_tool_actions: list[AgentToolActionPayload]
     pending_tool_action: AgentToolActionPayload | None
+    task_boundary: TaskBoundaryPayload
+    expired_task: TaskPayload
+    task: TaskPayload
+    world_state: WorldStatePayload
     tool_policy_result: dict
     tool_observations: list[AgentToolObservationPayload]
     tool_observation_context: str

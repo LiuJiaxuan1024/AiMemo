@@ -7,9 +7,11 @@ from langchain_core.tools import BaseTool, tool
 from sqlmodel import Session
 
 from app.local_operator.audit import AgentOperationAudit
+from app.local_operator.command import LocalCommandExecutor, evaluate_command_policy
 from app.local_operator.filesystem import LocalFilesystemError, LocalFilesystemService, tool_result_to_json
 from app.local_operator.policy import LocalOperatorPolicy
 from app.local_operator.schemas import (
+    ExecCommandInput,
     GetFileInfoInput,
     ListDirInput,
     ReadFileInput,
@@ -38,6 +40,7 @@ def create_read_tools(
     """
 
     filesystem = LocalFilesystemService(policy)
+    command_executor = LocalCommandExecutor(policy)
     known_existing_paths = known_existing_paths or set()
 
     def run_with_audit(
@@ -203,6 +206,40 @@ def create_read_tools(
             approval_required=False,
         )
 
+    @tool(args_schema=ExecCommandInput)
+    def exec_command(
+        command: str,
+        cwd: str = ".",
+        timeout_ms: int = 30000,
+        max_output_bytes: int = 65536,
+    ) -> str:
+        """执行短时、非交互的本地终端命令。
+
+        该工具只用于终端级任务，例如查看版本、运行测试、git 状态等。
+        文件读写仍应走 read_file/write_file，避免 shell 绕过专用工具策略。
+        """
+
+        args = {
+            "command": command,
+            "cwd": cwd,
+            "timeout_ms": timeout_ms,
+            "max_output_bytes": max_output_bytes,
+        }
+        decision = evaluate_command_policy(command)
+        return run_with_audit(
+            "exec_command",
+            args,
+            lambda: command_executor.exec_command(
+                command=command,
+                cwd=cwd,
+                timeout_ms=timeout_ms,
+                max_output_bytes=max_output_bytes,
+            ),
+            operation_type="exec",
+            risk_level=decision.risk_level,
+            approval_required=decision.risk_level != "low",
+        )
+
     return {
         "list_dir": list_dir,
         "read_file": read_file,
@@ -210,4 +247,5 @@ def create_read_tools(
         "search_text": search_text,
         "get_file_info": get_file_info,
         "write_file": write_file,
+        "exec_command": exec_command,
     }

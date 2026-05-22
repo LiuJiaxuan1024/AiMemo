@@ -9,6 +9,7 @@ from app.agent.graphs.local_operator.nodes import (
     build_finish_without_tool_node,
     build_observe_tool_result_node,
     build_plan_tool_use_node,
+    build_run_exec_tool_node,
     build_run_read_tool_node,
     build_run_write_tool_node,
     build_select_tool_node,
@@ -32,7 +33,7 @@ def build_local_operator_graph(
 
     图结构是一个受控工具循环：
     plan 决定是否需要工具，select 取出下一次工具调用，条件边按工具类型路由到
-    read/write 执行节点，observe 决定是否继续循环。
+    read/write/exec 执行节点，observe 决定是否继续循环。
     """
 
     graph = StateGraph(LocalOperatorState)
@@ -40,6 +41,7 @@ def build_local_operator_graph(
     graph.add_node("select_tool", build_select_tool_node())
     graph.add_node("run_read_tool", build_run_read_tool_node(session_factory))
     graph.add_node("run_write_tool", build_run_write_tool_node(session_factory))
+    graph.add_node("run_exec_tool", build_run_exec_tool_node(session_factory))
     graph.add_node("observe_tool_result", build_observe_tool_result_node())
     graph.add_node("finish_without_tool", build_finish_without_tool_node())
     graph.add_node("summarize_findings", build_summarize_findings_node())
@@ -53,10 +55,11 @@ def build_local_operator_graph(
     graph.add_conditional_edges(
         "select_tool",
         route_after_select_tool,
-        ["run_read_tool", "run_write_tool"],
+        ["run_read_tool", "run_write_tool", "run_exec_tool"],
     )
     graph.add_edge("run_read_tool", "observe_tool_result")
     graph.add_edge("run_write_tool", "observe_tool_result")
+    graph.add_edge("run_exec_tool", "observe_tool_result")
     graph.add_conditional_edges(
         "observe_tool_result",
         route_after_observe,

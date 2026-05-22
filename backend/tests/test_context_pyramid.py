@@ -18,7 +18,8 @@ def test_pyramid_context_includes_summary_and_current_input():
     prompt = context.to_prompt()
     assert "L2 对话摘要" in prompt
     assert "用户最近在规划午餐。" in prompt
-    assert "L1 当前对话窗口" in prompt
+    assert "L1 近期对话窗口" in prompt
+    assert "L0 当前用户输入" in prompt
     assert "我之前说过想吃什么？" in prompt
 
 
@@ -34,12 +35,13 @@ def test_pyramid_context_keeps_recent_messages_within_budget():
         retrieved_chunks=[],
         needs_retrieval=False,
         retrieval_grade="none",
-        budget=ContextBudget(conversation_window_tokens=14),
+        budget=ContextBudget(recent_message_tokens=14),
     )
 
     prompt = context.to_prompt()
     assert "user: 最近消息" in prompt
-    assert "user(current): 继续说" in prompt
+    assert "L0 当前用户输入" in prompt
+    assert "继续说" in prompt
     assert "很早以前的消息" not in prompt
 
 

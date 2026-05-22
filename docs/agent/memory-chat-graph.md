@@ -32,9 +32,11 @@ flowchart TD
     Policy --> PolicyRoute{策略结果}
     PolicyRoute -->|read| RunRead[run_read_tool]
     PolicyRoute -->|write| RunWrite[run_write_tool]
+    PolicyRoute -->|exec| RunExec[run_exec_tool]
     PolicyRoute -->|block| Observe[observe_tool_result]
     RunRead --> Observe
     RunWrite --> Observe
+    RunExec --> Observe
     Observe --> AgentThink
     Route -->|text| Generate[generate_answer]
     Route -->|elf_bubble| BubbleGenerate[generate_elf_bubble_answer]
@@ -80,27 +82,26 @@ build_l1_recent_messages
   按 token budget 裁剪近期消息窗口。该层主要用于调试和后续状态树，不再单独喂给回答模型。
 
 build_l0_current_input
-  构建当前用户输入层。该层主要用于调试和节点排查，不再单独喂给回答模型。
+  构建当前用户输入层。该层作为 L0 单独喂给回答模型和工具规划器。
 
 build_current_conversation_window
   把 L1 近期消息和 L0 当前输入合并成一段连续对话：
   `assistant/user/.../user(current)`。
-  这是 agent_think 和最终回答消费的底层对话上下文，避免模型把上一轮 assistant 的
-  路径、正文、计划和当前用户确认割裂开。
+  该层保留用于调试和后续 UI，不再作为主 prompt 的默认输入。原因是它容易让
+  agent 把 L1 历史 assistant 草稿误当成本轮 L0 指令继续执行。
 
 merge_prompt_context
-  按 L4 -> L3 -> L2 -> 当前对话窗口顺序合并上下文。
+  按 L4 -> L3 -> L2 -> L1 history -> L0 current 顺序合并上下文。
   输出最终 prompt_context。
 
 agent_think
   主对话 agent 循环的决策节点。它基于 prompt_context、已有工具观察结果、
-  当前用户目标和 tool_budget，决定下一步是调用本地工具还是生成最终回答。
+  当前用户目标和 tool_budget，决定下一步是执行动态任务步骤还是生成最终回答。
   普通聊天会直接进入最终回答；明确本地文件 read/write 请求会进入工具循环。
   每次决策都会追加一条 turn_messages，记录本轮 agent 的可恢复执行轨迹。
-  当前版本已经把工具决策收敛到主 agent loop：agent_think 会优先处理跨轮写入确认、
-  明确规则快路径，再让 LLM 工具规划器基于 prompt_context、turn_messages 和
-  tool_observations 输出结构化 tool action。Local Operator planner 不再孤立地只看
-  当前一句话猜工具参数。
+  当前版本已经引入第一版 Dynamic Execution Task：agent_think 会优先让 planner
+  输出 task/steps/world_state，然后从 ready step 派生工具调用；旧的单 action planner
+  只作为兼容退路。
   如果还有 planned_tool_actions 未执行完，agent_think 会继续工具队列，而不会因为
   已经看到一次 observation 就提前进入最终回答。
 
@@ -497,7 +498,7 @@ flowchart TD
     L2 --> Merge
     L1 --> Merge
     L0 --> Merge
-    Window --> Merge
+    Window -. debug only .-> Merge
 
     Merge --> Prompt[prompt_context]
     Prompt --> AgentThink[agent_think]
@@ -507,9 +508,11 @@ flowchart TD
     Policy --> ToolRoute{工具类型}
     ToolRoute -->|read| RunRead[run_read_tool]
     ToolRoute -->|write| RunWrite[run_write_tool]
+    ToolRoute -->|exec| RunExec[run_exec_tool]
     ToolRoute -->|block| Observe[observe_tool_result]
     RunRead --> Observe
     RunWrite --> Observe
+    RunExec --> Observe
     Observe --> AgentThink
     Route -->|text| Generate[generate_answer]
     Route -->|elf_bubble| BubbleGenerate[generate_elf_bubble_answer]
@@ -517,7 +520,12 @@ flowchart TD
 
 这里的工具循环发生在 Memory Chat Graph 主干上，而不是隐藏在回答前的上下文构建阶段。
 L0/L1/L2/L3/L4 和 L1+L0 当前对话窗口仍然并行构建；工具是否调用由合并上下文后的 agent 决定。
-`merge_prompt_context` 真正注入模型的是 L4、L3、L2、当前对话窗口；单独 L1/L0 主要用于调试。
+`merge_prompt_context` 真正注入模型的是 L4、L3、L2、L1 history、L0 current。
+L1+L0 当前对话窗口保留给调试，不再作为主 prompt 的默认输入。
+
+当前主循环已接入第一版 Dynamic Execution Task。Task/Step/WorldState 暂时保存在
+LangGraph checkpoint state 中，不建业务表；后续长任务和桌面 agent 再迁移到
+`agent_tasks` / `agent_task_steps` / `agent_task_events`。
 
 当前主循环已开放第一批 read/write 工具：
 
@@ -699,7 +707,8 @@ content_hash 不重复
 - 不做多 query rewrite。
 - 不做 LLM 检索结果评分。
 - 不做多源检索 worker 和 LLM rerank worker。
-- 主对话工具循环已接入 read/write；exec 尚未接入。
+- 主对话工具循环已接入 read/write/exec。exec 第一版只支持短时、非交互命令；
+  高风险命令会被策略拦截，后续再接 LangGraph `interrupt()` 做人工审批。
 - 当前工具循环支持继续执行已规划工具队列，并允许 observation 回到 `agent_think` 后再次
   规划下一步。后续要进一步增强“读 -> 判断 -> 写 -> 再读验证 -> 回答”的多步质量，
   可以把 agent_think 的结构化工具决策升级为更严格的 schema / ToolNode。

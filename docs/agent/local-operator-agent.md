@@ -555,8 +555,9 @@ search_text 最多返回 50 条结果
 
 ## Local Operator Graph
 
-当前 Local Operator Graph 已支持 read 工具和第一版 `write_file` 工具。`write_file`
-只做整文件写入，适合创建新文件或完整重写；局部 diff/edit 后续单独接入。
+当前 Local Operator Graph 已支持 read 工具、第一版 `write_file` 工具和第一版
+`exec_command` 工具。`write_file` 只做整文件写入，适合创建新文件或完整重写；
+`exec_command` 只做短时、非交互终端命令，局部 diff/edit 和长任务后续单独接入。
 
 ```mermaid
 flowchart TD
@@ -567,8 +568,10 @@ flowchart TD
     Select --> ToolType{工具类型}
     ToolType -->|read| RunRead[run_read_tool]
     ToolType -->|write| RunWrite[run_write_tool]
+    ToolType -->|exec| RunExec[run_exec_tool]
     RunRead --> Observe[observe_tool_result]
     RunWrite --> Observe
+    RunExec --> Observe
     Observe --> More{是否还需要工具}
     More -->|是| Select
     More -->|否| Summarize[summarize_findings]
@@ -589,7 +592,7 @@ plan_tool_use
 
 select_tool
   根据 plan 和已有 observations 选择下一次工具调用。
-  第一版采用白名单选择，只允许调用 list_dir/read_file/search_files/search_text/get_file_info/write_file。
+  第一版采用白名单选择，只允许调用 list_dir/read_file/search_files/search_text/get_file_info/write_file/exec_command。
 
 run_read_tool
   执行 read 类 LangChain @tool 工具。
@@ -598,6 +601,10 @@ run_read_tool
 run_write_tool
   执行 write 类 LangChain @tool 工具。
   当前只有 write_file，工具内部会做 workspace 授权、敏感文件拦截和 read-before-write 保护。
+
+run_exec_tool
+  执行 exec 类 LangChain @tool 工具。
+  当前只有 exec_command，工具内部会做 cwd 授权、危险命令拦截、超时、输出截断和审计。
 
 observe_tool_result
   将工具结果写入 graph state，判断结果是否足够，并扣减 tool_budget。
@@ -679,6 +686,36 @@ agent_operations 审计
 LangGraph interrupt 审批恢复
 ```
 
+### Exec Command 第一版
+
+`exec_command(command, cwd, timeout_ms, max_output_bytes)` 借鉴 Claude Code Bash/PowerShell
+工具的设计边界，但第一版不做完整 shell AST 解析，采用“白名单意图 + 危险模式拦截”的保守策略。
+
+```text
+用途边界
+  只用于终端级操作，例如查看版本、运行测试、git status、构建命令。
+  不用于读文件、写文件、搜索文件；这些需求必须走专用工具。
+
+cwd 授权
+  cwd 必须位于 LocalOperatorPolicy.workspace_roots 内。
+  相对 cwd 以第一个 workspace root 为基准解析。
+
+危险命令拦截
+  拦截后台任务、交互式命令、下载后执行、删除/格式化/关机/权限提升、git reset --hard、
+  git clean -f、force push、shell 重定向写文件等模式。
+
+执行限制
+  默认 timeout_ms = 30000，上限 120000。
+  默认 max_output_bytes = 65536，上限 262144。
+  stdout/stderr 会被截断后返回给 graph，避免大输出撑爆 checkpoint 或 SSE。
+
+审计
+  agent_operations.operation_type = exec
+  risk_level = low/medium/high，由命令策略判断。
+  当前第一版 medium exec 仍会直接执行；high exec 直接 blocked。
+  后续接 LangGraph interrupt 后，medium/high exec 应进入人工审批。
+```
+
 ### 条件边设计
 
 Local Operator Graph 的路由不靠字符串 if/else 散落在业务代码里，而是集中在 graph 条件边中：
@@ -691,6 +728,7 @@ route_after_plan(state)
 route_after_select_tool(state)
   read tool  -> run_read_tool
   write tool -> run_write_tool
+  exec tool  -> run_exec_tool
 
 route_after_observe(state)
   tool_budget <= 0        -> summarize_findings
@@ -775,9 +813,9 @@ agent_operations
 | `id` | integer primary key | 是 | 操作记录 ID。用于前端查看详情、后续审批、重试或审计追踪。 |
 | `conversation_id` | integer | 是 | 关联业务会话 `conversations.id`。说明这次本地操作发生在哪个对话中。 |
 | `turn_id` | integer nullable | 否 | 关联 `chat_turns.id`。如果操作发生在某一轮 Memory Chat Graph 中，应写入该轮 ID。某些后台恢复任务可能没有 turn。 |
-| `operation_type` | string enum | 是 | 操作类型。第一阶段只允许 `read`，后续扩展 `write`、`exec`。 |
+| `operation_type` | string enum | 是 | 操作类型。当前支持 `read`、`write`、`exec`。 |
 | `status` | string enum | 是 | 操作状态。用于前端展示和恢复。详见“状态枚举”。 |
-| `tool_name` | string | 是 | 实际调用的 LangChain tool 名称，例如 `read_file`、`list_dir`、`search_text`。 |
+| `tool_name` | string | 是 | 实际调用的 LangChain tool 名称，例如 `read_file`、`list_dir`、`search_text`、`write_file`、`exec_command`。 |
 | `input_json` | JSON/text | 是 | 工具调用入参快照。必须保存规范化后的路径和用户原始参数，方便审计。 |
 | `output_json` | JSON/text nullable | 否 | 工具调用结果摘要。不要无脑保存完整大文件内容，避免数据库膨胀和隐私扩散。 |
 | `risk_level` | string enum | 是 | 风险等级。第一阶段 read 默认为 `low`，敏感文件读取可标为 `medium` 或 `high`。 |

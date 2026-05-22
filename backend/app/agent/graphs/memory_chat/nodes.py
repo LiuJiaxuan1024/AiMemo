@@ -13,6 +13,7 @@ from sqlmodel import Session, desc, select
 
 from app.ai.json_utils import parse_json_object
 from app.agent.graphs.local_operator.nodes import (
+    EXEC_TOOL_NAMES,
     READ_TOOL_NAMES,
     WRITE_TOOL_NAMES,
     _expand_planned_actions,
@@ -44,7 +45,10 @@ from app.agent.graphs.memory_chat.state import (
     ElfBubblePayload,
     MemoryChatGraphState,
     RetrievedChunkPayload,
+    TaskPayload,
+    TaskStepPayload,
     TurnMessagePayload,
+    WorldStatePayload,
 )
 from app.agent.context import build_memory_chat_prompt_context
 from app.agent.model import get_agent_chat_model, get_planner_chat_model
@@ -165,6 +169,8 @@ def build_load_turn_state_node(
                 "agent_decision": {},
                 "planned_tool_actions": [],
                 "pending_tool_action": None,
+                "task": {},
+                "world_state": _empty_world_state(),
                 "tool_policy_result": {},
                 "tool_observations": [],
                 "tool_observation_context": "",
@@ -400,8 +406,8 @@ def _configured_local_operator_workspace_roots() -> list[str]:
 def build_merge_prompt_context_node():
     """汇总上下文 worker 结果，生成最终 prompt_context。
 
-    给模型的底层上下文使用 L1+L0 合并后的“当前对话窗口”。单独的 L1/L0
-    仍保留在 state/debug 中，方便排查预算裁剪和当前输入。
+    L1 历史消息和 L0 当前输入必须分开注入。之前把 L1+L0 合成“连续对话窗口”，
+    容易让工具 planner 把历史 assistant 草稿误当成本轮指令，导致跨任务串工具。
     """
 
     def merge_prompt_context(state: MemoryChatGraphState) -> MemoryChatGraphState:
@@ -409,7 +415,8 @@ def build_merge_prompt_context_node():
             _resolve_context_layer(state, "context_l4_layer"),
             _resolve_context_layer(state, "context_l3_layer"),
             _resolve_context_layer(state, "context_l2_layer"),
-            _resolve_context_layer(state, "context_conversation_window_layer"),
+            _resolve_context_layer(state, "context_l1_layer"),
+            _resolve_context_layer(state, "context_l0_layer"),
         ]
         layers = [context_layer_from_payload(dict(payload)) for payload in payloads]
         context = PyramidPromptContext(layers=layers)
@@ -437,6 +444,34 @@ def build_agent_think_node(
 
     def agent_think(state: MemoryChatGraphState) -> MemoryChatGraphState:
         loop_count = int(state.get("agent_loop_count") or 0) + 1
+        if loop_count > 12:
+            logger.warning(
+                "memory_chat agent loop guard triggered: conversation_id=%s task_id=%s observations=%s",
+                state.get("conversation_id"),
+                (state.get("task") or {}).get("id"),
+                len(state.get("tool_observations", [])),
+            )
+            return {
+                "agent_loop_count": loop_count,
+                "agent_decision": {"type": "final_answer", "reason": "agent 工具循环超过安全上限。"},
+                "turn_messages": [
+                    *state.get("turn_messages", []),
+                    _turn_message(
+                        "assistant",
+                        "工具循环超过安全上限，已停止继续调用工具。",
+                        name="agent_think",
+                    ),
+                ],
+                "thought_events": [
+                    *_complete_running_thoughts(state),
+                    _thought(
+                        "agent-think-loop-guard",
+                        "停止工具循环",
+                        "本轮工具循环超过安全上限，我会基于已有结果回答，避免重复执行。",
+                        related_node="agent_think",
+                    ),
+                ],
+            }
 
         # 如果上一轮 agent_think 已经拆出多个工具动作，优先继续执行队列。
         # 这避免“先 get_file_info，再 write_file”的计划在第一个 observation 后被过早终止。
@@ -451,6 +486,87 @@ def build_agent_think_node(
                         "agent-think-continue-tool",
                         "继续工具队列",
                         "我还有上一轮已经规划好的工具动作，会继续执行而不是提前回答。",
+                        related_node="agent_think",
+                    ),
+                ],
+            }
+
+        task = _resolve_runtime_task(state)
+        ready_step = _select_ready_task_step(task)
+        reasoning_thoughts: list[AgentThoughtPayload] = []
+        if ready_step is not None:
+            while ready_step is not None and ready_step.get("kind") == "reasoning":
+                generated = _generate_reasoning_step_output(ready_step, {**state, "task": task, "world_state": task.get("world_state") or _empty_world_state()})
+                task = _mark_task_step_status(task, str(ready_step.get("id")), "COMPLETED")
+                world_state = _update_world_state_for_reasoning(
+                    task.get("world_state") or _empty_world_state(),
+                    ready_step,
+                    generated,
+                )
+                task["world_state"] = world_state
+                reasoning_thoughts.append(
+                    _thought(
+                        f"reasoning-step-{ready_step.get('id')}",
+                        "生成中间产物",
+                        str(ready_step.get("description") or "已生成后续步骤需要的中间产物。"),
+                        related_node="agent_think",
+                    )
+                )
+                state = {**state, "task": task, "world_state": world_state}
+                ready_step = _select_ready_task_step(task)
+
+            if ready_step is None:
+                return {
+                    "agent_loop_count": loop_count,
+                    "task": task,
+                    "world_state": task.get("world_state") or _empty_world_state(),
+                    "agent_decision": {"type": "final_answer", "reason": "动态任务没有剩余可执行步骤。"},
+                    "thought_events": [*_complete_running_thoughts(state), *reasoning_thoughts],
+                }
+
+            action = _task_step_to_tool_action(ready_step, state)
+            if action is not None:
+                planned_actions = [_to_agent_tool_action(action, index=0, task_boundary=_infer_task_boundary(state, action))]
+                return {
+                    "agent_loop_count": loop_count,
+                    "task": _mark_task_step_status(task, str(ready_step.get("id")), "EXECUTING"),
+                    "world_state": task.get("world_state") or _empty_world_state(),
+                    "agent_decision": {
+                        "type": "tool_call",
+                        "reason": str(ready_step.get("description") or ""),
+                        "tool_name": action.get("tool_name", ""),
+                    },
+                    "planned_tool_actions": planned_actions,
+                    "turn_messages": [
+                        *state.get("turn_messages", []),
+                        _turn_message(
+                            "assistant",
+                            f"执行任务步骤 `{ready_step.get('id')}`：{ready_step.get('description', '')}",
+                            name="agent_think",
+                        ),
+                    ],
+                    "thought_events": [
+                        *_complete_running_thoughts(state),
+                        *reasoning_thoughts,
+                        _thought(
+                            f"task-step-{ready_step.get('id')}",
+                            "执行任务步骤",
+                            str(ready_step.get("description") or "执行动态任务计划中的下一步。"),
+                            related_node="agent_think",
+                        ),
+                    ],
+                }
+
+        if task and _task_has_terminal_status(task):
+            return {
+                "agent_loop_count": loop_count,
+                "agent_decision": {"type": "final_answer", "reason": "动态任务已进入终态。"},
+                "thought_events": [
+                    *_complete_running_thoughts(state),
+                    _thought(
+                        "agent-think-task-final",
+                        "整理任务结果",
+                        "动态任务已经没有可执行步骤，我会基于任务状态和工具结果回答。",
                         related_node="agent_think",
                     ),
                 ],
@@ -549,7 +665,14 @@ def build_agent_think_node(
                 ],
             }
 
-        planned_actions = [_to_agent_tool_action(item, index=index) for index, item in enumerate(_expand_planned_actions(action))]
+        planned_actions = [
+            _to_agent_tool_action(
+                item,
+                index=index,
+                task_boundary=_infer_task_boundary(state, action),
+            )
+            for index, item in enumerate(_expand_planned_actions(action))
+        ]
         return {
             "agent_loop_count": loop_count,
             "agent_decision": {
@@ -594,8 +717,10 @@ def build_select_tool_node():
         planned_actions = list(state.get("planned_tool_actions", []))
         if not planned_actions:
             return {"pending_tool_action": None}
+        next_action = dict(planned_actions.pop(0))
+        next_action["status"] = "EXECUTING"
         return {
-            "pending_tool_action": planned_actions.pop(0),
+            "pending_tool_action": next_action,
             "planned_tool_actions": planned_actions,
         }
 
@@ -612,7 +737,7 @@ def build_check_tool_policy_node():
     def check_tool_policy(state: MemoryChatGraphState) -> MemoryChatGraphState:
         action = state.get("pending_tool_action") or {}
         tool_name = str(action.get("tool_name") or "")
-        if tool_name in READ_TOOL_NAMES | WRITE_TOOL_NAMES:
+        if tool_name in READ_TOOL_NAMES | WRITE_TOOL_NAMES | EXEC_TOOL_NAMES:
             result = {
                 "status": "allow",
                 "reason": "工具在当前白名单内，允许进入受控执行节点。",
@@ -647,7 +772,12 @@ def route_after_tool_policy(state: MemoryChatGraphState) -> str:
     result = state.get("tool_policy_result") or {}
     if result.get("status") == "allow":
         action = state.get("pending_tool_action") or {}
-        return "run_write_tool" if action.get("tool_name") in WRITE_TOOL_NAMES else "run_read_tool"
+        tool_name = action.get("tool_name")
+        if tool_name in WRITE_TOOL_NAMES:
+            return "run_write_tool"
+        if tool_name in EXEC_TOOL_NAMES:
+            return "run_exec_tool"
+        return "run_read_tool"
     return "observe_tool_result"
 
 
@@ -667,6 +797,19 @@ def build_run_write_tool_node(session_factory: SessionFactory):
         return _run_agent_tool_action(state, session_factory=session_factory, allowed_tool_names=WRITE_TOOL_NAMES)
 
     return run_write_tool
+
+
+def build_run_exec_tool_node(session_factory: SessionFactory):
+    """执行主对话循环中的 exec 工具。
+
+    exec 和 read/write 同属 agent 工具循环，但必须单独路由：它代表终端命令，
+    风险、审计、前端展示都和文件读写不同。
+    """
+
+    def run_exec_tool(state: MemoryChatGraphState) -> MemoryChatGraphState:
+        return _run_agent_tool_action(state, session_factory=session_factory, allowed_tool_names=EXEC_TOOL_NAMES)
+
+    return run_exec_tool
 
 
 def build_observe_tool_result_node():
@@ -1122,6 +1265,384 @@ def _think_next_tool_action(state: MemoryChatGraphState) -> AgentToolActionPaylo
     return action  # type: ignore[return-value]
 
 
+def _resolve_runtime_task(state: MemoryChatGraphState) -> TaskPayload:
+    """解析或创建本轮 Dynamic Execution Task。
+
+    第一版 Task 只保存在 graph state/checkpoint 中。若当前输入没有本地工具意图，
+    返回空 dict，让旧的直接回答路径继续工作。
+    """
+
+    existing = state.get("task") or {}
+    # 同一轮工具循环会多次回到 agent_think。只要 state 里已有 task，就必须继续使用
+    # 这个 task 的状态机，包括 COMPLETED/FAILED 等终态。否则终态 task 会被按同一条
+    # L0 输入重新规划，形成 read -> write -> completed -> replan -> read 的死循环。
+    if existing:
+        return existing
+    plan = _plan_dynamic_task(state)
+    return plan or {}
+
+
+def _plan_dynamic_task(state: MemoryChatGraphState) -> TaskPayload | None:
+    """为当前输入生成动态执行计划。
+
+    这里先使用 LLM planner，失败时再退回现有单 action planner。注意：退回路径只是
+    兼容层，不新增具体请求特化；真正长期方向是让 planner 输出完整 Task。
+    """
+
+    if not _should_try_agent_tool_planner(state):
+        return None
+    task = _llm_plan_dynamic_task(state)
+    if task:
+        return task
+    action = _plan_contextual_write_action(state)
+    if action is None:
+        roots = _default_local_operator_workspace_roots()
+        action = _rule_plan_action(_resolve_user_message(state), workspace_roots=roots)
+    if action is None and _should_try_agent_tool_planner(state):
+        action = _llm_plan_agent_tool_action(state)
+    if action is None:
+        return None
+    return _task_from_single_action(state, action)
+
+
+def _llm_plan_dynamic_task(state: MemoryChatGraphState) -> TaskPayload | None:
+    """让 planner 直接输出 Task/Step 计划。"""
+
+    prompt = _build_dynamic_task_planner_prompt(state)
+    try:
+        response = get_planner_chat_model().invoke([HumanMessage(content=prompt)])
+        payload = parse_json_object(str(response.content))
+    except Exception:
+        return None
+    if not bool(payload.get("needs_task", True)):
+        return None
+    raw_steps = payload.get("steps")
+    if not isinstance(raw_steps, list) or not raw_steps:
+        return None
+    steps = [_normalize_task_step(raw_step, index=index) for index, raw_step in enumerate(raw_steps) if isinstance(raw_step, dict)]
+    steps = [step for step in steps if step.get("kind") in {"tool", "reasoning", "decision", "final"}]
+    if not steps:
+        return None
+    return {
+        "id": _task_id_from_user_message(_resolve_user_message(state)),
+        "goal": str(payload.get("goal") or _resolve_user_message(state)),
+        "source_user_message": _resolve_user_message(state),
+        "status": "READY",
+        "plan_version": 1,
+        "current_step_id": None,
+        "steps": steps,
+        "world_state": _empty_world_state(),
+        "execution_history": [
+            {
+                "type": "planned",
+                "summary": str(payload.get("reason") or "planner 生成动态任务计划。"),
+                "payload": {"step_count": len(steps)},
+            }
+        ],
+        "replan_count": 0,
+    }
+
+
+def _build_dynamic_task_planner_prompt(state: MemoryChatGraphState) -> str:
+    """构造 Dynamic Execution Task planner 提示词。"""
+
+    recent_text = "\n".join(
+        f"{message.get('role')}: {message.get('content')}"
+        for message in state.get("recent_messages", [])[-6:]
+    )
+    observations = _tool_observations_to_context(list(state.get("tool_observations", [])))
+    return (
+        "你是 AiMemo 的 Dynamic Execution Task Planner。你的任务是把当前用户请求拆成可执行步骤，"
+        "不要只选择一个工具。\n\n"
+        "必须区分 history 和 current：history 只能作为背景；current 是本轮任务边界。\n"
+        "如果 current 是新的明确目标、路径或命令，不能延续 history 中上一轮工具任务。\n\n"
+        "可用 step.kind：tool、reasoning、decision、final。\n"
+        "可用 tool：list_dir、read_file、search_files、search_text、get_file_info、write_file、exec_command。\n"
+        "规则：\n"
+        "- 修改已有文件必须先 read_file，再 reasoning 生成新内容，再 write_file(overwrite=true)。\n"
+        "- write_file 的 content 可以使用 content_ref 指向某个 reasoning step。\n"
+        "- exec_command 只用于短时非交互终端命令，不用于读写文件。\n"
+        "- 不要写入占位内容。\n"
+        "- 如果不需要本地工具，返回 {\"needs_task\": false}。\n\n"
+        "只返回 JSON，格式：\n"
+        "{"
+        "\"needs_task\":true,"
+        "\"goal\":\"完成用户目标\","
+        "\"reason\":\"计划原因\","
+        "\"steps\":["
+        "{\"id\":\"read_target\",\"kind\":\"tool\",\"description\":\"读取目标文件\","
+        "\"tool_name\":\"read_file\",\"arguments\":{\"path\":\"E:/test/config.json\"},\"dependencies\":[]},"
+        "{\"id\":\"prepare_content\",\"kind\":\"reasoning\",\"description\":\"基于真实内容生成更新后的完整文本\","
+        "\"arguments\":{\"instruction\":\"按用户要求修改内容\"},\"dependencies\":[\"read_target\"]},"
+        "{\"id\":\"write_target\",\"kind\":\"tool\",\"description\":\"覆盖写回目标文件\","
+        "\"tool_name\":\"write_file\",\"arguments\":{\"path\":\"E:/test/config.json\",\"content_ref\":\"prepare_content\",\"overwrite\":true},"
+        "\"dependencies\":[\"prepare_content\"]}"
+        "]}\n\n"
+        f"history:\n{recent_text or '无'}\n\n"
+        f"current:\n{_resolve_user_message(state)}\n\n"
+        f"observations:\n{observations or '暂无'}"
+    )
+
+
+def _task_from_single_action(state: MemoryChatGraphState, action: dict) -> TaskPayload:
+    """把旧单 action planner 结果包装成一条 Task，作为迁移期兼容层。"""
+
+    step = _normalize_task_step(
+        {
+            "id": "step_1",
+            "kind": "tool",
+            "description": str(action.get("reason") or "执行本地工具。"),
+            "tool_name": action.get("tool_name"),
+            "arguments": dict(action.get("arguments") or {}),
+            "dependencies": [],
+        },
+        index=0,
+    )
+    return {
+        "id": _task_id_from_user_message(_resolve_user_message(state)),
+        "goal": _resolve_user_message(state),
+        "source_user_message": _resolve_user_message(state),
+        "status": "READY",
+        "plan_version": 1,
+        "current_step_id": None,
+        "steps": [step],
+        "world_state": _empty_world_state(),
+        "execution_history": [{"type": "planned", "summary": "由兼容单 action planner 生成任务。", "payload": {}}],
+        "replan_count": 0,
+    }
+
+
+def _normalize_task_step(raw_step: dict, *, index: int) -> TaskStepPayload:
+    """规整 planner 输出的 Step，保证进入 checkpoint 的结构稳定。"""
+
+    step_id = str(raw_step.get("id") or f"step_{index + 1}")
+    kind = str(raw_step.get("kind") or "tool")
+    tool_name = raw_step.get("tool_name")
+    return {
+        "id": re.sub(r"[^A-Za-z0-9_\-]", "_", step_id).strip("_") or f"step_{index + 1}",
+        "description": str(raw_step.get("description") or ""),
+        "kind": kind,  # type: ignore[typeddict-item]
+        "tool_name": str(tool_name) if tool_name else None,
+        "arguments": dict(raw_step.get("arguments") or {}),
+        "dependencies": [str(item) for item in raw_step.get("dependencies") or []],
+        "status": "PENDING",
+        "retry_count": int(raw_step.get("retry_count") or 0),
+        "output_ref": raw_step.get("output_ref"),
+        "error": None,
+    }
+
+
+def _select_ready_task_step(task: TaskPayload) -> TaskStepPayload | None:
+    """选择一个依赖已完成的 ready step。第一版串行执行。"""
+
+    steps = list(task.get("steps") or [])
+    completed = {str(step.get("id")) for step in steps if step.get("status") == "COMPLETED"}
+    for step in steps:
+        if step.get("status") not in {"PENDING", "READY"}:
+            continue
+        dependencies = [str(item) for item in step.get("dependencies") or []]
+        if all(dependency in completed for dependency in dependencies):
+            return step
+    return None
+
+
+def _task_step_to_tool_action(step: TaskStepPayload, state: MemoryChatGraphState) -> AgentToolActionPayload | None:
+    """把 tool step 转成可复用的 AgentToolActionPayload。"""
+
+    if step.get("kind") != "tool":
+        return None
+    tool_name = str(step.get("tool_name") or "")
+    if tool_name not in READ_TOOL_NAMES | WRITE_TOOL_NAMES | EXEC_TOOL_NAMES:
+        return None
+    arguments = _resolve_step_arguments(step, state)
+    return {
+        "tool_name": tool_name,
+        "arguments": _clean_tool_path_arguments(tool_name, _normalize_tool_arguments(tool_name, arguments)),
+        "reason": str(step.get("description") or ""),
+        "source_step_id": str(step.get("id") or ""),
+    }
+
+
+def _resolve_step_arguments(step: TaskStepPayload, state: MemoryChatGraphState) -> dict:
+    """解析 step arguments 中的 content_ref 等运行期引用。"""
+
+    arguments = dict(step.get("arguments") or {})
+    content_ref = arguments.pop("content_ref", None)
+    if content_ref:
+        world_state = _resolve_runtime_task(state).get("world_state") or state.get("world_state") or {}
+        generated_outputs = dict(world_state.get("generated_outputs") or {})
+        generated = dict(generated_outputs.get(str(content_ref)) or {})
+        arguments["content"] = str(generated.get("content") or "")
+    return arguments
+
+
+def _generate_reasoning_step_output(step: TaskStepPayload, state: MemoryChatGraphState) -> str:
+    """执行 reasoning step，生成后续工具可引用的中间文本。
+
+    第一版先调用回答模型做通用转换；后续可以独立 reasoning model 或结构化 patch 工具。
+    """
+
+    prompt = (
+        "你是 AiMemo 的任务执行 reasoning step。请基于 world state 和用户目标，"
+        "生成该 step 的中间产物。只输出产物正文，不要解释。\n\n"
+        f"用户目标：{_resolve_user_message(state)}\n\n"
+        f"step：{step.get('description', '')}\n\n"
+        f"world_state：{json.dumps(state.get('world_state') or {}, ensure_ascii=False)}"
+    )
+    try:
+        response = get_agent_chat_model().invoke([HumanMessage(content=prompt)])
+        return str(response.content)
+    except Exception:
+        return ""
+
+
+def _mark_task_step_status(task: TaskPayload, step_id: str, status: str) -> TaskPayload:
+    """更新 task 中某个 step 的状态。"""
+
+    if not task:
+        return task
+    steps: list[TaskStepPayload] = []
+    for step in task.get("steps") or []:
+        updated = dict(step)
+        if str(updated.get("id")) == step_id:
+            updated["status"] = status  # type: ignore[typeddict-item]
+        steps.append(updated)  # type: ignore[arg-type]
+    updated_task = dict(task)
+    updated_task["steps"] = steps
+    updated_task["status"] = _derive_task_status(steps)  # type: ignore[typeddict-item]
+    updated_task["current_step_id"] = step_id if status == "EXECUTING" else None
+    return updated_task  # type: ignore[return-value]
+
+
+def _derive_task_status(steps: list[TaskStepPayload]) -> str:
+    if any(step.get("status") == "FAILED" for step in steps):
+        return "REPLANNING"
+    if steps and all(step.get("status") == "COMPLETED" for step in steps):
+        return "COMPLETED"
+    return "RUNNING"
+
+
+def _task_has_terminal_status(task: TaskPayload) -> bool:
+    return task.get("status") in {"COMPLETED", "FAILED", "CANCELLED", "SUPERSEDED"}
+
+
+def _empty_world_state() -> WorldStatePayload:
+    return {
+        "cwd": None,
+        "known_files": {},
+        "read_files": {},
+        "written_files": {},
+        "generated_outputs": {},
+        "observations": [],
+        "failures": [],
+        "approvals": [],
+    }
+
+
+def _task_id_from_user_message(user_message: str) -> str:
+    return f"task-{abs(hash(user_message)) % 1_000_000_000}"
+
+
+def _update_task_after_tool_observation(
+    state: MemoryChatGraphState,
+    observation: AgentToolObservationPayload,
+) -> TaskPayload:
+    """工具返回后更新 Task step 状态和 WorldState。"""
+
+    task = dict(state.get("task") or {})
+    if not task:
+        return task  # type: ignore[return-value]
+    action = state.get("pending_tool_action") or {}
+    step_id = str(action.get("source_step_id") or action.get("tool_call_id") or "")
+    if not step_id:
+        return task  # type: ignore[return-value]
+    updated_task = _mark_task_step_status(task, step_id, "COMPLETED" if observation.get("ok") else "FAILED")
+    world_state = _update_world_state_after_tool_observation(
+        updated_task.get("world_state") or _empty_world_state(),
+        observation,
+    )
+    updated_task["world_state"] = world_state
+    history = list(updated_task.get("execution_history") or [])
+    history.append(
+        {
+            "type": "step_completed" if observation.get("ok") else "step_failed",
+            "step_id": step_id,
+            "summary": _summarize_tool_observation(observation),
+            "payload": observation,
+        }
+    )
+    updated_task["execution_history"] = history
+    return updated_task  # type: ignore[return-value]
+
+
+def _update_world_state_after_tool_observation(
+    world_state: WorldStatePayload,
+    observation: AgentToolObservationPayload,
+) -> WorldStatePayload:
+    """把工具 observation 写入 WorldState。"""
+
+    updated = dict(world_state or _empty_world_state())
+    observations = list(updated.get("observations") or [])
+    observations.append(dict(observation))
+    updated["observations"] = observations
+    if not observation.get("ok"):
+        failures = list(updated.get("failures") or [])
+        failures.append(
+            {
+                "tool_name": observation.get("tool_name"),
+                "error_code": observation.get("error_code"),
+                "message": observation.get("message"),
+            }
+        )
+        updated["failures"] = failures
+        return updated  # type: ignore[return-value]
+
+    data = dict(observation.get("data") or {})
+    tool_name = observation.get("tool_name")
+    if tool_name == "read_file":
+        read_files = dict(updated.get("read_files") or {})
+        path = str(data.get("path") or data.get("relative_path") or "")
+        if path:
+            read_files[path] = {
+                "content": data.get("content") or "",
+                "content_hash": data.get("content_hash") or "",
+                "line_start": data.get("line_start"),
+                "line_end": data.get("line_end"),
+            }
+            updated["read_files"] = read_files
+    elif tool_name == "write_file":
+        written_files = dict(updated.get("written_files") or {})
+        path = str(data.get("path") or data.get("relative_path") or "")
+        if path:
+            written_files[path] = {
+                "content_hash": data.get("content_hash") or "",
+                "bytes_written": data.get("bytes_written"),
+                "type": data.get("type"),
+            }
+            updated["written_files"] = written_files
+    elif tool_name == "exec_command":
+        updated["cwd"] = data.get("cwd") or updated.get("cwd")
+    return updated  # type: ignore[return-value]
+
+
+def _update_world_state_for_reasoning(
+    world_state: WorldStatePayload,
+    step: TaskStepPayload,
+    content: str,
+) -> WorldStatePayload:
+    """把 reasoning step 生成的中间产物写入 WorldState。"""
+
+    updated = dict(world_state or _empty_world_state())
+    generated_outputs = dict(updated.get("generated_outputs") or {})
+    step_id = str(step.get("id") or "")
+    generated_outputs[step_id] = {
+        "content": content,
+        "description": step.get("description") or "",
+    }
+    updated["generated_outputs"] = generated_outputs
+    return updated  # type: ignore[return-value]
+
+
 def _llm_plan_agent_tool_action(state: MemoryChatGraphState) -> AgentToolActionPayload | None:
     """让 LLM 基于完整主循环上下文选择本地工具。
 
@@ -1142,7 +1663,7 @@ def _llm_plan_agent_tool_action(state: MemoryChatGraphState) -> AgentToolActionP
     if confidence < 0.55:
         return None
     tool_name = str(payload.get("tool_name") or "")
-    if tool_name not in READ_TOOL_NAMES | WRITE_TOOL_NAMES:
+    if tool_name not in READ_TOOL_NAMES | WRITE_TOOL_NAMES | EXEC_TOOL_NAMES:
         return None
     arguments = _normalize_tool_arguments(tool_name, dict(payload.get("arguments") or {}))
     arguments = _clean_tool_path_arguments(tool_name, arguments)
@@ -1169,17 +1690,20 @@ def _build_agent_tool_planner_prompt(state: MemoryChatGraphState) -> str:
         "- 如果用户要求创建、保存、写入本地文件，且你能确定 path 和真实 content，应该选择 write_file。\n"
         "- 如果用户本轮明确要求生成某类文件，例如 HTML 网页、Python 脚本、JSON 配置，必须按该类型选择扩展名并生成真实正文；不要默认写成 Markdown。\n"
         "- 如果用户要求 HTML 网页且让你自取文件名，优先使用 index.html 或语义化 .html 文件名，content 必须是完整 HTML 文档。\n"
+        "- 如果用户要求运行测试、查看版本、执行构建、查看 git 状态，应该选择 exec_command。\n"
+        "- exec_command 不用于读取/写入/搜索文件；这些需求必须选择专用文件工具。\n"
         "- 只有当本轮只是确认上一轮草稿，比如“你自己取文件名/按你说的写/就这样保存”时，才沿用上一轮目录和正文补文件名并 write_file。\n"
         "- 如果 get_file_info 返回某个目标文件 PATH_NOT_FOUND，而用户本意是创建文件，不要把它解释成目录不存在；下一步应考虑 write_file。\n"
         "- write_file 的 content 必须是真实正文，禁止写入“此处填写”“待补充”“TODO”等占位模板。\n"
         "- 工具已经成功写入后，不要继续调用工具，应进入最终回答。\n"
         "- 不要因为路径在 C/D/E 盘或 Home 外就拒绝规划；路径策略由工具执行层判断。\n\n"
-        "可用工具：list_dir、read_file、search_files、search_text、get_file_info、write_file。\n"
+        "可用工具：list_dir、read_file、search_files、search_text、get_file_info、write_file、exec_command。\n"
+        "exec_command 只用于短时、非交互终端命令，例如运行测试、查看版本、git status；不要用它读写文件。\n"
         "只返回 JSON，不要输出其他文本。格式：\n"
         "{"
         "\"needs_tool\":true,"
-        "\"tool_name\":\"write_file\","
-        "\"arguments\":{\"path\":\"E:/test/index.html\",\"content\":\"<!doctype html>...完整 HTML...\",\"overwrite\":false},"
+        "\"tool_name\":\"exec_command\","
+        "\"arguments\":{\"command\":\"git status --short\",\"cwd\":\".\",\"timeout_ms\":30000,\"max_output_bytes\":65536},"
         "\"confidence\":0.8,"
         "\"reason\":\"简短原因\""
         "}\n\n"
@@ -1196,6 +1720,8 @@ def _should_try_agent_tool_planner(state: MemoryChatGraphState) -> bool:
     user_message = _resolve_user_message(state)
     if _should_try_llm_tool_planner(user_message):
         return True
+    if _looks_like_exec_request(user_message):
+        return True
     if state.get("tool_observations"):
         return True
     return _looks_like_agent_choose_filename_request(user_message)
@@ -1206,19 +1732,21 @@ def _tool_planner_input(state: MemoryChatGraphState) -> str:
 
     轻量 LLM planner 不能只看本轮 `user_message`。当用户说“按刚才那个文件保存”
     或“继续写进去”时，真正的 path/content 往往在上一轮 assistant 中。
-    这里优先使用 L1+L0 当前对话窗口，让工具规划也共享同一段连续对话语义。
+    这里明确标记 history/current 边界，避免工具规划器把上一轮 assistant 的草稿
+    当成本轮用户指令继续执行。
     """
 
-    layer = state.get("context_conversation_window_layer") or {}
-    content = str(layer.get("content") or "").strip()
-    if content:
-        return content
     recent_text = "\n".join(
         f"{message.get('role')}: {message.get('content')}"
         for message in state.get("recent_messages", [])[-6:]
     )
-    current = f"user(current): {_resolve_user_message(state)}"
-    return f"{recent_text}\n{current}".strip()
+    current = _resolve_user_message(state)
+    return (
+        "## history\n"
+        f"{recent_text or '无历史消息。'}\n\n"
+        "## current\n"
+        f"user: {current}"
+    ).strip()
 
 
 def _plan_contextual_write_action(state: MemoryChatGraphState) -> AgentToolActionPayload | None:
@@ -1235,6 +1763,8 @@ def _plan_contextual_write_action(state: MemoryChatGraphState) -> AgentToolActio
     """
 
     user_message = _resolve_user_message(state)
+    if _is_new_tool_task(user_message):
+        return None
     if _looks_like_new_write_generation_request(user_message):
         return None
     if not _looks_like_contextual_write_confirmation(user_message):
@@ -1251,6 +1781,8 @@ def _plan_contextual_write_action(state: MemoryChatGraphState) -> AgentToolActio
                 user_message=user_message,
             )
         write_content = _extract_contextual_write_content(content, path)
+        if not write_content and _looks_like_agent_choose_filename_request(user_message):
+            write_content = _extract_contextual_write_content(content, "")
         if path and write_content:
             return {
                 "tool_name": "write_file",
@@ -1262,6 +1794,31 @@ def _plan_contextual_write_action(state: MemoryChatGraphState) -> AgentToolActio
                 "reason": "用户确认把上一轮 assistant 准备好的正文保存到具体文件。",
             }
     return None
+
+
+def _is_new_tool_task(user_message: str) -> bool:
+    """判断当前输入是否已经形成新的本地工具任务。
+
+    如果本轮用户给了明确路径、读取/修改/执行等动作，就不能再沿用历史 assistant
+    草稿。这是防止 continuation over-trigger 的第一道任务边界。
+    """
+
+    has_path = bool(_extract_path(user_message))
+    new_task_keywords = [
+        "读取",
+        "读一下",
+        "查看",
+        "搜索",
+        "查找",
+        "修改",
+        "改成",
+        "替换",
+        "保存回去",
+        "执行命令",
+        "运行命令",
+        "测试",
+    ]
+    return has_path and any(keyword in user_message for keyword in new_task_keywords)
 
 
 def _clean_contextual_path(path: str) -> str:
@@ -1282,6 +1839,8 @@ def _clean_tool_path_arguments(tool_name: str, arguments: dict) -> dict:
     for key in ["path", "root"]:
         if key in cleaned:
             cleaned[key] = _clean_tool_path(str(cleaned.get(key) or ""))
+    if tool_name == "exec_command" and "cwd" in cleaned:
+        cleaned["cwd"] = _clean_tool_path(str(cleaned.get("cwd") or "."))
     return cleaned
 
 
@@ -1418,17 +1977,12 @@ def _extract_contextual_write_content(assistant_content: str, path: str) -> str:
     kept: list[str] = []
     normalized_path = path.replace("/", "\\")
     skip_markers = [
-        "保存",
-        "写入",
-        "文件",
-        "路径",
         "是否",
         "希望我",
         "你希望",
         "比如",
         "例如",
         normalized_path,
-        path,
     ]
     for raw_line in lines:
         line = raw_line.strip()
@@ -1438,9 +1992,23 @@ def _extract_contextual_write_content(assistant_content: str, path: str) -> str:
             continue
         if any(marker and marker in line for marker in skip_markers):
             continue
+        if _looks_like_contextual_write_operation_line(line):
+            continue
         kept.append(line)
     content = "\n".join(kept).strip()
     return content if len(content) >= 8 else ""
+
+
+def _looks_like_contextual_write_operation_line(line: str) -> bool:
+    """判断 assistant 文本中的某一行是否只是保存/命名操作说明。
+
+    不能简单跳过包含“文件”的所有句子，因为正文里也可能自然提到文件、项目、代码。
+    这里只过滤“你希望/如果你愿意/我可以帮你...”这类询问或操作性句子。
+    """
+
+    operation_markers = ["取一个文件名", "取文件名", "文件名", "写进去", "保存到", "保存成", "直接保存", "保存位置"]
+    intent_markers = ["如果你愿意", "你希望", "希望我", "我可以帮你", "是否", "要不要", "我确认"]
+    return any(marker in line for marker in operation_markers) and any(marker in line for marker in intent_markers)
 
 
 def _has_successful_write_observation(state: MemoryChatGraphState) -> bool:
@@ -1489,9 +2057,25 @@ def _should_try_llm_tool_planner(user_message: str) -> bool:
         "repository",
         "代码",
         "源码",
+        "读取",
+        "查看",
+        "修改",
+        "改成",
+        "替换",
+        "保存回去",
+        "写回",
         "写入",
         "创建",
         "保存到",
+        "执行",
+        "运行",
+        "测试",
+        "命令",
+        "终端",
+        "git status",
+        "npm",
+        "pytest",
+        "cargo",
         "Ai记",
         "Ai 记",
         "AiMemo",
@@ -1499,20 +2083,60 @@ def _should_try_llm_tool_planner(user_message: str) -> bool:
     return any(keyword in user_message for keyword in keywords)
 
 
-def _to_agent_tool_action(action: dict, *, index: int) -> AgentToolActionPayload:
+def _looks_like_exec_request(user_message: str) -> bool:
+    """识别明显需要终端命令的用户输入。"""
+
+    exec_keywords = ["执行命令", "运行命令", "跑一下", "启动", "测试", "构建", "git status", "npm", "pytest", "cargo", "python --version"]
+    return any(keyword in user_message for keyword in exec_keywords)
+
+
+def _to_agent_tool_action(
+    action: dict,
+    *,
+    index: int,
+    task_boundary: Literal["new_task", "continuation", "same_turn_followup"] = "new_task",
+) -> AgentToolActionPayload:
     """把 Local Operator action 规整为主对话 graph 的工具 action。"""
 
     tool_name = str(action.get("tool_name") or "")
-    operation_type = "write" if tool_name in WRITE_TOOL_NAMES else "read"
+    if tool_name in WRITE_TOOL_NAMES:
+        operation_type = "write"
+    elif tool_name in EXEC_TOOL_NAMES:
+        operation_type = "exec"
+    else:
+        operation_type = "read"
     return {
         "tool_call_id": f"tool-{index + 1}-{tool_name or 'unknown'}",
         "tool_name": tool_name,
         "arguments": dict(action.get("arguments") or {}),
         "reason": str(action.get("reason") or ""),
+        "source_step_id": str(action.get("source_step_id") or ""),
         "operation_type": operation_type,
-        "risk_level": "medium" if operation_type == "write" else "low",
+        "risk_level": "medium" if operation_type in {"write", "exec"} else "low",
         "requires_approval": False,
+        "status": "READY",
+        "task_boundary": task_boundary,
     }
+
+
+def _infer_task_boundary(
+    state: MemoryChatGraphState,
+    action: dict,
+) -> Literal["new_task", "continuation", "same_turn_followup"]:
+    """给工具 action 标记任务边界，便于 checkpoint/debug 排查跨轮串状态。
+
+    当前还没有独立 TaskSession 表，先把边界信息压进 action payload：
+      - continuation: 用户明确确认上一轮 assistant 草稿。
+      - same_turn_followup: 已有 observation 后继续同一轮工具链。
+      - new_task: 当前 L0 输入形成的新工具任务。
+    """
+
+    reason = str(action.get("reason") or "")
+    if state.get("tool_observations"):
+        return "same_turn_followup"
+    if "上一轮 assistant" in reason or "上一轮" in reason:
+        return "continuation"
+    return "new_task"
 
 
 def _run_agent_tool_action(
@@ -1577,9 +2201,18 @@ def _run_agent_tool_action(
                 "blocked": bool(payload.get("blocked", False)),
             }
 
+    updated_task = _update_task_after_tool_observation(state, observation)
     return {
         "tool_observations": [*state.get("tool_observations", []), observation],
         "tool_budget": max(int(state.get("tool_budget") or 0) - 1, 0),
+        "pending_tool_action": {
+            **action,
+            "status": "COMPLETED" if observation.get("ok") else "FAILED",
+        },
+        "task": updated_task,
+        # 顶层 world_state 是给调试 UI/后续节点快速读取的镜像，必须和 task.world_state
+        # 使用同一份更新结果，不能再从旧 state 二次推导，否则 step 状态和观察事实会脱节。
+        "world_state": updated_task.get("world_state") or _empty_world_state(),
         "turn_messages": [
             *state.get("turn_messages", []),
             _turn_message(
@@ -1843,6 +2476,7 @@ def build_memory_chat_answer_system_prompt() -> str:
         "- 回答必须优先基于这些工具结果，而不是凭空说你不能访问用户电脑、硬盘、C 盘或系统日志。\n"
         "- 如果工具结果显示读取成功，直接总结读到的内容，并说明路径或匹配结果。\n"
         "- 如果工具结果显示写入成功，只能说明已创建/更新的真实路径和工具返回摘要，不要声称文件里有工具没有写入的具体内容。\n"
+        "- 如果工具结果显示命令执行成功，简短说明命令、退出码和关键输出；如果失败，只复述真实 stderr/错误码。\n"
         "- 如果工具结果显示失败或被拦截，只能复述真实错误原因，例如路径不存在、不是文本文件、敏感文件被拦截。\n"
         "- 如果 write_file 因 PLACEHOLDER_CONTENT_REJECTED 失败，说明系统拒绝写入占位模板；你应该直接生成真实正文，或询问用户是否要把这段正文写入文件。\n"
         "- 不要要求用户复制文件内容，除非工具明确返回无法读取且没有其他可用路径。\n\n"
@@ -1884,6 +2518,7 @@ def build_elf_bubble_answer_system_prompt() -> str:
         "- 你必须基于这些工具结果回答，不要凭空说自己不能访问用户电脑、硬盘、C 盘或系统日志。\n"
         "- 如果工具读取成功，直接用气泡总结读到的内容；如果失败，只说明真实错误原因。\n"
         "- 如果工具写入成功，只能说明已创建/更新的真实路径和工具返回摘要，不要声称文件里有工具没有写入的具体内容。\n"
+        "- 如果工具执行命令成功，简短说明命令、退出码和关键输出；如果失败，只说明真实 stderr/错误码。\n"
         "- 如果 write_file 因 PLACEHOLDER_CONTENT_REJECTED 失败，说明系统拒绝写入占位模板；你应该直接生成真实正文，或询问用户是否要把这段正文写入文件。\n"
         "- 不要要求用户复制文件内容，除非工具明确返回无法读取且没有其他可用路径。\n\n"
         "emoji 可选值：\n"

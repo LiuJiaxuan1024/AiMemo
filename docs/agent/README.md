@@ -69,6 +69,7 @@ LangGraph 不直接替代业务数据库。
 - [Conversation Memory Graph](./conversation-memory-graph.md)
 - [Context Pyramid](./context-pyramid.md)
 - [Local Operator Agent](./local-operator-agent.md)
+- [Dynamic Execution Graph](./dynamic-execution-graph.md)
 - [Memory Chat Agent 工具循环升级草案](./tool-loop-agent-upgrade.md)
 - [Memory Chat Graph 设计草案](./memory-chat-graph-design.md)
 

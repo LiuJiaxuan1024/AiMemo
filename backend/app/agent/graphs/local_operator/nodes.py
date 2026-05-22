@@ -33,7 +33,10 @@ READ_TOOL_NAMES = {
 WRITE_TOOL_NAMES = {
     "write_file",
 }
-ALLOWED_LOCAL_OPERATOR_TOOLS = READ_TOOL_NAMES | WRITE_TOOL_NAMES
+EXEC_TOOL_NAMES = {
+    "exec_command",
+}
+ALLOWED_LOCAL_OPERATOR_TOOLS = READ_TOOL_NAMES | WRITE_TOOL_NAMES | EXEC_TOOL_NAMES
 
 
 @dataclass(frozen=True)
@@ -142,6 +145,19 @@ def build_run_write_tool_node(session_factory: SessionFactory) -> Callable[[Loca
     return run_write_tool
 
 
+def build_run_exec_tool_node(session_factory: SessionFactory) -> Callable[[LocalOperatorState], LocalOperatorState]:
+    """执行受控 exec 工具分支。
+
+    exec 是第三类本地能力：它不是读文件，也不是写文件，而是短时终端命令。
+    独立成节点后，Mermaid 图和 checkpoint state 都能清楚看到命令执行路径。
+    """
+
+    def run_exec_tool(state: LocalOperatorState) -> LocalOperatorState:
+        return _run_tool_action(state, session_factory=session_factory, allowed_tool_names=EXEC_TOOL_NAMES)
+
+    return run_exec_tool
+
+
 def build_observe_tool_result_node() -> Callable[[LocalOperatorState], LocalOperatorState]:
     """判断当前工具结果是否足够。
 
@@ -192,12 +208,14 @@ def route_after_plan(state: LocalOperatorState) -> str:
 
 
 def route_after_select_tool(state: LocalOperatorState) -> str:
-    """select_tool 后按工具类型分流到 read/write 执行节点。"""
+    """select_tool 后按工具类型分流到 read/write/exec 执行节点。"""
 
     action = state.get("next_action") or {}
     tool_name = str(action.get("tool_name") or "")
     if tool_name in WRITE_TOOL_NAMES:
         return "run_write_tool"
+    if tool_name in EXEC_TOOL_NAMES:
+        return "run_exec_tool"
     return "run_read_tool"
 
 
@@ -278,6 +296,19 @@ def _run_tool_action(
 
 def _rule_plan_action(user_input: str, *, workspace_roots: list[str]) -> LocalOperatorAction | None:
     normalized = user_input.strip()
+    if _looks_like_rule_exec_request(normalized):
+        command = _extract_exec_command(normalized)
+        if command:
+            return {
+                "tool_name": "exec_command",
+                "arguments": {
+                    "command": command,
+                    "cwd": _extract_exec_cwd(normalized) or ".",
+                    "timeout_ms": 30000,
+                    "max_output_bytes": 65536,
+                },
+                "reason": "用户明确要求执行短时终端命令。",
+            }
     if _looks_like_rule_write_request(normalized):
         path = _extract_path(normalized)
         content = _extract_write_content(normalized)
@@ -367,6 +398,18 @@ def _looks_like_rule_write_request(text: str) -> bool:
     return any(keyword in text for keyword in action_keywords) and any(keyword in text for keyword in object_keywords)
 
 
+def _looks_like_rule_exec_request(text: str) -> bool:
+    """识别明确终端命令执行请求。
+
+    exec 具备副作用风险，所以快路径必须同时出现“执行/运行/跑”等动作和命令形态。
+    模糊的“帮我处理一下项目”仍交给 LLM planner 或最终回答。
+    """
+
+    action_keywords = ["执行命令", "运行命令", "跑一下", "运行一下", "执行一下", "run command"]
+    command_markers = ["`", "git ", "npm ", "pnpm ", "yarn ", "pytest", "python ", "node ", "cargo ", "go test"]
+    return any(keyword in text for keyword in action_keywords) and any(marker in text for marker in command_markers)
+
+
 def _looks_like_local_operator_candidate(text: str) -> bool:
     """判断是否值得调用 LLM planner。
 
@@ -392,11 +435,48 @@ def _looks_like_local_operator_candidate(text: str) -> bool:
         "路径",
         "代码",
         "源码",
+        "执行命令",
+        "运行命令",
+        "测试",
+        "构建",
         "Ai记",
         "Ai 记",
         "AiMemo",
     ]
     return any(keyword in text for keyword in candidate_keywords)
+
+
+def _extract_exec_command(text: str) -> str:
+    """从用户输入中提取命令文本。
+
+    优先使用反引号/引号中的内容；没有包裹符时，尝试截取常见命令前缀后的整段。
+    """
+
+    code_match = re.search(r"`([^`]+)`", text)
+    if code_match:
+        return code_match.group(1).strip()
+    quoted = _extract_quoted_text(text)
+    if quoted and _looks_like_command_text(quoted):
+        return quoted
+    for marker in ["执行命令", "运行命令", "跑一下", "运行一下", "执行一下"]:
+        if marker in text:
+            candidate = text.split(marker, 1)[-1].strip(" ：:，。")
+            if _looks_like_command_text(candidate):
+                return candidate
+    match = re.search(r"\b(git|npm|pnpm|yarn|pytest|python|node|cargo|go)\b[^\n，。；;]*", text, flags=re.IGNORECASE)
+    return match.group(0).strip() if match else ""
+
+
+def _extract_exec_cwd(text: str) -> str:
+    """提取“在某目录下执行”的 cwd 提示。"""
+
+    match = re.search(r"(?:在|到)\s*([A-Za-z]:[\\/][^\s，。；;]+|(?:[\w.\-\u4e00-\u9fff]+[\\/])+[^\s，。；;]+)\s*(?:下|里|目录)?", text)
+    return _clean_tool_path(match.group(1)) if match else ""
+
+
+def _looks_like_command_text(text: str) -> bool:
+    return bool(re.match(r"^(git|npm|pnpm|yarn|pytest|python|node|cargo|go|dir|ls|pwd)\b", text.strip(), flags=re.IGNORECASE))
+
 
 
 def _llm_plan_tool_action(user_input: str) -> LocalOperatorAction | None:
@@ -456,6 +536,7 @@ def _build_local_operator_planner_prompt(user_input: str) -> str:
         "- 你可以规划读取本机文件系统中的文件或目录，包括用户给出的绝对路径。\n"
         "- 你可以规划写入授权 workspace 内的普通文本文件；写入已有文件时必须设置 overwrite=true，工具会要求先读取或查看该文件。\n"
         "- write_file 的 content 必须是用户明确给出的正文，或用户明确要求你生成且你已经能在本节点中完整生成的正文。\n"
+        "- exec_command 只用于短时终端操作，例如查看版本、运行测试、git status；不要用它读写文件。\n"
         "- 不要把“用于写...”“准备写...”“创建一个...文件”理解成可以写入模板；禁止写入“此处填写”“待补充”“TODO”等占位内容。\n"
         "- 如果用户提供了路径，先假设路径值得尝试；路径不存在、不可读、敏感或越权时，工具会返回真实错误。\n"
         "- 不要因为路径在 C 盘、D 盘、系统目录或 Home 之外，就在规划阶段拒绝；是否允许由工具策略决定。\n"
@@ -468,11 +549,13 @@ def _build_local_operator_planner_prompt(user_input: str) -> str:
         "- search_text(root, query, include_glob, max_results, context_lines): 搜索文本内容。\n"
         "- get_file_info(path): 查看文件或目录是否存在、大小、修改时间。\n\n"
         "- write_file(path, content, overwrite): 创建或整文件写入文本文件。优先用于新建文件或完整重写；局部修改暂不规划。\n\n"
+        "- exec_command(command, cwd, timeout_ms, max_output_bytes): 执行短时、非交互终端命令。\n\n"
         "判断原则：\n"
         "- 用户询问本机/电脑/工作区里是否存在某项目、仓库、目录或文件，需要本地读取。\n"
         "- 用户要求查看、确认、搜索、打开、列出本地文件/目录，需要本地读取。\n"
         "- 普通聊天、记忆问答、常识问题、数学题不需要本地读取。\n"
         "- 用户只是讨论代码方案、询问如何修改时，不要写文件；只有明确要求“帮我写入/创建/保存到某文件”才使用 write_file。\n"
+        "- 用户要求运行测试、查看版本、执行构建、查看 git 状态时，可以使用 exec_command。\n"
         "- 如果用户只说“创建一个用于写 X 的文件”，但没有要求你现在生成 X 的正文，也没有提供正文，不要调用 write_file；应让最终回答节点说明需要先生成正文。\n"
         "- 如果用户没有给具体路径，但问的是当前项目/这个仓库/当前工作区，用 path/root = \".\"。\n"
         "- 如果用户问的是当前电脑/本机/Home/用户目录里有没有某个项目或文件，优先用 search_files，root = \"~\"。\n"
@@ -539,6 +622,13 @@ def _normalize_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> dict
             "path": _clean_tool_path(str(arguments.get("path") or ".")),
             "content": str(arguments.get("content") or ""),
             "overwrite": bool(arguments.get("overwrite", False)),
+        }
+    if tool_name == "exec_command":
+        return {
+            "command": str(arguments.get("command") or ""),
+            "cwd": _clean_tool_path(str(arguments.get("cwd") or ".")),
+            "timeout_ms": int(arguments.get("timeout_ms") or 30000),
+            "max_output_bytes": int(arguments.get("max_output_bytes") or 65536),
         }
     return {}
 
@@ -683,6 +773,13 @@ def _observation_to_lines(observation: LocalOperatorObservation) -> list[str]:
     if tool_name == "write_file":
         return [
             f"- 已{ '更新' if data.get('type') == 'update' else '创建' } `{data.get('relative_path')}`，写入 {data.get('bytes_written')} bytes，hash={data.get('content_hash')}。"
+        ]
+    if tool_name == "exec_command":
+        return [
+            f"- 已执行命令 `{data.get('command')}`，cwd=`{data.get('relative_cwd')}`，exit_code={data.get('exit_code')}，duration={data.get('duration_ms')}ms：",
+            "```text",
+            str(data.get("stdout") or data.get("stderr") or "(no output)"),
+            "```",
         ]
     return [f"- `{tool_name}` 返回：{data}"]
 

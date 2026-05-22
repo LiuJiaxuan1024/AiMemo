@@ -11,6 +11,9 @@ from app.agent.graphs.memory_chat.nodes import _build_model_messages
 from app.agent.graphs.memory_chat.nodes import _llm_plan_agent_tool_action
 from app.agent.graphs.memory_chat.nodes import _plan_agent_tool_action
 from app.agent.graphs.memory_chat.nodes import _parse_elf_bubble_parts
+from app.agent.graphs.memory_chat.nodes import _select_ready_task_step
+from app.agent.graphs.memory_chat.nodes import _update_task_after_tool_observation
+from app.agent.graphs.memory_chat.nodes import build_merge_prompt_context_node
 from app.models.chat_message import ChatMessage
 from app.models.long_term_memory import LongTermMemory
 from app.rag.hashing import content_hash
@@ -51,8 +54,9 @@ def test_memory_chat_graph_direct_answer_persists_messages(
     assert result["context_l1_layer"]["level"] == 1
     assert result["context_l0_layer"]["level"] == 0
     assert result["context_conversation_window_layer"]["level"] == 1
-    assert "L1 当前对话窗口" in result["prompt_context"]
-    assert "user(current): 1+1 等于几？" in result["prompt_context"]
+    assert "L1 近期对话窗口" in result["prompt_context"]
+    assert "L0 当前用户输入" in result["prompt_context"]
+    assert "1+1 等于几？" in result["prompt_context"]
     assert "本轮未查询个人知识库" in result["prompt_context"]
     assert [message.role for message in messages] == ["user", "assistant"]
     assert messages[0].content == "1+1 等于几？"
@@ -121,6 +125,7 @@ def test_memory_chat_graph_main_flow_is_flat_context_worker_graph(session_factor
     assert "check_tool_policy" in mermaid
     assert "run_read_tool" in mermaid
     assert "run_write_tool" in mermaid
+    assert "run_exec_tool" in mermaid
     assert "observe_tool_result" in mermaid
     assert "build_local_operator_context" not in mermaid
     assert "merge_prompt_context" in mermaid
@@ -317,6 +322,218 @@ def test_agent_think_continues_existing_tool_queue_after_observation():
     assert state["planned_tool_actions"][0]["tool_name"] == "write_file"
 
 
+def test_agent_think_builds_dynamic_task_from_planner(monkeypatch):
+    """agent_think 应先生成 Task Plan，再从 ready step 派生工具调用。"""
+
+    class FakePlannerModel:
+        def invoke(self, messages):
+            class Response:
+                content = (
+                    '{"needs_task":true,"goal":"读取配置文件",'
+                    '"steps":[{"id":"read_config","kind":"tool","description":"读取 config",'
+                    '"tool_name":"read_file","arguments":{"path":"E:/test/config.json"},"dependencies":[]}]}'
+                )
+
+            return Response()
+
+    monkeypatch.setattr("app.agent.graphs.memory_chat.nodes.get_planner_chat_model", lambda: FakePlannerModel())
+
+    state = build_agent_think_node()(
+        {
+            "user_message": "读取 E:/test/config.json，把 timeout 改成 30，然后保存回去",
+            "recent_messages": [
+                {
+                    "id": 1,
+                    "role": "assistant",
+                    "content": "上一轮我写了 rust_hello.rs。",
+                    "token_count": 20,
+                }
+            ],
+            "prompt_context": "## L1 history\nassistant: 上一轮我写了 rust_hello.rs。\n\n## L0 current\n读取配置",
+            "turn_messages": [],
+            "tool_observations": [],
+            "planned_tool_actions": [],
+            "tool_budget": 4,
+            "thought_events": [],
+        }
+    )
+
+    assert state["task"]["goal"] == "读取配置文件"
+    assert state["planned_tool_actions"][0]["tool_name"] == "read_file"
+    assert state["planned_tool_actions"][0]["arguments"]["path"] == "E:/test/config.json"
+    assert state["planned_tool_actions"][0]["task_boundary"] == "new_task"
+
+
+def test_agent_think_consumes_reasoning_step_before_next_tool(monkeypatch):
+    """reasoning step 应在 agent_think 内部完成，并把 content_ref 传给后续 write_file。"""
+
+    class FakeAnswerModel:
+        def invoke(self, messages):
+            class Response:
+                content = '{"timeout":30}\n'
+
+            return Response()
+
+    monkeypatch.setattr("app.agent.graphs.memory_chat.nodes.get_agent_chat_model", lambda: FakeAnswerModel())
+
+    state = build_agent_think_node()(
+        {
+            "user_message": "把配置保存回去",
+            "task": {
+                "id": "task-test",
+                "goal": "修改配置",
+                "status": "READY",
+                "plan_version": 1,
+                "current_step_id": None,
+                "world_state": {
+                    "generated_outputs": {},
+                    "observations": [],
+                    "failures": [],
+                    "read_files": {},
+                    "written_files": {},
+                    "known_files": {},
+                    "approvals": [],
+                },
+                "steps": [
+                    {
+                        "id": "prepare_content",
+                        "kind": "reasoning",
+                        "description": "生成新配置",
+                        "arguments": {},
+                        "dependencies": [],
+                        "status": "PENDING",
+                        "retry_count": 0,
+                    },
+                    {
+                        "id": "write_config",
+                        "kind": "tool",
+                        "description": "写回配置",
+                        "tool_name": "write_file",
+                        "arguments": {
+                            "path": "E:/test/config.json",
+                            "content_ref": "prepare_content",
+                            "overwrite": True,
+                        },
+                        "dependencies": ["prepare_content"],
+                        "status": "PENDING",
+                        "retry_count": 0,
+                    },
+                ],
+                "execution_history": [],
+                "replan_count": 0,
+            },
+            "planned_tool_actions": [],
+            "tool_observations": [],
+            "turn_messages": [],
+            "tool_budget": 4,
+            "thought_events": [],
+        }
+    )
+
+    assert state["task"]["world_state"]["generated_outputs"]["prepare_content"]["content"] == '{"timeout":30}\n'
+    assert state["planned_tool_actions"][0]["tool_name"] == "write_file"
+    assert state["planned_tool_actions"][0]["arguments"]["content"] == '{"timeout":30}\n'
+    assert state["task"]["steps"][0]["status"] == "COMPLETED"
+
+
+def test_agent_think_does_not_replan_completed_dynamic_task(monkeypatch):
+    """已完成的动态任务必须进入最终回答，不能按同一条 L0 输入重新规划。"""
+
+    class FailingPlannerModel:
+        def invoke(self, messages):  # pragma: no cover - 调到这里就说明终态判断失效
+            raise AssertionError("completed task should not be replanned")
+
+    monkeypatch.setattr("app.agent.graphs.memory_chat.nodes.get_planner_chat_model", lambda: FailingPlannerModel())
+
+    state = build_agent_think_node()(
+        {
+            "user_message": "读取 E:/test/config.json，把 timeout 改成 30，然后保存回去",
+            "task": {
+                "id": "task-config",
+                "goal": "修改配置",
+                "status": "COMPLETED",
+                "plan_version": 1,
+                "current_step_id": None,
+                "world_state": {
+                    "generated_outputs": {"prepare_content": {"content": '{"timeout":30}\n'}},
+                    "observations": [],
+                    "failures": [],
+                    "read_files": {},
+                    "written_files": {"E:/test/config.json": {"bytes_written": 15}},
+                    "known_files": {},
+                    "approvals": [],
+                },
+                "steps": [
+                    {"id": "read_config", "kind": "tool", "status": "COMPLETED", "dependencies": []},
+                    {"id": "prepare_content", "kind": "reasoning", "status": "COMPLETED", "dependencies": ["read_config"]},
+                    {"id": "write_config", "kind": "tool", "status": "COMPLETED", "dependencies": ["prepare_content"]},
+                ],
+                "execution_history": [],
+                "replan_count": 0,
+            },
+            "planned_tool_actions": [],
+            "tool_observations": [],
+            "turn_messages": [],
+            "tool_budget": 4,
+            "thought_events": [],
+        }
+    )
+
+    assert state["agent_decision"]["type"] == "final_answer"
+    assert "planned_tool_actions" not in state
+
+
+def test_tool_observation_completes_source_step_once():
+    """工具 observation 应按 source_step_id 推进对应 step，完成后不能再次被选中。"""
+
+    task = {
+        "id": "task-config",
+        "goal": "修改配置",
+        "status": "RUNNING",
+        "plan_version": 1,
+        "current_step_id": "write_config",
+        "world_state": {
+            "generated_outputs": {},
+            "observations": [],
+            "failures": [],
+            "read_files": {},
+            "written_files": {},
+            "known_files": {},
+            "approvals": [],
+        },
+        "steps": [
+            {"id": "read_config", "kind": "tool", "status": "COMPLETED", "dependencies": []},
+            {"id": "write_config", "kind": "tool", "status": "EXECUTING", "dependencies": ["read_config"]},
+        ],
+        "execution_history": [],
+        "replan_count": 0,
+    }
+    updated = _update_task_after_tool_observation(
+        {
+            "task": task,
+            "pending_tool_action": {
+                "tool_call_id": "tool-1-write_file",
+                "tool_name": "write_file",
+                "source_step_id": "write_config",
+            },
+        },
+        {
+            "tool_call_id": "tool-1-write_file",
+            "tool_name": "write_file",
+            "arguments": {"path": "E:/test/config.json"},
+            "ok": True,
+            "data": {"path": "E:/test/config.json", "bytes_written": 15},
+            "message": "写入完成。",
+            "blocked": False,
+        },
+    )
+
+    assert updated["status"] == "COMPLETED"
+    assert updated["steps"][1]["status"] == "COMPLETED"
+    assert "E:/test/config.json" in updated["world_state"]["written_files"]
+    assert _select_ready_task_step(updated) is None
+
+
 def test_agent_tool_planner_cleans_markdown_backticks_from_path(monkeypatch):
     """LLM planner 返回 Markdown 反引号包裹路径时，不能把反引号写进真实路径。"""
 
@@ -344,6 +561,36 @@ def test_agent_tool_planner_cleans_markdown_backticks_from_path(monkeypatch):
 
     assert action is not None
     assert action["arguments"]["path"] == "E:/test/memo.md"
+
+
+def test_agent_tool_planner_accepts_exec_command(monkeypatch):
+    """主 agent planner 应允许 exec_command 进入工具循环。"""
+
+    class FakeModel:
+        def invoke(self, messages):
+            class Response:
+                content = (
+                    '{"needs_tool":true,"tool_name":"exec_command",'
+                    '"arguments":{"command":"git status --short","cwd":".","timeout_ms":30000,"max_output_bytes":65536},'
+                    '"confidence":0.9,"reason":"查看 git 状态"}'
+                )
+
+            return Response()
+
+    monkeypatch.setattr("app.agent.graphs.memory_chat.nodes.get_planner_chat_model", lambda: FakeModel())
+
+    action = _llm_plan_agent_tool_action(
+        {
+            "user_message": "帮我运行 git status",
+            "prompt_context": "",
+            "turn_messages": [],
+            "tool_observations": [],
+        }
+    )
+
+    assert action is not None
+    assert action["tool_name"] == "exec_command"
+    assert action["arguments"]["command"] == "git status --short"
 
 
 def test_contextual_path_clean_removes_trailing_backtick():

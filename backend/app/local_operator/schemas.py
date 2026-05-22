@@ -55,6 +55,19 @@ class WriteFileInput(BaseModel):
     overwrite: bool = Field(default=False, description="是否允许覆盖已存在文件。覆盖前必须先读取或查看该文件。")
 
 
+class ExecCommandInput(BaseModel):
+    """终端命令执行工具输入。
+
+    exec 是高风险能力，所以参数故意保持少而明确：只允许前台短时命令，
+    不支持后台任务、不支持交互输入，也不把它作为读写文件的替代品。
+    """
+
+    command: str = Field(description="要执行的终端命令。不要用它读写文件，读写文件应使用专用工具。")
+    cwd: str = Field(default=".", description="命令工作目录，必须位于授权 workspace 内。")
+    timeout_ms: int = Field(default=30000, description="超时时间，单位毫秒，上限由系统策略限制。")
+    max_output_bytes: int = Field(default=65536, description="stdout/stderr 合计最多返回字节数。")
+
+
 class SearchFilesInput(BaseModel):
     root: str = Field(default=".", description="搜索根目录，必须位于授权 workspace 内。")
     pattern: str = Field(description="文件名关键词或 glob，例如 memory 或 *.py。")

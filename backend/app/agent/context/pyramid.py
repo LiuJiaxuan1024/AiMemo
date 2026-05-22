@@ -15,7 +15,8 @@ class ContextBudget:
       core_memory_tokens: L4 核心长期记忆预算，数量少但优先级最高。
       retrieved_memory_tokens: L3 RAG 检索记忆预算，通常最占空间。
       summary_tokens: L2 对话摘要预算，用于承接较早上下文。
-      recent_message_tokens: L1+L0 当前对话窗口预算。
+      conversation_window_tokens: L1+L0 调试窗口预算。该窗口不再直接注入主 prompt。
+      recent_message_tokens: L1 历史消息预算。
       weak_retrieval_max_chunks: weak 检索结果最多放入多少条，避免弱相关内容污染回答。
     """
 
@@ -106,7 +107,7 @@ def build_memory_chat_prompt_context(
     """构建 memory_chat_graph 的金字塔上下文。
 
     参数：
-      user_message: 当前用户输入，会和近期消息合并成 L1+L0 当前对话窗口。
+      user_message: 当前用户输入，会作为 L0 单独注入，避免和 L1 历史消息混淆。
       recent_messages: 近期对话消息，通常来自 chatmessage 表。
       conversation_summary: L2 对话摘要；当前只读取已有摘要，不负责生成摘要。
       retrieved_chunks: L3 向量检索命中的 note chunk。
@@ -126,11 +127,8 @@ def build_memory_chat_prompt_context(
             selected_budget,
         ),
         build_summary_layer(conversation_summary, selected_budget),
-        build_current_conversation_window_layer(
-            recent_messages,
-            user_message,
-            selected_budget,
-        ),
+        build_recent_messages_layer(recent_messages, selected_budget),
+        build_current_input_layer(user_message),
     ]
     return PyramidPromptContext(layers=layers)
 

@@ -10,6 +10,7 @@ from app.agent.graphs.local_operator.graph import get_local_operator_graph_merma
 from app.agent.graphs.local_operator.graph import run_local_operator_graph
 from app.core.config import settings
 from app.local_operator.filesystem import LocalFilesystemService
+from app.local_operator.command import LocalCommandExecutor
 from app.local_operator.policy import LocalOperatorPolicy
 from app.models.agent_operation import AgentOperation
 
@@ -227,6 +228,31 @@ def test_write_file_rejects_placeholder_content(tmp_path: Path):
     assert not (workspace / "review.md").exists()
 
 
+def test_exec_command_runs_short_readonly_command(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    executor = LocalCommandExecutor(LocalOperatorPolicy.from_roots([str(workspace)]))
+
+    result = executor.exec_command(command="python --version", cwd=".")
+
+    assert result.ok is True
+    assert result.tool_name == "exec_command"
+    assert result.data["exit_code"] == 0
+    assert "Python" in (result.data["stdout"] + result.data["stderr"])
+
+
+def test_exec_command_blocks_destructive_command(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    executor = LocalCommandExecutor(LocalOperatorPolicy.from_roots([str(workspace)]))
+
+    result = executor.exec_command(command="git reset --hard", cwd=".")
+
+    assert result.ok is False
+    assert result.error_code == "COMMAND_BLOCKED"
+    assert result.blocked is True
+
+
 def test_local_operator_graph_reads_file_and_writes_audit(
     session,
     session_factory,
@@ -280,6 +306,31 @@ def test_local_operator_graph_creates_file_and_writes_audit(
     assert operations[0].status == "completed"
     assert operations[0].tool_name == "write_file"
     assert operations[0].risk_level == "medium"
+
+
+def test_local_operator_graph_executes_command_and_writes_audit(
+    session,
+    session_factory,
+    tmp_path: Path,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = run_local_operator_graph(
+        session_factory=session_factory,
+        conversation_id=31,
+        turn_id=41,
+        user_input="帮我执行命令 `python --version`",
+        workspace_roots=[str(workspace)],
+    )
+
+    operations = session.exec(select(AgentOperation).where(AgentOperation.conversation_id == 31)).all()
+    assert result["needs_tool"] is True
+    assert "python --version" in result["final_answer"]
+    assert len(operations) == 1
+    assert operations[0].operation_type == "exec"
+    assert operations[0].tool_name == "exec_command"
+    assert operations[0].status == "completed"
 
 
 def test_local_operator_graph_does_not_create_placeholder_review_file(
@@ -446,6 +497,7 @@ def test_local_operator_graph_mermaid_shows_read_write_tool_routes(session_facto
     assert "select_tool" in mermaid
     assert "run_read_tool" in mermaid
     assert "run_write_tool" in mermaid
+    assert "run_exec_tool" in mermaid
     assert "plan_read_operation" not in mermaid
     assert "select_read_tool" not in mermaid
 

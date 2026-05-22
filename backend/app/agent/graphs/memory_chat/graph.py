@@ -26,6 +26,7 @@ from app.agent.graphs.memory_chat.nodes import (
     build_persist_messages_node,
     build_observe_tool_result_node,
     build_run_read_tool_node,
+    build_run_exec_tool_node,
     build_run_write_tool_node,
     build_select_tool_node,
     dispatch_context_workers,
@@ -88,6 +89,7 @@ def build_memory_chat_graph(
     graph.add_node("check_tool_policy", build_check_tool_policy_node())
     graph.add_node("run_read_tool", build_run_read_tool_node(session_factory))
     graph.add_node("run_write_tool", build_run_write_tool_node(session_factory))
+    graph.add_node("run_exec_tool", build_run_exec_tool_node(session_factory))
     graph.add_node("observe_tool_result", build_observe_tool_result_node())
     graph.add_node("generate_answer", build_generate_answer_node(answer_generator))
     graph.add_node(
@@ -121,10 +123,11 @@ def build_memory_chat_graph(
     graph.add_conditional_edges(
         "check_tool_policy",
         route_after_tool_policy,
-        ["run_read_tool", "run_write_tool", "observe_tool_result"],
+        ["run_read_tool", "run_write_tool", "run_exec_tool", "observe_tool_result"],
     )
     graph.add_edge("run_read_tool", "observe_tool_result")
     graph.add_edge("run_write_tool", "observe_tool_result")
+    graph.add_edge("run_exec_tool", "observe_tool_result")
     graph.add_edge("observe_tool_result", "agent_think")
     graph.add_edge("generate_answer", "persist_messages")
     graph.add_edge("generate_elf_bubble_answer", "persist_messages")
