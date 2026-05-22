@@ -1,4 +1,4 @@
-import type { MouseEvent, PointerEvent } from "react";
+import type { MouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 interface MermaidGraphViewProps {
@@ -146,12 +146,41 @@ export function MermaidGraphView({
     };
   }, [svg]);
 
+  useEffect(() => {
+    function handleWindowPointerMove(event: PointerEvent) {
+      const dragState = dragStateRef.current;
+      if (!dragState.isDragging || dragState.pointerId !== event.pointerId) {
+        return;
+      }
+      event.preventDefault();
+      moveViewportForPointer(event.clientX, event.clientY);
+    }
+
+    function handleWindowPointerEnd(event: PointerEvent) {
+      const dragState = dragStateRef.current;
+      if (!dragState.isDragging || dragState.pointerId !== event.pointerId) {
+        return;
+      }
+      event.preventDefault();
+      finishPointerInteraction(event.clientX, event.clientY, event.ctrlKey);
+    }
+
+    window.addEventListener("pointermove", handleWindowPointerMove, { passive: false });
+    window.addEventListener("pointerup", handleWindowPointerEnd, { passive: false });
+    window.addEventListener("pointercancel", handleWindowPointerEnd, { passive: false });
+    return () => {
+      window.removeEventListener("pointermove", handleWindowPointerMove);
+      window.removeEventListener("pointerup", handleWindowPointerEnd);
+      window.removeEventListener("pointercancel", handleWindowPointerEnd);
+    };
+  }, [onNodeClick, nodeIds]);
+
   function absorbWheel(event: React.WheelEvent<HTMLDivElement>) {
     event.preventDefault();
     event.stopPropagation();
   }
 
-  function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
+  function handlePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
     if (event.button !== 0) {
       return;
     }
@@ -166,41 +195,38 @@ export function MermaidGraphView({
       originX: viewport.x,
       originY: viewport.y,
     };
-    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Some Linux browser/SVG combinations fail pointer capture. Window listeners still handle dragging.
+    }
     setIsDragging(true);
   }
 
-  function handlePointerMove(event: PointerEvent<HTMLDivElement>) {
+  function handlePointerMove(event: ReactPointerEvent<HTMLDivElement>) {
     const dragState = dragStateRef.current;
     if (!dragState.isDragging || dragState.pointerId !== event.pointerId) {
       return;
     }
 
-    const dx = event.clientX - dragState.startX;
-    const dy = event.clientY - dragState.startY;
-    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
-      dragState.hasMoved = true;
-    }
-    setViewport((current) => ({
-      ...current,
-      x: dragState.originX + dx,
-      y: dragState.originY + dy,
-    }));
+    event.preventDefault();
+    event.stopPropagation();
+    moveViewportForPointer(event.clientX, event.clientY);
   }
 
-  function handlePointerUp(event: PointerEvent<HTMLDivElement>) {
+  function handlePointerUp(event: ReactPointerEvent<HTMLDivElement>) {
     const dragState = dragStateRef.current;
     if (dragState.pointerId === event.pointerId) {
-      if (!dragState.hasMoved) {
-        if (dragState.targetNodeId && onNodeClick) {
-          onNodeClick(dragState.targetNodeId);
-        } else {
-          zoomAt(event.clientX, event.clientY, event.ctrlKey ? 1 / ZOOM_STEP : ZOOM_STEP);
-        }
+      event.preventDefault();
+      event.stopPropagation();
+      finishPointerInteraction(event.clientX, event.clientY, event.ctrlKey);
+      try {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      } catch {
+        // Pointer capture may not have been established.
       }
-      dragState.isDragging = false;
-      setIsDragging(false);
-      event.currentTarget.releasePointerCapture(event.pointerId);
     }
   }
 
@@ -229,6 +255,36 @@ export function MermaidGraphView({
         y: pointerY - (pointerY - current.y) * realFactor,
       };
     });
+  }
+
+  function moveViewportForPointer(clientX: number, clientY: number) {
+    const dragState = dragStateRef.current;
+    const dx = clientX - dragState.startX;
+    const dy = clientY - dragState.startY;
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+      dragState.hasMoved = true;
+    }
+    setViewport((current) => ({
+      ...current,
+      x: dragState.originX + dx,
+      y: dragState.originY + dy,
+    }));
+  }
+
+  function finishPointerInteraction(clientX: number, clientY: number, ctrlKey: boolean) {
+    const dragState = dragStateRef.current;
+    if (!dragState.isDragging) {
+      return;
+    }
+    if (!dragState.hasMoved) {
+      if (dragState.targetNodeId && onNodeClick) {
+        onNodeClick(dragState.targetNodeId);
+      } else {
+        zoomAt(clientX, clientY, ctrlKey ? 1 / ZOOM_STEP : ZOOM_STEP);
+      }
+    }
+    dragState.isDragging = false;
+    setIsDragging(false);
   }
 
   return (

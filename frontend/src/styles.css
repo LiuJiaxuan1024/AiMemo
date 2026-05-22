@@ -1294,6 +1294,13 @@ textarea {
   user-select: none;
 }
 
+.mermaid-pan-surface svg,
+.mermaid-pan-surface svg * {
+  user-drag: none;
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
 .mermaid-pan-surface.is-ctrl-pressed {
   cursor: zoom-out;
 }
