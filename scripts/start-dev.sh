@@ -74,12 +74,37 @@ stop_port_processes() {
 ensure_frontend_dist_for_backend_app() {
   local frontend_dir="$REPO_ROOT/frontend"
   local index_html="$frontend_dir/dist/index.html"
+  local stale_marker=""
 
+  # Linux 桌宠和后端统一入口会打开 http://127.0.0.1:8000/app，
+  # 这个入口读取的是 frontend/dist，而不是 Vite 的 5173 开发产物。
+  # 因此开发脚本需要在源码更新后刷新 dist，避免用户看到旧版前端。
   if [[ -f "$index_html" ]]; then
+    stale_marker="$(
+      find \
+        "$frontend_dir/src" \
+        "$frontend_dir/public" \
+        "$frontend_dir/index.html" \
+        "$frontend_dir/package.json" \
+        "$frontend_dir/package-lock.json" \
+        "$frontend_dir/vite.config.ts" \
+        "$frontend_dir/tsconfig.json" \
+        "$frontend_dir/tsconfig.app.json" \
+        -newer "$index_html" \
+        -print \
+        -quit 2>/dev/null || true
+    )"
+  fi
+
+  if [[ -f "$index_html" && -z "$stale_marker" ]]; then
     return 0
   fi
 
-  echo "Building frontend once for backend-hosted /app entry..."
+  if [[ -n "$stale_marker" ]]; then
+    echo "Frontend dist is stale because this file changed after the last build:"
+    echo "  $stale_marker"
+  fi
+  echo "Building frontend for backend-hosted /app entry..."
   (
     cd "$frontend_dir"
     if [[ "$SKIP_INSTALL" -eq 0 || ! -d "node_modules" ]]; then
@@ -94,9 +119,9 @@ warn_linux_file_watch_limit
 warn_invalid_proxy_scheme
 ensure_frontend_dist_for_backend_app
 
-ARGS=()
+START_ARGS=""
 if [[ "$SKIP_INSTALL" -eq 1 ]]; then
-  ARGS+=(--skip-install)
+  START_ARGS="--skip-install"
 fi
 
 echo "Starting AiMemo backend, frontend, and Memo Elf..."
@@ -106,7 +131,7 @@ if [[ "$NO_DESKTOP" -eq 0 ]]; then
   echo "Memo Elf: Tauri desktop window"
 fi
 
-"$SCRIPT_DIR/start-backend.sh" "${ARGS[@]}" &
+"$SCRIPT_DIR/start-backend.sh" $START_ARGS &
 BACKEND_PID=$!
 
 cleanup() {
@@ -116,13 +141,13 @@ cleanup() {
 trap cleanup INT TERM EXIT
 
 sleep 2
-"$SCRIPT_DIR/start-frontend.sh" "${ARGS[@]}" &
+"$SCRIPT_DIR/start-frontend.sh" $START_ARGS &
 FRONTEND_PID=$!
 
 if [[ "$NO_DESKTOP" -eq 0 ]]; then
   (
     cd "$REPO_ROOT/desktop"
-    if [[ "$(uname -s)" != "Linux" && ( "$SKIP_INSTALL" -eq 0 || ! -d "node_modules" ) ]]; then
+    if [[ "$(uname -s)" != "Linux" ]] && [[ "$SKIP_INSTALL" -eq 0 || ! -d "node_modules" ]]; then
       npm install
     fi
     if [[ "$(uname -s)" == "Linux" ]]; then
