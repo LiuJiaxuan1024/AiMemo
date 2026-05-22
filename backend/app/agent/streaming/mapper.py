@@ -50,13 +50,23 @@ def _map_updates_chunk(chunk: Any) -> list[AiJiStreamEvent]:
     for node_name, state_update in chunk.items():
         if not isinstance(node_name, str):
             continue
+        state_payload = state_update if isinstance(state_update, dict) else {}
         events.append(
             {
                 "event": "node",
                 "node": node_name,
-                "state_update": state_update if isinstance(state_update, dict) else {},
+                "state_update": state_payload,
             }
         )
+        thoughts = state_payload.get("thought_events")
+        if isinstance(thoughts, list) and node_name in {"agent_think", "check_tool_policy", "run_read_tool", "run_write_tool", "observe_tool_result"}:
+            events.append(
+                {
+                    "event": "thought_snapshot",
+                    "node": node_name,
+                    "thoughts": [thought for thought in thoughts if isinstance(thought, dict)],
+                }
+            )
     return events
 
 

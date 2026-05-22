@@ -325,7 +325,31 @@ function findClickedNodeId(target: EventTarget | null, nodeIds: string[]) {
     return null;
   }
   const rawId = nodeElement.id || "";
-  return nodeIds.find((nodeId) => rawId.includes(nodeId)) ?? null;
+  const normalizedRawId = normalizeMermaidNodeText(rawId);
+  const titleText = normalizeMermaidNodeText(nodeElement.querySelector("title")?.textContent ?? "");
+  const labelText = normalizeMermaidNodeText(nodeElement.textContent ?? "");
+  const candidates = [titleText, normalizedRawId, labelText].filter(Boolean);
+  for (const candidate of candidates) {
+    const exactMatch = nodeIds.find((nodeId) => candidate === nodeId);
+    if (exactMatch) {
+      return exactMatch;
+    }
+  }
+  for (const candidate of candidates) {
+    const containsMatch = nodeIds.find((nodeId) => candidate.includes(nodeId));
+    if (containsMatch) {
+      return containsMatch;
+    }
+  }
+  return null;
+}
+
+function normalizeMermaidNodeText(value: string) {
+  return value
+    .replace(/^flowchart-/, "")
+    .replace(/-\d+$/, "")
+    .replace(/<[^>]+>/g, "")
+    .trim();
 }
 
 function clamp(value: number, min: number, max: number) {

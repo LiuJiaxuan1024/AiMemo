@@ -3,9 +3,13 @@ from fastapi.responses import StreamingResponse
 from sqlmodel import Session
 
 from app.core.database import get_session
-from app.schemas.chat import ChatRequest, ChatResponse, ChatTurnGraphRead
+from app.schemas.chat import ChatRequest, ChatResponse, ChatTurnGraphRead, ChatTurnStateHistoryRead
 from app.services.chat_service import run_conversation_chat, stream_conversation_chat_events
-from app.services.chat_turn_service import get_chat_turn_graph_by_message, get_chat_turn_graph_by_turn
+from app.services.chat_turn_service import (
+    get_chat_turn_graph_by_message,
+    get_chat_turn_graph_by_turn,
+    get_chat_turn_state_history,
+)
 
 
 router = APIRouter(prefix="/conversations", tags=["chat"])
@@ -61,6 +65,23 @@ def get_turn_graph_api(
 ) -> ChatTurnGraphRead:
     # 通过 ChatTurn 直接读取 graph，支持 assistant 消息尚未完成时查看运行状态。
     return get_chat_turn_graph_by_turn(
+        session,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+    )
+
+
+@router.get(
+    "/{conversation_id}/turns/{turn_id}/state-history",
+    response_model=ChatTurnStateHistoryRead,
+)
+def get_turn_state_history_api(
+    conversation_id: int,
+    turn_id: int,
+    session: Session = Depends(get_session),
+) -> ChatTurnStateHistoryRead:
+    # 读取 LangGraph 原生 checkpoint state history，供 Graph 调试面板做时间线查看。
+    return get_chat_turn_state_history(
         session,
         conversation_id=conversation_id,
         turn_id=turn_id,

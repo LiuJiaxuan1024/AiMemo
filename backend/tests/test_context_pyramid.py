@@ -1,4 +1,8 @@
-from app.agent.context import ContextBudget, build_memory_chat_prompt_context
+from app.agent.context import (
+    ContextBudget,
+    build_current_conversation_window_layer,
+    build_memory_chat_prompt_context,
+)
 
 
 def test_pyramid_context_includes_summary_and_current_input():
@@ -14,7 +18,7 @@ def test_pyramid_context_includes_summary_and_current_input():
     prompt = context.to_prompt()
     assert "L2 对话摘要" in prompt
     assert "用户最近在规划午餐。" in prompt
-    assert "L0 当前用户输入" in prompt
+    assert "L1 当前对话窗口" in prompt
     assert "我之前说过想吃什么？" in prompt
 
 
@@ -30,12 +34,28 @@ def test_pyramid_context_keeps_recent_messages_within_budget():
         retrieved_chunks=[],
         needs_retrieval=False,
         retrieval_grade="none",
-        budget=ContextBudget(recent_message_tokens=10),
+        budget=ContextBudget(conversation_window_tokens=14),
     )
 
     prompt = context.to_prompt()
     assert "user: 最近消息" in prompt
+    assert "user(current): 继续说" in prompt
     assert "很早以前的消息" not in prompt
+
+
+def test_current_conversation_window_merges_recent_messages_and_current_input():
+    layer = build_current_conversation_window_layer(
+        [
+            {"role": "assistant", "content": "我建议保存到 E:\\test\\message.txt", "token_count": 10},
+        ],
+        "直接保存到这个文件",
+        ContextBudget(),
+    )
+
+    assert layer.level == 1
+    assert layer.name == "当前对话窗口"
+    assert "assistant: 我建议保存到 E:\\test\\message.txt" in layer.content
+    assert "user(current): 直接保存到这个文件" in layer.content
 
 
 def test_pyramid_context_marks_weak_retrieval_as_uncertain_and_limits_chunks():

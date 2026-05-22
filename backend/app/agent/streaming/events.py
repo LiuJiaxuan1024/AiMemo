@@ -54,4 +54,12 @@ class InternalTokenEvent(TypedDict):
     metadata: dict[str, Any]
 
 
-AiJiStreamEvent = NodeUpdateEvent | AnswerDeltaEvent | BubbleDeltaEvent | InternalTokenEvent
+class ThoughtSnapshotEvent(TypedDict):
+    """agent 可见过程摘要事件。"""
+
+    event: Literal["thought_snapshot"]
+    node: str
+    thoughts: list[dict[str, Any]]
+
+
+AiJiStreamEvent = NodeUpdateEvent | AnswerDeltaEvent | BubbleDeltaEvent | InternalTokenEvent | ThoughtSnapshotEvent

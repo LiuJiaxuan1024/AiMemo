@@ -7,10 +7,10 @@
 ```text
 backend/app/agent/context/pyramid.py
   定义 ContextBudget、ContextLayer、PyramidPromptContext。
-  负责把 L0-L4 五层上下文组装成 prompt_context。
+  负责把 L4/L3/L2 和 L1+L0 当前对话窗口组装成 prompt_context。
 
 backend/app/agent/graphs/memory_chat/nodes.py
-  dispatch_context_workers 使用 LangGraph Send 分发 L0-L4 worker。
+  dispatch_context_workers 使用 LangGraph Send 分发上下文 worker。
   merge_prompt_context 汇总 worker 结果。
   generate_answer 只消费 prompt_context，不再自行拼接上下文。
 
@@ -28,8 +28,7 @@ flowchart TB
     L4[L4 核心长期记忆<br/>稳定偏好、身份、长期目标] --> Prompt[prompt_context]
     L3[L3 RAG 检索记忆<br/>笔记 chunk / 未来长期记忆检索] --> Prompt
     L2[L2 对话摘要<br/>conversation.summary] --> Prompt
-    L1[L1 近期对话窗口<br/>最近消息，按 token 预算裁剪] --> Prompt
-    L0[L0 当前用户输入<br/>本轮问题或指令] --> Prompt
+    Window[L1+L0 当前对话窗口<br/>近期消息 + 当前输入的连续对话] --> Prompt
 ```
 
 ## 当前实现
@@ -51,10 +50,14 @@ L2 对话摘要
 
 L1 近期对话窗口
   从最新消息向前装入，直到达到 recent_message_tokens。
-  最终渲染时恢复为时间正序。
+  最终渲染时恢复为时间正序。该层主要用于调试和后续状态树。
 
 L0 当前用户输入
-  作为 prompt 的最后一层，明确本轮必须回答的问题。
+  单独保存本轮必须回答的问题，主要用于调试和节点排查。
+
+L1+L0 当前对话窗口
+  把近期消息和当前用户输入合并为连续对话，当前输入使用 user(current) 标记。
+  这是最终 prompt 的底层对话上下文，也是工具 planner 的优先输入。
 ```
 
 ## 预算
@@ -65,6 +68,7 @@ L0 当前用户输入
 core_memory_tokens = 300
 retrieved_memory_tokens = 1200
 summary_tokens = 500
+conversation_window_tokens = 1200
 recent_message_tokens = 1000
 weak_retrieval_max_chunks = 3
 ```
@@ -83,26 +87,31 @@ flowchart TD
     Dispatch --> L2Worker[build_l2_summary]
     Dispatch --> L1Worker[build_l1_recent_messages]
     Dispatch --> L0Worker[build_l0_current_input]
+    Dispatch --> WindowWorker[build_current_conversation_window]
 
     L4Worker --> Merge[merge_prompt_context]
     L3Worker --> Merge
     L2Worker --> Merge
     L1Worker --> Merge
     L0Worker --> Merge
+    WindowWorker --> Merge
     Merge --> Generate[generate_answer]
 ```
 
-五层之间数据依赖很少，天然适合并行。每个 worker 写入独立 state 字段：
+上下文 worker 之间数据依赖很少，天然适合并行。每个 worker 写入独立 state 字段：
 
 ```text
 context_l4_layer
 context_l3_layer
 context_l2_layer
+context_conversation_window_layer
 context_l1_layer
 context_l0_layer
 ```
 
-`merge_prompt_context` 按 L4 -> L0 顺序还原为 `PyramidPromptContext`，并渲染为最终 `prompt_context`。
+`merge_prompt_context` 按 L4 -> L3 -> L2 -> 当前对话窗口顺序还原为
+`PyramidPromptContext`，并渲染为最终 `prompt_context`。单独 L1/L0 不直接进入
+最终 prompt，避免模型把近期消息和当前输入割裂开。
 
 L3 worker 是一个局部 RAG worker：
 

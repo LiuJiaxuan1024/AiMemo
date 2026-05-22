@@ -11,6 +11,7 @@ from app.agent.graphs.memory_chat.nodes import (
     ElfBubbleAnswerGenerator,
     NoteRetriever,
     RetrievalPlanner,
+    build_current_conversation_window_node,
     build_l0_current_input_node,
     build_l1_recent_messages_node,
     build_l2_summary_node,
@@ -18,12 +19,18 @@ from app.agent.graphs.memory_chat.nodes import (
     build_l4_core_memory_node,
     build_generate_elf_bubble_answer_node,
     build_generate_answer_node,
+    build_agent_think_node,
+    build_check_tool_policy_node,
     build_load_turn_state_node,
-    build_local_operator_context_node,
     build_merge_prompt_context_node,
     build_persist_messages_node,
+    build_observe_tool_result_node,
+    build_run_read_tool_node,
+    build_run_write_tool_node,
+    build_select_tool_node,
     dispatch_context_workers,
-    route_answer_mode,
+    route_after_agent_think,
+    route_after_tool_policy,
 )
 from app.agent.graphs.memory_chat.state import MemoryChatGraphState
 from app.agent.streaming import map_langgraph_stream_chunk
@@ -39,7 +46,7 @@ CONTEXT_WORKER_NODES = [
     "build_l2_summary",
     "build_l1_recent_messages",
     "build_l0_current_input",
-    "build_local_operator_context",
+    "build_current_conversation_window",
 ]
 
 
@@ -74,8 +81,14 @@ def build_memory_chat_graph(
     graph.add_node("build_l2_summary", build_l2_summary_node())
     graph.add_node("build_l1_recent_messages", build_l1_recent_messages_node())
     graph.add_node("build_l0_current_input", build_l0_current_input_node())
-    graph.add_node("build_local_operator_context", build_local_operator_context_node(session_factory))
+    graph.add_node("build_current_conversation_window", build_current_conversation_window_node())
     graph.add_node("merge_prompt_context", build_merge_prompt_context_node())
+    graph.add_node("agent_think", build_agent_think_node())
+    graph.add_node("select_tool", build_select_tool_node())
+    graph.add_node("check_tool_policy", build_check_tool_policy_node())
+    graph.add_node("run_read_tool", build_run_read_tool_node(session_factory))
+    graph.add_node("run_write_tool", build_run_write_tool_node(session_factory))
+    graph.add_node("observe_tool_result", build_observe_tool_result_node())
     graph.add_node("generate_answer", build_generate_answer_node(answer_generator))
     graph.add_node(
         "generate_elf_bubble_answer",
@@ -97,12 +110,22 @@ def build_memory_chat_graph(
     graph.add_edge("build_l2_summary", "merge_prompt_context")
     graph.add_edge("build_l1_recent_messages", "merge_prompt_context")
     graph.add_edge("build_l0_current_input", "merge_prompt_context")
-    graph.add_edge("build_local_operator_context", "merge_prompt_context")
+    graph.add_edge("build_current_conversation_window", "merge_prompt_context")
+    graph.add_edge("merge_prompt_context", "agent_think")
     graph.add_conditional_edges(
-        "merge_prompt_context",
-        route_answer_mode,
-        ["generate_answer", "generate_elf_bubble_answer"],
+        "agent_think",
+        route_after_agent_think,
+        ["select_tool", "generate_answer", "generate_elf_bubble_answer"],
     )
+    graph.add_edge("select_tool", "check_tool_policy")
+    graph.add_conditional_edges(
+        "check_tool_policy",
+        route_after_tool_policy,
+        ["run_read_tool", "run_write_tool", "observe_tool_result"],
+    )
+    graph.add_edge("run_read_tool", "observe_tool_result")
+    graph.add_edge("run_write_tool", "observe_tool_result")
+    graph.add_edge("observe_tool_result", "agent_think")
     graph.add_edge("generate_answer", "persist_messages")
     graph.add_edge("generate_elf_bubble_answer", "persist_messages")
     graph.add_edge("persist_messages", END)
@@ -258,6 +281,12 @@ def stream_memory_chat_graph(
                         "node": event["node"],
                         "content": event["content"],
                         "metadata": event["metadata"],
+                    }
+                elif event["event"] == "thought_snapshot":
+                    yield {
+                        "event": "thought_snapshot",
+                        "node": event["node"],
+                        "thoughts": event["thoughts"],
                     }
 
         snapshot = app.get_state(config)

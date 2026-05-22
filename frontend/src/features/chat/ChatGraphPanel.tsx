@@ -3,7 +3,8 @@ import { useState } from "react";
 
 import { MermaidGraphView } from "../graph/MermaidGraphView";
 import { Button, EmptyState, PanelHeader } from "../../shared/ui";
-import type { ChatTurnGraph } from "./types";
+import { getTurnStateHistory } from "./chatApi";
+import type { ChatCheckpointState, ChatTurnGraph, ChatTurnStateHistory } from "./types";
 
 interface ChatGraphPanelProps {
   graph: ChatTurnGraph | null;
@@ -13,7 +14,31 @@ interface ChatGraphPanelProps {
 
 export function ChatGraphPanel({ graph, isLoading, onClose }: ChatGraphPanelProps) {
   const [selectedSubgraphNode, setSelectedSubgraphNode] = useState<string | null>(null);
+  const [selectedStateNode, setSelectedStateNode] = useState<string | null>(null);
+  const [stateHistory, setStateHistory] = useState<ChatTurnStateHistory | null>(null);
+  const [selectedCheckpointId, setSelectedCheckpointId] = useState<string | null>(null);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
   const selectedSubgraph = selectedSubgraphNode ? graph?.subgraphs?.[selectedSubgraphNode] : null;
+  const selectedState = selectedStateNode ? graph?.debug_payload?.nodes?.[selectedStateNode]?.state : null;
+  const selectedCheckpoint = stateHistory?.states.find((state) => state.checkpoint_id === selectedCheckpointId) ?? null;
+
+  async function handleLoadStateHistory() {
+    if (!graph) {
+      return;
+    }
+    setIsHistoryLoading(true);
+    setHistoryError("");
+    try {
+      const history = await getTurnStateHistory(graph.conversation_id, graph.turn_id);
+      setStateHistory(history);
+      setSelectedCheckpointId(history.states[0]?.checkpoint_id ?? null);
+    } catch (currentError) {
+      setHistoryError(currentError instanceof Error ? currentError.message : "读取 checkpoint history 失败");
+    } finally {
+      setIsHistoryLoading(false);
+    }
+  }
 
   return (
     <aside className="chat-debug-panel">
@@ -41,13 +66,34 @@ export function ChatGraphPanel({ graph, isLoading, onClose }: ChatGraphPanelProp
             onNodeClick={(nodeId) => {
               if (graph.subgraphs?.[nodeId]) {
                 setSelectedSubgraphNode(nodeId);
+                setSelectedStateNode(null);
+                return;
               }
+              setSelectedStateNode(nodeId);
+              setSelectedSubgraphNode(null);
             }}
             themeVariables={{
               primaryColor: "#f8fafc",
               primaryBorderColor: "#cbd5e1",
             }}
           />
+
+          {selectedStateNode ? (
+            <section className="chat-debug-section chat-node-state-section">
+              <div className="chat-subgraph-header">
+                <h4>节点 State：{selectedStateNode}</h4>
+                <Button aria-label="关闭节点 State" onClick={() => setSelectedStateNode(null)} size="sm">
+                  <X aria-hidden="true" size={15} />
+                  关闭
+                </Button>
+              </div>
+              {selectedState === null || selectedState === undefined ? (
+                <p>这个节点暂时没有保存 state 快照。运行中的节点通常要等节点完成后才会写入快照。</p>
+              ) : (
+                <pre>{JSON.stringify(selectedState, null, 2)}</pre>
+              )}
+            </section>
+          ) : null}
 
           {selectedSubgraphNode && selectedSubgraph ? (
             <section className="chat-debug-section chat-subgraph-section">
@@ -80,6 +126,31 @@ export function ChatGraphPanel({ graph, isLoading, onClose }: ChatGraphPanelProp
             <PerformanceDebug graph={graph} />
           </section>
 
+          <section className="chat-debug-section chat-checkpoint-history">
+            <div className="chat-subgraph-header">
+              <h4>Checkpoint History</h4>
+              <Button
+                aria-label="读取 Checkpoint History"
+                disabled={isHistoryLoading}
+                onClick={handleLoadStateHistory}
+                size="sm"
+              >
+                {isHistoryLoading ? "读取中" : stateHistory ? "刷新" : "读取"}
+              </Button>
+            </div>
+            {historyError ? <p className="chat-debug-error">{historyError}</p> : null}
+            {stateHistory ? (
+              <CheckpointHistoryViewer
+                history={stateHistory}
+                selectedCheckpoint={selectedCheckpoint}
+                selectedCheckpointId={selectedCheckpointId}
+                onSelect={setSelectedCheckpointId}
+              />
+            ) : (
+              <p>按需读取 LangGraph 原生 state history，用来查看每个 checkpoint 的 values、next 和 task。</p>
+            )}
+          </section>
+
           <section className="chat-debug-section">
             <h4>上下文金字塔</h4>
             {graph.context_layers.length === 0 ? <p>暂无上下文记录</p> : null}
@@ -109,6 +180,71 @@ export function ChatGraphPanel({ graph, isLoading, onClose }: ChatGraphPanelProp
         </div>
       ) : null}
     </aside>
+  );
+}
+
+function CheckpointHistoryViewer({
+  history,
+  onSelect,
+  selectedCheckpoint,
+  selectedCheckpointId,
+}: {
+  history: ChatTurnStateHistory;
+  onSelect: (checkpointId: string | null) => void;
+  selectedCheckpoint: ChatCheckpointState | null;
+  selectedCheckpointId: string | null;
+}) {
+  return (
+    <div className="chat-checkpoint-viewer">
+      <div className="chat-checkpoint-list">
+        {history.states.map((state, index) => (
+          <button
+            className={state.checkpoint_id === selectedCheckpointId ? "is-selected" : ""}
+            key={state.checkpoint_id ?? index}
+            onClick={() => onSelect(state.checkpoint_id)}
+            type="button"
+          >
+            <span>#{history.states.length - index}</span>
+            <strong>{state.next.length > 0 ? state.next.join(", ") : "END / checkpoint"}</strong>
+            <small>{shortCheckpointId(state.checkpoint_id)}</small>
+          </button>
+        ))}
+      </div>
+      {selectedCheckpoint ? (
+        <div className="chat-checkpoint-detail">
+          <dl>
+            <div>
+              <dt>checkpoint</dt>
+              <dd>{selectedCheckpoint.checkpoint_id ?? "-"}</dd>
+            </div>
+            <div>
+              <dt>parent</dt>
+              <dd>{selectedCheckpoint.parent_checkpoint_id ?? "-"}</dd>
+            </div>
+            <div>
+              <dt>created</dt>
+              <dd>{selectedCheckpoint.created_at ?? "-"}</dd>
+            </div>
+            <div>
+              <dt>next</dt>
+              <dd>{selectedCheckpoint.next.length > 0 ? selectedCheckpoint.next.join(", ") : "-"}</dd>
+            </div>
+          </dl>
+          <details open>
+            <summary>values</summary>
+            <pre>{JSON.stringify(selectedCheckpoint.values, null, 2)}</pre>
+          </details>
+          <details>
+            <summary>tasks</summary>
+            <pre>{JSON.stringify(selectedCheckpoint.tasks, null, 2)}</pre>
+          </details>
+          <details>
+            <summary>metadata</summary>
+            <pre>{JSON.stringify(selectedCheckpoint.metadata ?? {}, null, 2)}</pre>
+          </details>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -174,6 +310,13 @@ function PerformanceDebug({ graph }: { graph: ChatTurnGraph }) {
       ) : null}
     </div>
   );
+}
+
+function shortCheckpointId(value: string | null) {
+  if (!value) {
+    return "-";
+  }
+  return value.length > 12 ? `${value.slice(0, 8)}...${value.slice(-4)}` : value;
 }
 
 function formatMs(value: number | null | undefined) {

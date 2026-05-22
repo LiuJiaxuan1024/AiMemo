@@ -370,9 +370,9 @@ def _looks_like_rule_write_request(text: str) -> bool:
 def _looks_like_local_operator_candidate(text: str) -> bool:
     """判断是否值得调用 LLM planner。
 
-    Memory Chat 每轮都会并行跑 Local Operator worker。如果这里过宽，普通聊天会多一次
-    planner LLM；如果过窄，自然语言本地操作又识别不到。所以候选规则只看“本地/文件/项目”
-    语义，不直接决定工具。
+    这套候选规则也会被 Memory Chat 主工具循环复用。如果这里过宽，普通聊天会多一次
+    planner LLM；如果过窄，自然语言本地操作又识别不到。所以候选规则只看
+    “本地/文件/项目”语义，不直接决定工具。
     """
 
     candidate_keywords = [
@@ -506,37 +506,37 @@ def _normalize_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> dict
 
     if tool_name == "list_dir":
         return {
-            "path": str(arguments.get("path") or "."),
+            "path": _clean_tool_path(str(arguments.get("path") or ".")),
             "max_entries": int(arguments.get("max_entries") or 100),
             "include_hidden": bool(arguments.get("include_hidden", False)),
         }
     if tool_name == "read_file":
         return {
-            "path": str(arguments.get("path") or "."),
+            "path": _clean_tool_path(str(arguments.get("path") or ".")),
             "start_line": arguments.get("start_line"),
             "end_line": arguments.get("end_line"),
             "max_bytes": int(arguments.get("max_bytes") or 65536),
         }
     if tool_name == "search_files":
         return {
-            "root": str(arguments.get("root") or "."),
+            "root": _clean_tool_path(str(arguments.get("root") or ".")),
             "pattern": str(arguments.get("pattern") or "*"),
             "max_results": int(arguments.get("max_results") or 50),
             "include_hidden": bool(arguments.get("include_hidden", False)),
         }
     if tool_name == "search_text":
         return {
-            "root": str(arguments.get("root") or "."),
+            "root": _clean_tool_path(str(arguments.get("root") or ".")),
             "query": str(arguments.get("query") or ""),
             "include_glob": arguments.get("include_glob"),
             "max_results": int(arguments.get("max_results") or 50),
             "context_lines": int(arguments.get("context_lines") or 2),
         }
     if tool_name == "get_file_info":
-        return {"path": str(arguments.get("path") or ".")}
+        return {"path": _clean_tool_path(str(arguments.get("path") or "."))}
     if tool_name == "write_file":
         return {
-            "path": str(arguments.get("path") or "."),
+            "path": _clean_tool_path(str(arguments.get("path") or ".")),
             "content": str(arguments.get("content") or ""),
             "overwrite": bool(arguments.get("overwrite", False)),
         }
@@ -613,9 +613,15 @@ def _extract_project_name(text: str) -> str:
 def _extract_path(text: str) -> str:
     quoted = _extract_quoted_text(text)
     if quoted and ("/" in quoted or "\\" in quoted or "." in quoted):
-        return quoted
+        return _clean_tool_path(quoted)
     match = re.search(r"([A-Za-z]:[\\/][^\s，。；;]+|(?:[\w.\-\u4e00-\u9fff]+[\\/])+[^\s，。；;]+|[\w.\-\u4e00-\u9fff]+\.[A-Za-z0-9]+)", text)
-    return match.group(1) if match else ""
+    return _clean_tool_path(match.group(1)) if match else ""
+
+
+def _clean_tool_path(path: str) -> str:
+    """清理路径两端常见的 Markdown/中文标点包裹符。"""
+
+    return path.strip().replace("`", "").strip(" \t\r\n").rstrip("）)。；;，,。")
 
 
 def _extract_quoted_text(text: str) -> str:

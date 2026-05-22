@@ -3,15 +3,19 @@ import type { RefObject } from "react";
 
 import { Button, EmptyState } from "../../shared/ui";
 import { MarkdownMessage } from "./MarkdownMessage";
-import type { DraftAssistantMessage } from "./types";
+import type { ChatThought, DraftAssistantMessage } from "./types";
 
 interface MessageListProps {
   endRef: RefObject<HTMLDivElement | null>;
   messages: DraftAssistantMessage[];
   onOpenGraph: (message: DraftAssistantMessage) => void;
+  thoughts?: ChatThought[];
 }
 
-export function MessageList({ endRef, messages, onOpenGraph }: MessageListProps) {
+export function MessageList({ endRef, messages, onOpenGraph, thoughts = [] }: MessageListProps) {
+  const activeThought = thoughts[thoughts.length - 1];
+  const collapsedThoughts = thoughts.slice(0, -1);
+
   return (
     <div className="chat-message-list">
       {messages.length === 0 ? (
@@ -38,6 +42,20 @@ export function MessageList({ endRef, messages, onOpenGraph }: MessageListProps)
           </div>
         </article>
       ))}
+      {activeThought ? (
+        <div className="chat-thought-stack">
+          {collapsedThoughts.map((thought) => (
+            <details className="chat-thought collapsed" key={thought.id}>
+              <summary>{thought.title}</summary>
+              <p>{thought.summary}</p>
+            </details>
+          ))}
+          <div className="chat-thought active">
+            <span>{activeThought.title}</span>
+            <p>{activeThought.summary}</p>
+          </div>
+        </div>
+      ) : null}
       <div ref={endRef} />
     </div>
   );

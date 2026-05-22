@@ -15,13 +15,14 @@ class ContextBudget:
       core_memory_tokens: L4 核心长期记忆预算，数量少但优先级最高。
       retrieved_memory_tokens: L3 RAG 检索记忆预算，通常最占空间。
       summary_tokens: L2 对话摘要预算，用于承接较早上下文。
-      recent_message_tokens: L1 近期对话窗口预算。
+      recent_message_tokens: L1+L0 当前对话窗口预算。
       weak_retrieval_max_chunks: weak 检索结果最多放入多少条，避免弱相关内容污染回答。
     """
 
     core_memory_tokens: int = 300
     retrieved_memory_tokens: int = 1200
     summary_tokens: int = 500
+    conversation_window_tokens: int = 1200
     recent_message_tokens: int = 1000
     weak_retrieval_max_chunks: int = 3
 
@@ -105,8 +106,8 @@ def build_memory_chat_prompt_context(
     """构建 memory_chat_graph 的金字塔上下文。
 
     参数：
-      user_message: L0 当前用户输入。
-      recent_messages: L1 近期对话消息，通常来自 chatmessage 表。
+      user_message: 当前用户输入，会和近期消息合并成 L1+L0 当前对话窗口。
+      recent_messages: 近期对话消息，通常来自 chatmessage 表。
       conversation_summary: L2 对话摘要；当前只读取已有摘要，不负责生成摘要。
       retrieved_chunks: L3 向量检索命中的 note chunk。
       needs_retrieval: 本轮是否计划查询个人知识库。
@@ -125,8 +126,11 @@ def build_memory_chat_prompt_context(
             selected_budget,
         ),
         build_summary_layer(conversation_summary, selected_budget),
-        build_recent_messages_layer(recent_messages, selected_budget),
-        build_current_input_layer(user_message),
+        build_current_conversation_window_layer(
+            recent_messages,
+            user_message,
+            selected_budget,
+        ),
     ]
     return PyramidPromptContext(layers=layers)
 
@@ -257,6 +261,48 @@ def build_recent_messages_layer(
         budget_tokens=budget.recent_message_tokens,
         used_tokens=count_tokens(content),
         note="最贴近当前会话状态；按 token 预算保留最近消息。",
+    )
+
+
+def build_current_conversation_window_layer(
+    recent_messages: list[dict[str, Any]],
+    user_message: str,
+    budget: ContextBudget,
+) -> ContextLayer:
+    """构建 L1+L0 当前对话窗口层。
+
+    这一层把近期消息和当前用户输入合并成一段连续对话，让 LLM 把它理解为
+    “正在发生的一次对话”，而不是两个割裂的信息块。当前用户输入永远保留在最后；
+    近期消息按预算从近到远保留。
+    """
+
+    current_line = _format_message({"role": "user(current)", "content": user_message})
+    current_tokens = count_tokens(current_line)
+    recent_budget = max(budget.conversation_window_tokens - current_tokens, 0)
+    selected: list[str] = []
+    used_tokens = 0
+    for message in reversed(recent_messages):
+        line = _format_message(message)
+        line_tokens = _message_token_count(message, line)
+        if recent_budget <= 0:
+            break
+        if not selected and line_tokens > recent_budget:
+            selected.append(_truncate_text_to_budget(line, recent_budget))
+            break
+        if selected and used_tokens + line_tokens > recent_budget:
+            break
+        selected.append(line)
+        used_tokens += line_tokens
+
+    lines = [*reversed(selected), current_line]
+    content = "\n".join(line for line in lines if line.strip())
+    return ContextLayer(
+        level=1,
+        name="当前对话窗口",
+        content=content,
+        budget_tokens=budget.conversation_window_tokens,
+        used_tokens=count_tokens(content),
+        note="L1 近期消息和 L0 当前输入合并后的连续对话；工具规划和最终回答都应优先理解这一层。",
     )
 
 

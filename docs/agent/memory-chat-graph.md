@@ -18,16 +18,26 @@ flowchart TD
     Dispatch --> L2[build_l2_summary]
     Dispatch --> L1[build_l1_recent_messages]
     Dispatch --> L0[build_l0_current_input]
-    Dispatch --> LocalOperator[build_local_operator_context]
+    Dispatch --> Window[build_current_conversation_window]
     L4 --> Merge[merge_prompt_context]
     L3 --> Merge
     L2 --> Merge
     L1 --> Merge
     L0 --> Merge
-    LocalOperator --> Merge
-    Merge --> RouteAnswer{route_answer_mode}
-    RouteAnswer -->|text| Generate[generate_answer]
-    RouteAnswer -->|elf_bubble| BubbleGenerate[generate_elf_bubble_answer]
+    Window --> Merge
+    Merge --> AgentThink[agent_think]
+    AgentThink --> Route{下一步}
+    Route -->|调用工具| SelectTool[select_tool]
+    SelectTool --> Policy[check_tool_policy]
+    Policy --> PolicyRoute{策略结果}
+    PolicyRoute -->|read| RunRead[run_read_tool]
+    PolicyRoute -->|write| RunWrite[run_write_tool]
+    PolicyRoute -->|block| Observe[observe_tool_result]
+    RunRead --> Observe
+    RunWrite --> Observe
+    Observe --> AgentThink
+    Route -->|text| Generate[generate_answer]
+    Route -->|elf_bubble| BubbleGenerate[generate_elf_bubble_answer]
     Generate --> Persist[persist_messages]
     BubbleGenerate --> Persist
     Persist --> MaybeSummary[enqueue summary job if needed]
@@ -36,10 +46,11 @@ flowchart TD
     MaybeSummary -. async job .-> MemoryGraph[[conversation_memory_graph]]
 
     Load -. checkpoint .-> CP1[(checkpoint)]
-    Dispatch -. Send .-> Workers[(L0-L4 + Local Operator workers)]
+    Dispatch -. Send .-> Workers[(context workers)]
     Merge -. checkpoint .-> CP2[(checkpoint)]
-    Generate -. checkpoint .-> CP3[(checkpoint)]
-    Persist -. checkpoint .-> CP4[(checkpoint)]
+    AgentThink -. checkpoint .-> CP3[(checkpoint)]
+    Generate -. checkpoint .-> CP4[(checkpoint)]
+    Persist -. checkpoint .-> CP5[(checkpoint)]
 ```
 
 ## 节点职责
@@ -52,9 +63,8 @@ load_turn_state
   中排除这两条本轮草稿，避免当前输入被重复放入上下文。
 
 dispatch_context_workers
-  使用 LangGraph Send 分发 L0-L4 五个上下文 worker 和 Local Operator worker。
+  使用 LangGraph Send 分发上下文 worker。
   每个 worker 独立生成一层 context_l*_layer。
-  Local Operator worker 独立生成 local_operator_context。
 
 build_l4_core_memory
   读取 longtermmemory 中 active 且 level=4 的核心长期记忆。
@@ -67,27 +77,49 @@ build_l2_summary
   读取 conversation.summary 构建对话摘要层。
 
 build_l1_recent_messages
-  按 token budget 裁剪近期消息窗口。
+  按 token budget 裁剪近期消息窗口。该层主要用于调试和后续状态树，不再单独喂给回答模型。
 
 build_l0_current_input
-  构建当前用户输入层。
+  构建当前用户输入层。该层主要用于调试和节点排查，不再单独喂给回答模型。
 
-build_local_operator_context
-  本地工具上下文 worker。
-  该 worker 内部调用 Local Operator Graph。普通聊天会被子图 plan_tool_use
-  快速判定为不需要工具；当用户明确要求读取、列目录、搜索文件、搜索内容或写入文件时，
-  子图会进入对应的 read/write 工具执行链路。
-  当用户表达比较自然、规则不确定但像本地操作时，子图会调用 qwen-turbo planner
-  做结构化判断，再决定是否进入工具链路。
-  工具结果会整理为 local_operator_context。
+build_current_conversation_window
+  把 L1 近期消息和 L0 当前输入合并成一段连续对话：
+  `assistant/user/.../user(current)`。
+  这是 agent_think 和最终回答消费的底层对话上下文，避免模型把上一轮 assistant 的
+  路径、正文、计划和当前用户确认割裂开。
 
 merge_prompt_context
-  按 L4 -> L0 顺序合并金字塔 worker 结果，并在末尾追加 local_operator_context。
+  按 L4 -> L3 -> L2 -> 当前对话窗口顺序合并上下文。
   输出最终 prompt_context。
 
-route_answer_mode
-  根据 `answer_mode` 选择回答生成分支。
-  `text` 用于 AiMemo 内置普通聊天；`elf_bubble` 用于桌面精灵外置聊天。
+agent_think
+  主对话 agent 循环的决策节点。它基于 prompt_context、已有工具观察结果、
+  当前用户目标和 tool_budget，决定下一步是调用本地工具还是生成最终回答。
+  普通聊天会直接进入最终回答；明确本地文件 read/write 请求会进入工具循环。
+  每次决策都会追加一条 turn_messages，记录本轮 agent 的可恢复执行轨迹。
+  当前版本已经把工具决策收敛到主 agent loop：agent_think 会优先处理跨轮写入确认、
+  明确规则快路径，再让 LLM 工具规划器基于 prompt_context、turn_messages 和
+  tool_observations 输出结构化 tool action。Local Operator planner 不再孤立地只看
+  当前一句话猜工具参数。
+  如果还有 planned_tool_actions 未执行完，agent_think 会继续工具队列，而不会因为
+  已经看到一次 observation 就提前进入最终回答。
+
+select_tool
+  从 agent_think 规划出的工具队列中取出下一次工具调用。
+
+check_tool_policy
+  工具执行前的统一策略检查。第一版 read/write 仍复用 Local Operator 的工具内部
+  workspace、敏感文件、read-before-write 和审计保护。后续 write/exec 审批会在这里接
+  LangGraph `interrupt()`。
+
+run_read_tool / run_write_tool
+  通过 LangChain `@tool.invoke()` 执行本地工具，并写入 agent_operations 审计。
+  工具返回会追加为本轮 tool message，最终回答必须基于这些真实 observation。
+
+observe_tool_result
+  把工具结果整理为 tool_observation_context，追加进 prompt_context，然后回到 agent_think。
+  这样模型会基于真实工具结果继续判断或最终回答，而不是凭空声称已经完成。
+  同时追加本轮观察消息，形成 user -> agent_think -> tool -> observe 的单轮轨迹。
 
 generate_answer
   调用 qwen3.5-plus 生成回答。
@@ -175,10 +207,20 @@ retrieval_grade_reason
 context_l4_layer
 context_l3_layer
 context_l2_layer
+context_conversation_window_layer
 context_l1_layer
 context_l0_layer
-local_operator_context
 prompt_context
+turn_messages
+tool_budget
+agent_decision
+planned_tool_actions
+pending_tool_action
+tool_policy_result
+tool_observations
+tool_observation_context
+thought_events
+agent_loop_count
 answer_mode
 assistant_answer
 elf_bubble_answer_parts
@@ -189,6 +231,31 @@ error
 ```
 
 注意：LangGraph 内部保留 `checkpoint_id` 这个 channel 名，所以 graph state 中使用 `graph_checkpoint_id`，业务表和 API 响应仍然叫 `checkpoint_id`。
+
+## 本轮消息流
+
+跨轮历史不直接依赖 LangGraph list reducer，而是每轮从数据库、摘要、长期记忆和
+RAG 重新构建金字塔上下文。单轮 graph 内部则使用 `turn_messages` 记录执行轨迹：
+
+```text
+load_turn_state
+  -> turn_messages = [user(current)]
+
+agent_think
+  -> append assistant decision summary
+
+run_read_tool / run_write_tool
+  -> append tool observation
+
+observe_tool_result
+  -> append assistant observation summary
+
+generate_answer / generate_elf_bubble_answer
+  -> model messages = system_prompt + prompt_context + turn_messages
+```
+
+这样既能让一轮内部的工具循环天然看到前面发生了什么，也避免同一个
+`conversation:{id}` checkpoint thread 在跨轮执行时重复累加历史消息。
 
 ## 恢复语义
 
@@ -282,6 +349,46 @@ debug_payload.nodes.{node_name}.status
 debug_payload.nodes.{node_name}.started_ms
 debug_payload.nodes.{node_name}.completed_ms
 debug_payload.nodes.{node_name}.duration_ms
+debug_payload.nodes.{node_name}.state
+```
+
+`debug_payload.nodes.{node_name}.state` 保存该节点完成后的累计 graph state 快照。
+它用于前端点击普通节点查看运行时 state。该快照来自 LangGraph updates 事件，与
+checkpoint 中的执行状态语义一致，但会做长度裁剪，避免 prompt_context、检索 chunk
+或 turn_messages 过大导致调试 payload 膨胀。
+
+注意：第一版节点 state 面板读取的是 `ChatTurn.debug_payload` 中的快照，而不是直接
+查询 checkpoint SQLite。后续如果要做“对话状态树”或“任意 checkpoint 回溯”，再扩展
+为按 checkpoint_id 读取 LangGraph 原生 state history。
+
+当前已经新增第一版原生 checkpoint history API：
+
+```text
+GET /api/conversations/{conversation_id}/turns/{turn_id}/state-history
+```
+
+该接口不直接解析 SQLite 表，而是用同一个 `memory_chat_graph` + 同一个 SQLite
+checkpointer 编译 graph，然后调用 LangGraph `get_state_history()`。返回内容包含：
+
+```text
+checkpoint_id
+parent_checkpoint_id
+created_at
+next
+tasks
+interrupts
+metadata
+values
+```
+
+节点 state 快照和 checkpoint history 的定位不同：
+
+```text
+debug_payload.nodes.{node}.state
+  轻量、按节点完成事件保存，适合快速看某个节点结束后的累计 state。
+
+state-history
+  LangGraph 原生 checkpoint 时间线，适合排查恢复、回溯、未来对话状态树和 update_state 分支。
 ```
 
 L3 worker 会额外写入：
@@ -371,7 +478,10 @@ poor / none
 
 ## 金字塔上下文构建
 
-当前实现已经把回答上下文从 `generate_answer` 中拆出，并使用 LangGraph `Send` worker 并行构建 L0-L4 五层上下文，同时并行运行 Local Operator worker。
+当前实现已经把回答上下文从 `generate_answer` 中拆出，并使用 LangGraph `Send`
+worker 并行构建 L0-L4 五层上下文。本地 read/write 工具不再作为上下文 worker
+提前执行，而是迁入 `agent_think -> tool -> observe -> agent_think` 主循环。
+这能避免模型在工具执行后无法继续决策，也能减少“说自己写了但其实没继续调用工具”的问题。
 
 ```mermaid
 flowchart TD
@@ -380,45 +490,36 @@ flowchart TD
     Dispatch --> L2[L2 worker<br/>对话摘要]
     Dispatch --> L1[L1 worker<br/>近期对话窗口]
     Dispatch --> L0[L0 worker<br/>当前输入]
-    Dispatch --> LocalOperator[Local Operator worker<br/>local tool context]
+    Dispatch --> Window[L1+L0 worker<br/>当前对话窗口]
 
     L4 --> Merge[merge_prompt_context]
     L3 --> Merge
     L2 --> Merge
     L1 --> Merge
     L0 --> Merge
-    LocalOperator --> Merge
+    Window --> Merge
 
     Merge --> Prompt[prompt_context]
-    Prompt --> RouteAnswer{route_answer_mode}
-    RouteAnswer -->|text| Generate[generate_answer]
-    RouteAnswer -->|elf_bubble| BubbleGenerate[generate_elf_bubble_answer]
-```
-
-Local Operator worker 内部流程：
-
-```mermaid
-flowchart TD
-    LocalStart([Local Operator START]) --> Plan[plan_tool_use]
-    Plan --> NeedTool{需要调用本地工具?}
-    NeedTool -->|no| Finish[finish_without_tool]
-    NeedTool -->|yes| Select[select_tool]
-    Select --> ToolType{工具类型}
-    ToolType -->|read| RunRead[run_read_tool]
-    ToolType -->|write| RunWrite[run_write_tool]
-    RunRead --> Observe[observe_tool_result]
+    Prompt --> AgentThink[agent_think]
+    AgentThink --> Route{下一步}
+    Route -->|tool| Select[select_tool]
+    Select --> Policy[check_tool_policy]
+    Policy --> ToolRoute{工具类型}
+    ToolRoute -->|read| RunRead[run_read_tool]
+    ToolRoute -->|write| RunWrite[run_write_tool]
+    ToolRoute -->|block| Observe[observe_tool_result]
+    RunRead --> Observe
     RunWrite --> Observe
-    Observe --> More{还需要继续调用工具?}
-    More -->|yes| Select
-    More -->|no| Summarize[summarize_findings]
-    Finish --> LocalEnd([Local Operator END])
-    Summarize --> LocalEnd
+    Observe --> AgentThink
+    Route -->|text| Generate[generate_answer]
+    Route -->|elf_bubble| BubbleGenerate[generate_elf_bubble_answer]
 ```
 
-这里的“选择边进入工具子图”发生在 Local Operator Graph 内部，而不是 Memory Chat Graph
-主干上直接串行等待工具。这样 L0/L1/L2/L3/L4 仍然可以和本地工具判断并行执行。
+这里的工具循环发生在 Memory Chat Graph 主干上，而不是隐藏在回答前的上下文构建阶段。
+L0/L1/L2/L3/L4 和 L1+L0 当前对话窗口仍然并行构建；工具是否调用由合并上下文后的 agent 决定。
+`merge_prompt_context` 真正注入模型的是 L4、L3、L2、当前对话窗口；单独 L1/L0 主要用于调试。
 
-当前 Local Operator 已开放第一批 read/write 工具：
+当前主循环已开放第一批 read/write 工具：
 
 ```text
 list_dir
@@ -440,24 +541,47 @@ write_file
   -> select_tool
   -> run_read_tool
   -> 写入 agent_operations 审计表
-  -> summarize_findings
-  -> local_operator_context
+  -> observe_tool_result
+  -> agent_think
+  -> generate_answer / generate_elf_bubble_answer
 
 明确本地写入请求
   -> 规则快路径或 planner 生成 write_file action
   -> select_tool
   -> run_write_tool
   -> 写入 agent_operations 审计表
-  -> summarize_findings
-  -> local_operator_context
+  -> observe_tool_result
+  -> agent_think
+  -> generate_answer / generate_elf_bubble_answer
 
 模糊本地操作候选
   -> qwen-turbo planner 返回结构化 JSON
   -> 低置信度或不需要本地读取时跳过
   -> 高置信度工具 action 进入同一条工具链路
+
+多轮确认写入
+  -> 如果上一轮 assistant 已经给出目标路径和正文
+  -> 用户下一轮说“直接保存/写到具体文件”
+  -> agent_think 从 recent_messages 补齐 path/content
+  -> 进入 write_file，而不是口头声称已经保存
 ```
 
-所有路径都会被限制在授权 workspace 内，`.env`、密钥、数据库文件等敏感文件默认拒绝读取。
+所有路径仍会进入 `LocalOperatorPolicy` 和工具层校验。读取默认开放本机固定盘符和用户
+Home，但 `.env`、密钥、数据库文件、设备路径、UNC 网络路径和超大文件等敏感目标默认拒绝。
+写入会复用 read-before-write、路径策略和审计记录；高风险写入审批后续接 LangGraph
+`interrupt()`。
+
+最终回答必须以工具 observation 为事实来源：
+
+```text
+用户要求写入/保存文件
+  + 本轮没有成功的 write_file observation
+  -> generate_answer 必须说明尚未写入，不能说“已经保存/写入完成”。
+
+用户要求写入/保存文件
+  + 本轮存在成功的 write_file observation
+  -> generate_answer 可以引用工具返回的真实 path、bytes_written、hash 等信息。
+```
 
 L3 worker 内部流程：
 
@@ -503,7 +627,6 @@ context_l3_layer
 context_l2_layer
 context_l1_layer
 context_l0_layer
-local_operator_context
 ```
 
 这里没有使用 `context_layers` 列表 reducer。原因是聊天 graph 使用同一个 `conversation:{id}` thread 跨轮执行，列表 reducer 容易把上一轮 layer 追加进本轮。独立字段更明确，也更利于 checkpoint 调试。
@@ -576,17 +699,20 @@ content_hash 不重复
 - 不做多 query rewrite。
 - 不做 LLM 检索结果评分。
 - 不做多源检索 worker 和 LLM rerank worker。
-- Local Operator 当前只做 read-only；planner 已支持规则快路径 + qwen-turbo 兜底，
-  但 write/exec 尚未接入。
+- 主对话工具循环已接入 read/write；exec 尚未接入。
+- 当前工具循环支持继续执行已规划工具队列，并允许 observation 回到 `agent_think` 后再次
+  规划下一步。后续要进一步增强“读 -> 判断 -> 写 -> 再读验证 -> 回答”的多步质量，
+  可以把 agent_think 的结构化工具决策升级为更严格的 schema / ToolNode。
+- write/exec 的用户审批还未接 LangGraph `interrupt()`；目前高风险审批点只在文档中冻结。
 - 不做消息编辑和状态树 UI。
+- `thought_snapshot` 展示的是可审计过程摘要，不是模型原始 chain-of-thought。
 - SSE 使用 LangGraph `stream_mode=["updates", "messages"]`：
   - `updates` 表示节点已经完成，映射为 succeeded 节点状态事件。
   - `messages` 中仅 `generate_answer` 节点的 token 映射为用户可见回答。
   - `generate_elf_bubble_answer` 节点的 token 映射为 `bubble_delta`，最终结构化结果放在 `done.bubbles`。
   - 其他 LLM 节点 token 视为 internal_token，默认不暴露给前端。
 - `dispatch_context_workers` 使用 LangGraph `Send` worker 模式。代码中显式给
-  `add_conditional_edges` 传入 L0-L4 和 Local Operator worker 目标列表，让 LangGraph Mermaid 能画出
-  真实的并行扇出结构。
+  `add_conditional_edges` 传入上下文 worker 目标列表，让 LangGraph Mermaid 能画出真实的并行扇出结构。
 
 ## LangSmith tracing
 

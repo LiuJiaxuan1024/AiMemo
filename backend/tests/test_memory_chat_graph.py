@@ -5,7 +5,11 @@ from sqlmodel import select
 from app.agent.graphs.memory_chat.graph import build_memory_chat_graph, run_memory_chat_graph
 from app.agent.graphs.memory_chat.nodes import RetrievalPlan
 from app.agent.graphs.memory_chat.nodes import build_memory_chat_answer_system_prompt
+from app.agent.graphs.memory_chat.nodes import build_agent_think_node
 from app.agent.graphs.memory_chat.nodes import default_retrieval_planner
+from app.agent.graphs.memory_chat.nodes import _build_model_messages
+from app.agent.graphs.memory_chat.nodes import _llm_plan_agent_tool_action
+from app.agent.graphs.memory_chat.nodes import _plan_agent_tool_action
 from app.agent.graphs.memory_chat.nodes import _parse_elf_bubble_parts
 from app.models.chat_message import ChatMessage
 from app.models.long_term_memory import LongTermMemory
@@ -13,6 +17,7 @@ from app.rag.hashing import content_hash
 from app.rag.search import NoteSearchResult
 from app.schemas.conversation import ConversationCreate
 from app.services.conversation_service import create_conversation
+from app.services.chat_turn_service import get_chat_turn_state_history
 
 
 def test_memory_chat_graph_direct_answer_persists_messages(
@@ -45,7 +50,9 @@ def test_memory_chat_graph_direct_answer_persists_messages(
     assert result["context_l2_layer"]["level"] == 2
     assert result["context_l1_layer"]["level"] == 1
     assert result["context_l0_layer"]["level"] == 0
-    assert "L0 当前用户输入" in result["prompt_context"]
+    assert result["context_conversation_window_layer"]["level"] == 1
+    assert "L1 当前对话窗口" in result["prompt_context"]
+    assert "user(current): 1+1 等于几？" in result["prompt_context"]
     assert "本轮未查询个人知识库" in result["prompt_context"]
     assert [message.role for message in messages] == ["user", "assistant"]
     assert messages[0].content == "1+1 等于几？"
@@ -55,6 +62,52 @@ def test_memory_chat_graph_direct_answer_persists_messages(
     assert messages[0].checkpoint_id == messages[1].checkpoint_id
 
 
+def test_chat_turn_state_history_reads_langgraph_checkpoints(
+    session,
+    session_factory,
+    tmp_path: Path,
+):
+    """Graph 调试接口应能读取 LangGraph 原生 checkpoint state history。"""
+
+    conversation = create_conversation(session, ConversationCreate(title="checkpoint history"))
+    checkpoint_path = tmp_path / "checkpoints.db"
+
+    def fake_answer(user_message, recent_messages, retrieved_chunks, needs_retrieval, retrieval_grade):
+        return "你好，checkpoint。"
+
+    result = run_memory_chat_graph(
+        conversation_id=conversation.id,
+        user_message="测试 checkpoint history",
+        session_factory=session_factory,
+        checkpoint_path=str(checkpoint_path),
+        answer_generator=fake_answer,
+    )
+
+    from app.models.chat_turn import ChatTurn
+
+    turn = ChatTurn(
+        conversation_id=conversation.id,
+        thread_id=f"conversation:{conversation.id}",
+        checkpoint_id=result["graph_checkpoint_id"],
+    )
+    session.add(turn)
+    session.commit()
+    session.refresh(turn)
+
+    history = get_chat_turn_state_history(
+        session,
+        conversation_id=conversation.id,
+        turn_id=turn.id or 0,
+        checkpoint_path=str(checkpoint_path),
+        limit=20,
+    )
+
+    assert history.thread_id == f"conversation:{conversation.id}"
+    assert len(history.states) > 0
+    assert history.states[0].checkpoint_id
+    assert any("user_message" in snapshot.values for snapshot in history.states)
+
+
 def test_memory_chat_graph_main_flow_is_flat_context_worker_graph(session_factory):
     graph = build_memory_chat_graph(session_factory=session_factory)
     mermaid = graph.compile().get_graph().draw_mermaid()
@@ -62,12 +115,260 @@ def test_memory_chat_graph_main_flow_is_flat_context_worker_graph(session_factor
     assert "load_turn_state" in mermaid
     assert "dispatch_context_workers" in mermaid
     assert "build_l3_retrieved_memory" in mermaid
-    assert "build_local_operator_context" in mermaid
+    assert "build_current_conversation_window" in mermaid
+    assert "agent_think" in mermaid
+    assert "select_tool" in mermaid
+    assert "check_tool_policy" in mermaid
+    assert "run_read_tool" in mermaid
+    assert "run_write_tool" in mermaid
+    assert "observe_tool_result" in mermaid
+    assert "build_local_operator_context" not in mermaid
     assert "merge_prompt_context" in mermaid
     assert "generate_elf_bubble_answer" in mermaid
     assert "plan_retrieval" not in mermaid
     assert "retrieve_notes" not in mermaid
     assert "grade_retrieval" not in mermaid
+
+
+def test_contextual_write_confirmation_uses_previous_assistant_draft():
+    """用户确认“直接保存”时，应从上一轮 assistant 中补齐路径和正文。"""
+
+    action = _plan_agent_tool_action(
+        {
+            "user_message": "我希望你直接保存到一个具体的文件",
+            "recent_messages": [
+                {
+                    "id": 1,
+                    "role": "assistant",
+                    "content": (
+                        "看看你一边推进 Ai 记，一边解决 Zenoh 迁移难题，真的很专注。\n\n"
+                        "这段心里话已经准备好写入该目录了。你希望我直接把它保存成一个具体的文件"
+                        "（比如 E:\\test\\message_to_jiaxuan.txt），还是你想先看看完整正文？"
+                    ),
+                    "token_count": 80,
+                }
+            ],
+        }
+    )
+
+    assert action is not None
+    assert action["tool_name"] == "write_file"
+    assert action["arguments"]["path"] == "E:\\test\\message_to_jiaxuan.txt"
+    assert "Ai 记" in action["arguments"]["content"]
+    assert "保存成一个具体的文件" not in action["arguments"]["content"]
+
+
+def test_contextual_write_confirmation_allows_short_real_draft():
+    """短正文也可以写入，不能因为字数少就退回口头回答。"""
+
+    action = _plan_agent_tool_action(
+        {
+            "user_message": "我希望你直接保存到一个具体的文件",
+            "recent_messages": [
+                {
+                    "id": 1,
+                    "role": "assistant",
+                    "content": (
+                        "家炫，你很专注，也很有创造力。\n\n"
+                        "这段心里话已经准备好写入该目录了。你希望我直接把它保存成一个具体的文件"
+                        "（比如 E:\\test\\message_to_jiaxuan.txt），还是你想先看看完整正文？"
+                    ),
+                    "token_count": 50,
+                }
+            ],
+        }
+    )
+
+    assert action is not None
+    assert action["tool_name"] == "write_file"
+    assert action["arguments"]["content"] == "家炫，你很专注，也很有创造力。"
+
+
+def test_contextual_write_confirmation_can_choose_filename_from_previous_directory():
+    """用户让 agent 自己取文件名时，应沿用上一轮目录和正文执行写入。"""
+
+    action = _plan_agent_tool_action(
+        {
+            "user_message": "你自己取一个文件名吧",
+            "recent_messages": [
+                {
+                    "id": 1,
+                    "role": "assistant",
+                    "content": (
+                        "我确认 E:/test/ 这个目录可以作为保存位置。\n\n"
+                        "家炫，我想对你说：你对 Ai 记的推进非常认真，也很愿意把复杂系统拆开想清楚。"
+                        "你不是只想做一个能跑的工具，而是在一点点塑造一个有温度的长期伙伴。\n\n"
+                        "如果你愿意，我可以帮你自己取一个文件名并写进去。"
+                    ),
+                    "token_count": 90,
+                }
+            ],
+        }
+    )
+
+    assert action is not None
+    assert action["tool_name"] == "write_file"
+    assert action["arguments"]["path"] == "E:/test/memo_elf_letter.md"
+    assert "我想对你说" in action["arguments"]["content"]
+    assert "取一个文件名" not in action["arguments"]["content"]
+
+
+def test_new_html_write_request_does_not_reuse_contextual_markdown_filename():
+    """新的 HTML 写入请求不能被“随便文件名”误判成上一轮 Markdown 草稿确认。"""
+
+    action = _plan_agent_tool_action(
+        {
+            "user_message": "在E盘的test目录下面，写一个好看的html网页给我，随便取一个文件名即可",
+            "recent_messages": [
+                {
+                    "id": 1,
+                    "role": "assistant",
+                    "content": (
+                        "我确认 E:/test/ 这个目录可以作为保存位置。\n\n"
+                        "家炫，我想对你说：这是上一轮准备写入 Markdown 的正文。"
+                    ),
+                    "token_count": 60,
+                }
+            ],
+        }
+    )
+
+    assert action is None or not str(action.get("arguments", {}).get("path", "")).endswith(".md")
+
+
+def test_contextual_default_filename_uses_html_extension_when_context_mentions_html():
+    """确实需要上下文补文件名时，HTML 语义应补 .html 而不是 .md。"""
+
+    action = _plan_agent_tool_action(
+        {
+            "user_message": "你自己取一个文件名吧",
+            "recent_messages": [
+                {
+                    "id": 1,
+                    "role": "assistant",
+                    "content": (
+                        "我确认 E:/test/ 这个目录可以作为保存位置。\n\n"
+                        "<!doctype html><html><body><h1>Memo</h1></body></html>"
+                    ),
+                    "token_count": 60,
+                }
+            ],
+        }
+    )
+
+    assert action is not None
+    assert action["arguments"]["path"] == "E:/test/index.html"
+
+
+def test_turn_messages_are_appended_to_final_model_messages():
+    """最终模型输入应同时包含金字塔上下文和本轮 graph 消息流。"""
+
+    messages = _build_model_messages(
+        "system",
+        "pyramid context",
+        [
+            {"role": "user", "content": "帮我写文件", "name": "current_user_input", "tool_call_id": None},
+            {"role": "assistant", "content": "需要调用 write_file。", "name": "agent_think", "tool_call_id": None},
+            {"role": "tool", "content": '{"ok":true}', "name": "write_file", "tool_call_id": "tool-1-write_file"},
+        ],
+    )
+
+    assert [message.type for message in messages] == ["system", "human", "human", "ai", "human"]
+    assert messages[1].content == "pyramid context"
+    assert messages[-1].content == '[tool:write_file]\n{"ok":true}'
+
+
+def test_agent_think_continues_existing_tool_queue_after_observation():
+    """工具队列未执行完时，agent_think 不能因为已有 observation 就提前最终回答。"""
+
+    node = build_agent_think_node()
+    state = node(
+        {
+            "agent_loop_count": 1,
+            "planned_tool_actions": [
+                {
+                    "tool_call_id": "tool-2-write_file",
+                    "tool_name": "write_file",
+                    "arguments": {
+                        "path": "E:/test/memo_elf_letter.md",
+                        "content": "家炫，我想对你说：继续认真做下去。",
+                        "overwrite": False,
+                    },
+                    "reason": "创建用户要求的新文件。",
+                }
+            ],
+            "tool_observations": [
+                {
+                    "tool_call_id": "tool-1-get_file_info",
+                    "tool_name": "get_file_info",
+                    "arguments": {"path": "E:/test/memo_elf_letter.md"},
+                    "ok": False,
+                    "error_code": "PATH_NOT_FOUND",
+                    "message": "目标文件不存在。",
+                }
+            ],
+            "tool_budget": 4,
+            "turn_messages": [],
+            "thought_events": [],
+        }
+    )
+
+    assert state["agent_decision"]["type"] == "tool_call"
+    assert state["planned_tool_actions"][0]["tool_name"] == "write_file"
+
+
+def test_agent_tool_planner_cleans_markdown_backticks_from_path(monkeypatch):
+    """LLM planner 返回 Markdown 反引号包裹路径时，不能把反引号写进真实路径。"""
+
+    class FakeModel:
+        def invoke(self, messages):
+            class Response:
+                content = (
+                    '{"needs_tool":true,"tool_name":"write_file",'
+                    '"arguments":{"path":"E:/test`/memo.md","content":"真实正文","overwrite":false},'
+                    '"confidence":0.9,"reason":"写入文件"}'
+                )
+
+            return Response()
+
+    monkeypatch.setattr("app.agent.graphs.memory_chat.nodes.get_planner_chat_model", lambda: FakeModel())
+
+    action = _llm_plan_agent_tool_action(
+        {
+            "user_message": "写入文件",
+            "prompt_context": "",
+            "turn_messages": [],
+            "tool_observations": [],
+        }
+    )
+
+    assert action is not None
+    assert action["arguments"]["path"] == "E:/test/memo.md"
+
+
+def test_contextual_path_clean_removes_trailing_backtick():
+    """上下文抽取目录时应移除尾部 Markdown 反引号。"""
+
+    action = _plan_agent_tool_action(
+        {
+            "user_message": "你自己取一个文件名吧",
+            "recent_messages": [
+                {
+                    "id": 1,
+                    "role": "assistant",
+                    "content": (
+                        "我确认 `E:/test` 目录可以作为保存位置。\n\n"
+                        "家炫，我想对你说：这次路径不要带反引号。"
+                    ),
+                    "token_count": 30,
+                }
+            ],
+        }
+    )
+
+    assert action is not None
+    assert action["arguments"]["path"].startswith("E:/test/")
+    assert "`" not in action["arguments"]["path"]
 
 
 def test_memory_chat_profile_question_uses_rule_planner_fast_path():

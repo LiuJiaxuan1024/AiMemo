@@ -41,6 +41,15 @@ export interface ChatMessageWithTurn extends ChatMessage {
 
 export type DraftAssistantMessage = ChatMessageWithTurn;
 
+export interface ChatThought {
+  id: string;
+  title: string;
+  summary: string;
+  status: string;
+  related_node: string;
+  related_tool_call_id?: string | null;
+}
+
 export interface ChatResponse {
   conversation_id: number;
   thread_id: string;
@@ -87,6 +96,7 @@ export interface ChatTurnGraph {
         completed_ms?: number;
         duration_ms?: number;
         retrieval_debug?: Record<string, string | number | boolean>;
+        state?: unknown;
       }
     >;
     summary?: {
@@ -100,6 +110,25 @@ export interface ChatTurnGraph {
   error: string;
 }
 
+export interface ChatCheckpointState {
+  checkpoint_id: string | null;
+  parent_checkpoint_id: string | null;
+  created_at: string | null;
+  next: string[];
+  tasks: Array<Record<string, unknown>>;
+  interrupts: Array<Record<string, unknown>>;
+  metadata: Record<string, unknown> | null;
+  values: Record<string, unknown>;
+}
+
+export interface ChatTurnStateHistory {
+  turn_id: number;
+  conversation_id: number;
+  thread_id: string;
+  checkpoint_id: string | null;
+  states: ChatCheckpointState[];
+}
+
 export type ChatStreamEvent =
   | {
       event: "turn";
@@ -111,6 +140,20 @@ export type ChatStreamEvent =
       };
     }
   | { event: "node"; data: { node: string; node_statuses: Record<string, string> } }
+  | {
+      event: "thought_snapshot";
+      data: {
+        node: string;
+        thoughts: Array<{
+          id: string;
+          title: string;
+          summary: string;
+          status: string;
+          related_node: string;
+          related_tool_call_id?: string | null;
+        }>;
+      };
+    }
   | { event: "answer_delta"; data: { content: string } }
   | {
       event: "done";

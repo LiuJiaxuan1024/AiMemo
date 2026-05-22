@@ -69,6 +69,7 @@ LangGraph 不直接替代业务数据库。
 - [Conversation Memory Graph](./conversation-memory-graph.md)
 - [Context Pyramid](./context-pyramid.md)
 - [Local Operator Agent](./local-operator-agent.md)
+- [Memory Chat Agent 工具循环升级草案](./tool-loop-agent-upgrade.md)
 - [Memory Chat Graph 设计草案](./memory-chat-graph-design.md)
 
 ## Memory Chat Graph 当前结构
@@ -77,8 +78,8 @@ LangGraph 不直接替代业务数据库。
 load_turn_state
   -> dispatch_context_workers
   -> merge_prompt_context
-  -> route_answer_mode
-  -> generate_answer / generate_elf_bubble_answer
+  -> agent_think
+  -> tool loop / final answer
   -> persist_messages
   -> enqueue_conversation_memory_job
 ```
@@ -91,9 +92,8 @@ L1 近期消息
 L2 对话滚动摘要
 L3 检索到的笔记记忆
 L4 长期核心记忆
-Local Operator 本地 read-only 上下文
 ```
 
 其中 L3 context worker 内部负责 plan / rewrite / retrieve / grade。
-Local Operator worker 负责 read-only 本地工具上下文：明确本地读取请求走规则快路径，
-模糊本地操作候选交给 qwen-turbo planner 判断，普通聊天会快速跳过。
+Local Operator 不再作为上下文 worker 运行；read/write 工具已经迁入主对话
+`agent_think -> tool -> observe -> agent_think` 循环，工具结果会回灌给 agent 再决定是否继续行动。

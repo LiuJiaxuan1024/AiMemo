@@ -55,3 +55,26 @@ class ChatTurnGraphRead(BaseModel):
     retrieved_chunks: list[NoteSearchResult]
     debug_payload: dict
     error: str
+
+
+class ChatCheckpointStateRead(BaseModel):
+    """LangGraph 原生 checkpoint state history 中的一帧。"""
+
+    checkpoint_id: str | None
+    parent_checkpoint_id: str | None
+    created_at: str | None
+    next: list[str]
+    tasks: list[dict]
+    interrupts: list[dict]
+    metadata: dict | None
+    values: dict
+
+
+class ChatTurnStateHistoryRead(BaseModel):
+    """单轮对话关联 thread 的 checkpoint state history。"""
+
+    turn_id: int
+    conversation_id: int
+    thread_id: str
+    checkpoint_id: str | None
+    states: list[ChatCheckpointStateRead]

@@ -170,7 +170,7 @@ def stream_conversation_chat_events(
         # SQLAlchemy 默认会在 commit 后过期 ORM 对象；在 session 内转换成 schema，
         # 避免 SSE 首包在 session 关闭后访问 detached 对象。
         user_message_read = _to_chat_message_read(user_message)
-        assistant_message_read = _to_chat_message_read(assistant_message)
+        assistant_message_read = _to_chat_message_read(assistant_message, turn_id=turn_id)
         user_message_id = user_message_read.id
         assistant_message_id = assistant_message_read.id
 
@@ -280,6 +280,23 @@ def stream_conversation_chat_events(
                 # 内部 LLM token 例如 planner JSON，默认不暴露给前端。
                 # 后续如果做“调试模式”，可以在这里转成 internal_token SSE。
                 continue
+            elif event["event"] == "thought_snapshot":
+                thoughts = list(event.get("thoughts") or [])
+                debug_payload["thoughts"] = thoughts
+                with session_factory() as session:
+                    update_chat_turn_progress(
+                        session,
+                        turn_id,
+                        node_statuses=node_statuses,
+                        debug_payload=debug_payload,
+                    )
+                yield _sse(
+                    "thought_snapshot",
+                    {
+                        "node": event.get("node", ""),
+                        "thoughts": thoughts,
+                    },
+                )
             elif event["event"] == "bubble_delta":
                 # 外置精灵气泡 JSON token 不直接发给普通 Web 聊天。
                 # 专用 /api/elf/chat/stream 会使用 answer_mode=elf_bubble 并在 done 中消费最终 bubbles。
@@ -320,7 +337,6 @@ def stream_conversation_chat_events(
         final_assistant_content = str(final_state.get("assistant_answer") or assistant_content)
         debug_payload["summary"]["answer_chars"] = len(final_assistant_content)
         debug_payload["summary"]["retrieved_count"] = len(retrieved_chunks)
-        _mark_subgraph_node_statuses_from_final_state(debug_payload, final_state)
         with session_factory() as session:
             _update_streaming_assistant_message(
                 session,
@@ -360,7 +376,7 @@ def stream_conversation_chat_events(
                 retrieval_grade_reason=final_state.get("retrieval_grade_reason", ""),
                 retrieval_reason=final_state.get("retrieval_reason", ""),
                 user_message=_to_chat_message_read(user),
-                assistant_message=_to_chat_message_read(assistant),
+                assistant_message=_to_chat_message_read(assistant, turn_id=turn_id),
                 retrieved_chunks=[
                     NoteSearchResult(
                         note_id=chunk["note_id"],
@@ -465,6 +481,7 @@ def _extract_context_layers(state: dict) -> list[dict]:
         "context_l4_layer",
         "context_l3_layer",
         "context_l2_layer",
+        "context_conversation_window_layer",
         "context_l1_layer",
         "context_l0_layer",
     ]:
@@ -528,26 +545,49 @@ def _mark_node_timing(
         retrieval_debug = state.get("retrieval_debug")
         if isinstance(retrieval_debug, dict):
             node_payload["retrieval_debug"] = retrieval_debug
-    if state and node_name == "build_local_operator_context":
-        local_operator_node_statuses = state.get("local_operator_node_statuses")
-        if isinstance(local_operator_node_statuses, dict):
-            node_payload["subgraph_node_statuses"] = local_operator_node_statuses
+    if state:
+        # 保存“节点完成后的累计 state 快照”，前端点击节点时可以直接查看。
+        # 这里不直接暴露原始对象：一方面 state 可能包含较长文本，另一方面部分值
+        # 不是 JSON 原生类型。调试快照会做长度裁剪，但保留关键字段结构。
+        node_payload["state"] = _compact_debug_state(state)
 
 
-def _mark_subgraph_node_statuses_from_final_state(debug_payload: dict, final_state: dict) -> None:
-    """从最终 state 兜底写入子图节点状态。
+def _compact_debug_state(value, *, depth: int = 0):
+    """把 LangGraph state 转成适合写入 ChatTurn.debug_payload 的调试快照。
 
-    并行 worker 的 updates 事件在不同 LangGraph 版本中可能不会稳定携带完整最终 state。
-    因此 graph 完成后再从 final_state 读取一次，确保调试面板展开子图时一定能看到内部路径。
+    参数：
+      value: 任意 graph state 值。
+      depth: 当前递归深度，内部使用。
+
+    返回：
+      JSON 兼容对象。长字符串和长列表会被裁剪，避免一个 turn 的调试 payload
+      因 prompt_context、chunk 内容或 turn_messages 过大而膨胀。
     """
 
-    local_operator_node_statuses = final_state.get("local_operator_node_statuses")
-    if isinstance(local_operator_node_statuses, dict):
-        debug_payload.setdefault("nodes", {}).setdefault(
-            "build_local_operator_context",
-            {},
-        )["subgraph_node_statuses"] = local_operator_node_statuses
+    if depth >= 5:
+        return _compact_debug_scalar(value)
+    if isinstance(value, dict):
+        return {str(key): _compact_debug_state(item, depth=depth + 1) for key, item in value.items()}
+    if isinstance(value, list):
+        limit = 20
+        items = [_compact_debug_state(item, depth=depth + 1) for item in value[:limit]]
+        if len(value) > limit:
+            items.append({"__truncated__": len(value) - limit})
+        return items
+    return _compact_debug_scalar(value)
 
+
+def _compact_debug_scalar(value):
+    """规整调试快照中的标量值。"""
+
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        max_length = 4000
+        if len(value) > max_length:
+            return f"{value[:max_length]}\n...[truncated {len(value) - max_length} chars]"
+        return value
+    return str(value)
 
 def _mark_answer_token_timing(debug_payload: dict, started_at: float) -> None:
     """记录回答 token 的首包和最新 token 时间。"""

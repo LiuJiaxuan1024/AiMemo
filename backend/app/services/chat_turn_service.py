@@ -3,12 +3,14 @@ import json
 from fastapi import HTTPException, status
 from sqlmodel import Session, select
 
+from app.agent.checkpoints import get_sqlite_checkpointer
+from app.agent.graphs.memory_chat.graph import build_memory_chat_graph
 from app.agent.graphs.memory_chat.graph import get_memory_chat_graph_mermaid
-from app.agent.graphs.local_operator.graph import get_local_operator_graph_mermaid
+from app.core.config import settings
 from app.core.database import session_scope
 from app.models.chat_turn import ChatTurn
 from app.models.note import utc_now
-from app.schemas.chat import ChatTurnGraphRead
+from app.schemas.chat import ChatCheckpointStateRead, ChatTurnGraphRead, ChatTurnStateHistoryRead
 from app.schemas.search import NoteSearchResult
 
 
@@ -20,7 +22,14 @@ MEMORY_CHAT_NODE_ORDER = [
     "build_l2_summary",
     "build_l1_recent_messages",
     "build_l0_current_input",
+    "build_current_conversation_window",
     "merge_prompt_context",
+    "agent_think",
+    "select_tool",
+    "check_tool_policy",
+    "run_read_tool",
+    "run_write_tool",
+    "observe_tool_result",
     "generate_answer",
     "generate_elf_bubble_answer",
     "persist_messages",
@@ -214,6 +223,53 @@ def get_chat_turn_graph_by_turn(
     return _to_chat_turn_graph_read(turn)
 
 
+def get_chat_turn_state_history(
+    session: Session,
+    *,
+    conversation_id: int,
+    turn_id: int,
+    checkpoint_path: str | None = None,
+    limit: int = 40,
+) -> ChatTurnStateHistoryRead:
+    """读取本轮所在 LangGraph thread 的原生 checkpoint state history。
+
+    参数：
+      session: 当前数据库会话，用来校验 turn 和 conversation 的业务归属。
+      conversation_id: 业务会话 ID。
+      turn_id: ChatTurn ID。
+      checkpoint_path: LangGraph SQLite checkpoint 文件路径，测试可替换。
+      limit: 最多返回多少个 checkpoint 快照。LangGraph 默认按 checkpoint_id 倒序返回。
+
+    返回：
+      checkpoint 时间线。每一帧都是 LangGraph `StateSnapshot` 的压缩 JSON 版本。
+    """
+
+    turn = session.exec(
+        select(ChatTurn).where(
+            ChatTurn.id == turn_id,
+            ChatTurn.conversation_id == conversation_id,
+        )
+    ).first()
+    if turn is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chat turn graph was not found",
+        )
+
+    with get_sqlite_checkpointer(checkpoint_path or settings.langgraph_checkpoint_path) as checkpointer:
+        app = build_memory_chat_graph(session_factory=session_scope).compile(checkpointer=checkpointer)
+        config = {"configurable": {"thread_id": turn.thread_id}}
+        snapshots = list(app.get_state_history(config, limit=limit))
+
+    return ChatTurnStateHistoryRead(
+        turn_id=turn.id or 0,
+        conversation_id=turn.conversation_id,
+        thread_id=turn.thread_id,
+        checkpoint_id=turn.checkpoint_id,
+        states=[_to_checkpoint_state_read(snapshot) for snapshot in snapshots],
+    )
+
+
 def _to_chat_turn_graph_read(turn: ChatTurn) -> ChatTurnGraphRead:
     node_statuses = _decode_json_object(turn.node_statuses)
     debug_payload = _decode_json_any(turn.debug_payload, fallback={})
@@ -228,12 +284,9 @@ def _to_chat_turn_graph_read(turn: ChatTurn) -> ChatTurnGraphRead:
         status=turn.status,
         node_statuses=node_statuses,
         mermaid=mermaid,
-        subgraphs={
-            "build_local_operator_context": _highlight_graph_mermaid(
-                get_local_operator_graph_mermaid(session_factory=session_scope),
-                _subgraph_node_statuses(debug_payload, "build_local_operator_context"),
-            ),
-        },
+        # 工具循环已经迁入 Memory Chat 主图，当前 read/write 节点直接在主图中染色。
+        # 后续如果某个工具节点再次拆成真正 LangGraph 子图，再把对应 mermaid 挂到这里。
+        subgraphs={},
         context_layers=_decode_json_list(turn.context_layers),
         retrieved_chunks=[
             NoteSearchResult(**chunk) for chunk in _decode_json_list(turn.retrieved_chunks)
@@ -241,6 +294,71 @@ def _to_chat_turn_graph_read(turn: ChatTurn) -> ChatTurnGraphRead:
         debug_payload=debug_payload,
         error=turn.error,
     )
+
+
+def _to_checkpoint_state_read(snapshot) -> ChatCheckpointStateRead:
+    """把 LangGraph StateSnapshot 转成 API schema。"""
+
+    config = snapshot.config or {}
+    parent_config = snapshot.parent_config or {}
+    configurable = config.get("configurable") or {}
+    parent_configurable = parent_config.get("configurable") or {}
+    return ChatCheckpointStateRead(
+        checkpoint_id=configurable.get("checkpoint_id"),
+        parent_checkpoint_id=parent_configurable.get("checkpoint_id"),
+        created_at=snapshot.created_at,
+        next=list(snapshot.next or []),
+        tasks=[_compact_task(task) for task in snapshot.tasks or []],
+        interrupts=[_compact_debug_value(interrupt) for interrupt in snapshot.interrupts or []],
+        metadata=_compact_debug_value(snapshot.metadata) if snapshot.metadata is not None else None,
+        values=_compact_debug_value(snapshot.values) if isinstance(snapshot.values, dict) else {},
+    )
+
+
+def _compact_task(task) -> dict:
+    """压缩 LangGraph PregelTask，保留调试所需字段。"""
+
+    return {
+        "id": getattr(task, "id", ""),
+        "name": getattr(task, "name", ""),
+        "path": _compact_debug_value(getattr(task, "path", ())),
+        "error": str(getattr(task, "error", "") or ""),
+        "interrupts": _compact_debug_value(getattr(task, "interrupts", ())),
+        "result": _compact_debug_value(getattr(task, "result", None)),
+    }
+
+
+def _compact_debug_value(value, *, depth: int = 0):
+    """把 checkpoint state 转成 JSON 兼容调试值。
+
+    checkpoint history 可能包含很长的 prompt、chunk、消息流和非 JSON 原生对象。
+    这里做轻量裁剪，保证 API 可用，同时保留定位问题的字段结构。
+    """
+
+    if depth >= 6:
+        return _compact_debug_scalar(value)
+    if isinstance(value, dict):
+        return {str(key): _compact_debug_value(item, depth=depth + 1) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        limit = 30
+        items = [_compact_debug_value(item, depth=depth + 1) for item in list(value)[:limit]]
+        if len(value) > limit:
+            items.append({"__truncated__": len(value) - limit})
+        return items
+    return _compact_debug_scalar(value)
+
+
+def _compact_debug_scalar(value):
+    """规整 checkpoint 调试值中的标量。"""
+
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        max_length = 5000
+        if len(value) > max_length:
+            return f"{value[:max_length]}\n...[truncated {len(value) - max_length} chars]"
+        return value
+    return str(value)
 
 
 def _highlight_memory_chat_mermaid(mermaid: str, node_statuses: dict[str, str]) -> str:
@@ -253,7 +371,7 @@ def _highlight_memory_chat_mermaid(mermaid: str, node_statuses: dict[str, str]) 
     lines.extend(
         [
             "classDef subgraphNode fill:#eef2ff,stroke:#7c3aed,stroke-width:3px,color:#4c1d95;",
-            "class build_local_operator_context subgraphNode;",
+            "class run_read_tool,run_write_tool subgraphNode;",
         ]
     )
     return "\n".join(lines)
@@ -282,20 +400,6 @@ def _highlight_graph_mermaid(mermaid: str, node_statuses: dict[str, str]) -> str
         if class_name:
             lines.append(f"class {node_name} {class_name};")
     return "\n".join(lines)
-
-
-def _subgraph_node_statuses(debug_payload: dict, node_name: str) -> dict[str, str]:
-    """读取某个主图节点记录的子图节点状态。"""
-
-    nodes = debug_payload.get("nodes")
-    if not isinstance(nodes, dict):
-        return {}
-    node_payload = nodes.get(node_name)
-    if not isinstance(node_payload, dict):
-        return {}
-    statuses = node_payload.get("subgraph_node_statuses")
-    return statuses if isinstance(statuses, dict) else {}
-
 
 def _get_turn_or_404(session: Session, turn_id: int) -> ChatTurn:
     turn = session.get(ChatTurn, turn_id)

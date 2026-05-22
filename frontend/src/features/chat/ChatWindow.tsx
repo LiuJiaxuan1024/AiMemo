@@ -17,7 +17,7 @@ import {
   emitChatGraphOpenElfEvent,
   emitChatNodeElfEvent,
 } from "./chatElfEvents";
-import type { DraftAssistantMessage, ChatTurnGraph, Conversation } from "./types";
+import type { ChatThought, DraftAssistantMessage, ChatTurnGraph, Conversation } from "./types";
 
 const ChatGraphPanel = lazy(() =>
   import("./ChatGraphPanel").then((module) => ({ default: module.ChatGraphPanel })),
@@ -29,6 +29,7 @@ export function ChatWindow() {
   const [messages, setMessages] = useState<DraftAssistantMessage[]>([]);
   const [input, setInput] = useState("");
   const [nodeStatuses, setNodeStatuses] = useState<Record<string, string>>({});
+  const [thoughts, setThoughts] = useState<ChatThought[]>([]);
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState("");
   const [selectedGraph, setSelectedGraph] = useState<ChatTurnGraph | null>(null);
@@ -98,6 +99,7 @@ export function ChatWindow() {
     setActiveConversation(conversation);
     setMessages([]);
     setSelectedGraph(null);
+    setThoughts([]);
   }
 
   async function handleSelectConversation(conversation: Conversation) {
@@ -105,6 +107,7 @@ export function ChatWindow() {
     setActiveConversation(conversation);
     setMessages(await listMessages(conversation.id));
     setSelectedGraph(null);
+    setThoughts([]);
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -140,6 +143,7 @@ export function ChatWindow() {
     setError("");
     setIsSending(true);
     setNodeStatuses({});
+    setThoughts([]);
     hasEmittedAnswerStartedRef.current = false;
 
     try {
@@ -176,6 +180,9 @@ export function ChatWindow() {
                 : message,
             ),
           );
+        }
+        if (streamEvent.event === "thought_snapshot") {
+          setThoughts(streamEvent.data.thoughts);
         }
         if (streamEvent.event === "done") {
           const { user_message, assistant_message } = streamEvent.data.response;
@@ -244,7 +251,12 @@ export function ChatWindow() {
           {runningNodes.length > 0 ? <span>Graph: {runningNodes.join(", ")}</span> : null}
         </header>
 
-        <MessageList endRef={messagesEndRef} messages={messages} onOpenGraph={handleOpenGraph} />
+        <MessageList
+          endRef={messagesEndRef}
+          messages={messages}
+          onOpenGraph={handleOpenGraph}
+          thoughts={thoughts}
+        />
 
         {error ? <p className="chat-error">{error}</p> : null}
 

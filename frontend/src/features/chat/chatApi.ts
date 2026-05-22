@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatStreamEvent, ChatTurnGraph, Conversation } from "./types";
+import type { ChatMessage, ChatStreamEvent, ChatTurnGraph, ChatTurnStateHistory, Conversation } from "./types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -46,6 +46,13 @@ export function getTurnGraph(
   turnId: number,
 ): Promise<ChatTurnGraph> {
   return request<ChatTurnGraph>(`/api/conversations/${conversationId}/turns/${turnId}/graph`);
+}
+
+export function getTurnStateHistory(
+  conversationId: number,
+  turnId: number,
+): Promise<ChatTurnStateHistory> {
+  return request<ChatTurnStateHistory>(`/api/conversations/${conversationId}/turns/${turnId}/state-history`);
 }
 
 export async function streamChat(

@@ -1773,6 +1773,44 @@ textarea {
   white-space: pre-wrap;
 }
 
+.chat-thought-stack {
+  display: grid;
+  gap: 6px;
+  max-width: min(720px, 82%);
+}
+
+.chat-thought {
+  background: rgba(248, 250, 252, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  border-radius: 8px;
+  color: #475569;
+  padding: 9px 11px;
+}
+
+.chat-thought summary,
+.chat-thought span {
+  color: #334155;
+  cursor: pointer;
+  display: block;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.chat-thought p {
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 5px 0 0;
+}
+
+.chat-thought.collapsed p {
+  color: #64748b;
+}
+
+.chat-thought.active {
+  background: rgba(239, 246, 255, 0.76);
+  border-color: rgba(37, 99, 235, 0.24);
+}
+
 .markdown-message {
   line-height: 1.7;
   min-width: 0;
@@ -2025,6 +2063,78 @@ textarea {
   overflow: auto;
   padding: 8px;
   white-space: pre-wrap;
+}
+
+.chat-checkpoint-viewer {
+  border: 1px solid #e6e9ef;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(0, 1.2fr);
+  min-height: 0;
+  padding: 10px;
+}
+
+.chat-checkpoint-list {
+  display: grid;
+  gap: 6px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.chat-checkpoint-list button {
+  background: #ffffff;
+  border: 1px solid #e6e9ef;
+  border-radius: 8px;
+  color: #243044;
+  cursor: pointer;
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+  text-align: left;
+}
+
+.chat-checkpoint-list button.is-selected {
+  background: #eef6ff;
+  border-color: #93c5fd;
+}
+
+.chat-checkpoint-list span,
+.chat-checkpoint-list small {
+  color: #667085;
+  font-size: 11px;
+}
+
+.chat-checkpoint-list strong {
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.chat-checkpoint-detail {
+  min-width: 0;
+}
+
+.chat-checkpoint-detail dl {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+
+.chat-checkpoint-detail dl div {
+  display: grid;
+  gap: 4px;
+  grid-template-columns: 86px minmax(0, 1fr);
+}
+
+.chat-checkpoint-detail dt {
+  color: #667085;
+  font-size: 12px;
+}
+
+.chat-checkpoint-detail dd {
+  font-size: 12px;
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .chat-performance-debug {

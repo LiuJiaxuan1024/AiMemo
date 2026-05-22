@@ -30,6 +30,7 @@ def test_stream_chat_creates_turn_and_messages_before_graph_finishes(
             "event": "node",
             "node": "build_l3_retrieved_memory",
             "state": {
+                "retrieval_query": "测试刷新恢复",
                 "retrieval_debug": {
                     "planner_ms": 7,
                     "retriever_ms": 11,
@@ -75,6 +76,7 @@ def test_stream_chat_creates_turn_and_messages_before_graph_finishes(
     assert first_event["data"]["turn_id"] > 0
     assert first_event["data"]["user_message"]["content"] == "测试刷新恢复"
     assert first_event["data"]["assistant_message"]["status"] == "streaming"
+    assert first_event["data"]["assistant_message"]["turn_id"] == first_event["data"]["turn_id"]
 
     messages = session.exec(select(ChatMessage).order_by(ChatMessage.id)).all()
     assert [message.role for message in messages] == ["user", "assistant"]
@@ -101,6 +103,8 @@ def test_stream_chat_creates_turn_and_messages_before_graph_finishes(
     assert turn is not None
     assert turn.status == "completed"
     assert turn.assistant_message_id == assistant.id
+    done_event = remaining_events[-1]
+    assert done_event["data"]["response"]["assistant_message"]["turn_id"] == first_event["data"]["turn_id"]
     debug_payload = json.loads(turn.debug_payload)
     assert debug_payload["events"]["turn_created"] >= 0
     assert debug_payload["events"]["turn_completed"] >= 0
@@ -108,6 +112,7 @@ def test_stream_chat_creates_turn_and_messages_before_graph_finishes(
     assert debug_payload["summary"]["answer_token_events"] == 2
     assert debug_payload["summary"]["answer_chars"] == len("你好，世界")
     assert debug_payload["nodes"]["build_l3_retrieved_memory"]["retrieval_debug"]["planner_ms"] == 7
+    assert debug_payload["nodes"]["build_l3_retrieved_memory"]["state"]["retrieval_query"] == "测试刷新恢复"
 
 
 def test_chat_turn_graph_can_be_read_while_turn_is_running(session, session_factory):

@@ -37,6 +37,54 @@ class ElfBubblePayload(TypedDict):
     emoji: str
 
 
+class AgentToolActionPayload(TypedDict, total=False):
+    """主对话 agent 循环中的一次工具调用计划。"""
+
+    tool_call_id: str
+    tool_name: str
+    arguments: dict
+    reason: str
+    operation_type: str
+    risk_level: str
+    requires_approval: bool
+
+
+class AgentToolObservationPayload(TypedDict, total=False):
+    """主对话 agent 循环中的一次工具观察结果。"""
+
+    tool_call_id: str
+    tool_name: str
+    arguments: dict
+    ok: bool
+    data: dict
+    error_code: str
+    message: str
+    blocked: bool
+
+
+class AgentThoughtPayload(TypedDict, total=False):
+    """给前端/桌面精灵展示的可审计过程摘要。"""
+
+    id: str
+    title: str
+    summary: str
+    status: Literal["running", "completed", "failed", "interrupted"]
+    related_node: str
+    related_tool_call_id: str | None
+
+
+class TurnMessagePayload(TypedDict, total=False):
+    """单轮 graph 内部追加的消息流。
+
+    跨轮历史由金字塔上下文重建；这个字段只记录本轮 user/agent/tool 的执行轨迹。
+    """
+
+    role: Literal["user", "assistant", "tool", "system"]
+    content: str
+    name: str
+    tool_call_id: str | None
+
+
 class ContextLayerPayload(TypedDict):
     """金字塔上下文单层 payload。
 
@@ -74,16 +122,24 @@ class MemoryChatGraphState(TypedDict, total=False):
     retrieval_grade_reason: str
     # L3 内部调试信息：记录 planner/retriever/grade/layer 的耗时，方便定位慢点。
     retrieval_debug: dict
+    context_conversation_window_layer: ContextLayerPayload
     context_l0_layer: ContextLayerPayload
     context_l1_layer: ContextLayerPayload
     context_l2_layer: ContextLayerPayload
     context_l3_layer: ContextLayerPayload
     context_l4_layer: ContextLayerPayload
-    # 本轮本地工具结果。为空表示没有触发 Local Operator。
-    local_operator_context: str
-    # Local Operator 子图的节点状态。用于 Chat Graph 调试面板展开子图时染色。
-    local_operator_node_statuses: dict[str, str]
     prompt_context: str
+    # 本轮 graph 内部消息流。每轮 load_turn_state 会重新初始化，避免跨轮重复累加。
+    turn_messages: list[TurnMessagePayload]
+    tool_budget: int
+    agent_decision: dict
+    planned_tool_actions: list[AgentToolActionPayload]
+    pending_tool_action: AgentToolActionPayload | None
+    tool_policy_result: dict
+    tool_observations: list[AgentToolObservationPayload]
+    tool_observation_context: str
+    thought_events: list[AgentThoughtPayload]
+    agent_loop_count: int
     # answer_mode 控制回答生成分支：普通 AiMemo 对话走 text，外置精灵走 elf_bubble。
     answer_mode: Literal["text", "elf_bubble"]
     assistant_answer: str
