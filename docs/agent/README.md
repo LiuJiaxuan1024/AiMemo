@@ -71,6 +71,7 @@ LangGraph 不直接替代业务数据库。
 - [Local Operator Agent](./local-operator-agent.md)
 - [Dynamic Execution Graph](./dynamic-execution-graph.md)
 - [Memory Chat Agent 工具循环升级草案](./tool-loop-agent-upgrade.md)
+- [Claude-Code Agent 设计借鉴与 AiMemo 升级方案](./claude-code-agent-lessons.md)
 - [Memory Chat Graph 设计草案](./memory-chat-graph-design.md)
 
 ## Memory Chat Graph 当前结构

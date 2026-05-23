@@ -19,8 +19,11 @@ class Conversation(SQLModel, table=True):
     summary: str = ""
     # 表示 summary 已经覆盖到哪条消息，避免重复摘要或漏摘要。
     summary_message_id: int | None = Field(default=None, index=True)
+    # JSON 字符串：保存跨 turn 的未完成本地执行任务。
+    # LangGraph checkpoint 适合恢复同一轮执行现场；active_task 用于下一轮用户说
+    # “继续/随便你/按你说的”时恢复上一轮未完成目标。
+    active_task: str = Field(default="{}")
     # 约定为 conversation:{id}，用于绑定 LangGraph checkpoint thread。
     langgraph_thread_id: str = Field(default="", index=True, max_length=120)
     created_at: datetime = Field(default_factory=utc_now, index=True)
     updated_at: datetime = Field(default_factory=utc_now, index=True)
-

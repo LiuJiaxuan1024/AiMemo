@@ -24,12 +24,15 @@ MEMORY_CHAT_NODE_ORDER = [
     "build_l0_current_input",
     "build_current_conversation_window",
     "merge_prompt_context",
+    "plan_task",
     "agent_think",
     "select_tool",
     "check_tool_policy",
     "run_read_tool",
     "run_write_tool",
+    "run_exec_tool",
     "observe_tool_result",
+    "verify_goal",
     "generate_answer",
     "generate_elf_bubble_answer",
     "persist_messages",
@@ -371,7 +374,7 @@ def _highlight_memory_chat_mermaid(mermaid: str, node_statuses: dict[str, str]) 
     lines.extend(
         [
             "classDef subgraphNode fill:#eef2ff,stroke:#7c3aed,stroke-width:3px,color:#4c1d95;",
-            "class run_read_tool,run_write_tool subgraphNode;",
+            "class plan_task,run_read_tool,run_write_tool,run_exec_tool,verify_goal subgraphNode;",
         ]
     )
     return "\n".join(lines)

@@ -745,9 +745,20 @@ def _looks_like_overwrite_request(text: str) -> bool:
 def _observation_to_lines(observation: LocalOperatorObservation) -> list[str]:
     tool_name = observation.get("tool_name", "")
     if not observation.get("ok"):
-        return [
-            f"- 工具 `{tool_name}` 执行失败：{observation.get('error_code', '')} {observation.get('message', '')}".strip()
-        ]
+        lines = [f"- 工具 `{tool_name}` 执行失败：{observation.get('error_code', '')} {observation.get('message', '')}".strip()]
+        data = observation.get("data") or {}
+        if isinstance(data, dict):
+            if data.get("command"):
+                lines.append(f"  command: `{data.get('command')}`")
+            if data.get("cwd") or data.get("relative_cwd"):
+                lines.append(f"  cwd: `{data.get('relative_cwd') or data.get('cwd')}`")
+            if data.get("exit_code") is not None:
+                lines.append(f"  exit_code: {data.get('exit_code')}")
+            if data.get("stdout"):
+                lines.extend(["  stdout:", "  ```text", str(data.get("stdout"))[:1200], "  ```"])
+            if data.get("stderr"):
+                lines.extend(["  stderr:", "  ```text", str(data.get("stderr"))[:1200], "  ```"])
+        return lines
 
     data: dict[str, Any] = dict(observation.get("data") or {})
     if tool_name == "read_file":

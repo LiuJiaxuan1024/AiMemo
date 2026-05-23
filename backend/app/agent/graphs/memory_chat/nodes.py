@@ -3,6 +3,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 import json
 import logging
+from copy import deepcopy
 from pathlib import Path
 import re
 from typing import Literal
@@ -43,12 +44,14 @@ from app.agent.graphs.memory_chat.state import (
     ChatMessagePayload,
     ContextLayerPayload,
     ElfBubblePayload,
+    GoalVerificationPayload,
     MemoryChatGraphState,
     RetrievedChunkPayload,
     TaskPayload,
     TaskStepPayload,
     TurnMessagePayload,
     WorldStatePayload,
+    WorldStatusPayload,
 )
 from app.agent.context import build_memory_chat_prompt_context
 from app.agent.model import get_agent_chat_model, get_planner_chat_model
@@ -134,6 +137,29 @@ def build_load_turn_state_node(
                 for message in sorted(messages, key=lambda item: (item.created_at, item.id or 0))
                 if message.id not in current_message_ids and message.status == "completed"
             ]
+            active_task = _restore_active_task_for_turn(
+                conversation.active_task,
+                user_message=_resolve_user_message(state),
+                recent_messages=recent_messages,
+            )
+            active_world_state = active_task.get("world_state") if active_task else _empty_world_state()
+            active_boundary: TaskBoundaryPayload = (
+                {
+                    "type": "continuation",
+                    "reason": "当前输入是在确认继续上一轮未完成本地任务，已恢复 conversation.active_task。",
+                    "previous_task_id": str(active_task.get("id") or "") or None,
+                    "active_task_id": str(active_task.get("id") or "") or None,
+                    "expired_task_id": None,
+                }
+                if active_task
+                else {
+                    "type": "fresh",
+                    "reason": "从 START 开启的新一轮用户输入。",
+                    "previous_task_id": None,
+                    "active_task_id": None,
+                    "expired_task_id": None,
+                }
+            )
             return {
                 "conversation_id": conversation_id,
                 "langgraph_thread_id": conversation.langgraph_thread_id,
@@ -165,12 +191,17 @@ def build_load_turn_state_node(
                         "tool_call_id": None,
                     }
                 ],
-                "tool_budget": 6,
+                # 工具任务可能包含 read-before-write、失败修复和运行验证。
+                # 预算只作为防失控保护，不应过早截断正常的多步任务。
+                "tool_budget": 20,
                 "agent_decision": {},
                 "planned_tool_actions": [],
                 "pending_tool_action": None,
-                "task": {},
-                "world_state": _empty_world_state(),
+                "task_boundary": active_boundary,
+                "expired_task": {},
+                "task": active_task,
+                "world_state": active_world_state,
+                "world_status": _empty_world_status(),
                 "tool_policy_result": {},
                 "tool_observations": [],
                 "tool_observation_context": "",
@@ -491,7 +522,7 @@ def build_agent_think_node(
                 ],
             }
 
-        task = _resolve_runtime_task(state)
+        task = _task_with_step_queues(state.get("task") or {})
         ready_step = _select_ready_task_step(task)
         reasoning_thoughts: list[AgentThoughtPayload] = []
         if ready_step is not None:
@@ -520,7 +551,7 @@ def build_agent_think_node(
                     "agent_loop_count": loop_count,
                     "task": task,
                     "world_state": task.get("world_state") or _empty_world_state(),
-                    "agent_decision": {"type": "final_answer", "reason": "动态任务没有剩余可执行步骤。"},
+                    "agent_decision": {"type": "verify_goal", "reason": "动态任务没有剩余可执行步骤，进入目标验收。"},
                     "thought_events": [*_complete_running_thoughts(state), *reasoning_thoughts],
                 }
 
@@ -557,7 +588,29 @@ def build_agent_think_node(
                     ],
                 }
 
+        if task:
+            world_status = _evaluate_world_status(
+                task,
+                task.get("world_state") or state.get("world_state") or _empty_world_state(),
+                state,
+            )
+            if world_status.get("requires_replan"):
+                replan_result = _agent_replan_response(state, task, world_status, loop_count)
+                if replan_result:
+                    return replan_result
+                return _task_blocked_response(state, task, world_status, loop_count)
+            return _task_blocked_response(state, task, world_status, loop_count)
+
         if task and _task_has_terminal_status(task):
+            world_status = state.get("world_status") or _evaluate_world_status(
+                task,
+                task.get("world_state") or state.get("world_state") or _empty_world_state(),
+                state,
+            )
+            if task.get("status") == "COMPLETED" and not world_status.get("goal_satisfied", True):
+                replan_result = _agent_replan_response(state, task, world_status, loop_count)
+                if replan_result:
+                    return replan_result
             return {
                 "agent_loop_count": loop_count,
                 "agent_decision": {"type": "final_answer", "reason": "动态任务已进入终态。"},
@@ -572,24 +625,24 @@ def build_agent_think_node(
                 ],
             }
 
-        if _has_successful_write_observation(state):
+        if task and task.get("status") == "REPLANNING":
+            world_status = state.get("world_status") or _evaluate_world_status(
+                task,
+                task.get("world_state") or state.get("world_state") or _empty_world_state(),
+                state,
+            )
+            replan_result = _agent_replan_response(state, task, world_status, loop_count)
+            if replan_result:
+                return replan_result
             return {
                 "agent_loop_count": loop_count,
-                "agent_decision": {"type": "final_answer", "reason": "已获得工具观察结果，准备生成最终回答。"},
-                "turn_messages": [
-                    *state.get("turn_messages", []),
-                    _turn_message(
-                        "assistant",
-                        "已观察到工具结果，准备基于真实结果生成最终回答。",
-                        name="agent_think",
-                    ),
-                ],
+                "agent_decision": {"type": "final_answer", "reason": "任务需要重规划，但当前没有可执行恢复步骤。"},
                 "thought_events": [
                     *_complete_running_thoughts(state),
                     _thought(
-                        "agent-think-final",
-                        "整理工具结果",
-                        "我已经拿到本地工具返回的结果，接下来会基于真实结果回答。",
+                        "agent-think-replan-stop",
+                        "停止重复执行",
+                        "任务处于重规划状态，但没有生成可执行恢复步骤；我会停止继续试错。",
                         related_node="agent_think",
                     ),
                 ],
@@ -703,11 +756,204 @@ def build_agent_think_node(
     return agent_think
 
 
+def build_plan_task_node():
+    """为当前用户目标生成或维护 Dynamic Execution Task。
+
+    这个节点位于 agent_think 上游，负责“全局计划”：
+      - 如果本轮已经有 task，保留它，避免工具循环中重复规划。
+      - 如果没有 task，但当前输入需要本地工具，生成 Task/Step 计划。
+      - 同步初始化 world_state/world_status，供 agent_think 只做执行决策。
+
+    agent_think 后续只消费 task 与 world_status 选择下一步，不再把“全局规划”和
+    “执行下一步”混在同一个职责里。
+    """
+
+    def plan_task(state: MemoryChatGraphState) -> MemoryChatGraphState:
+        existing = state.get("task") or {}
+        if existing:
+            existing = _task_with_step_queues(existing)
+            world_state = existing.get("world_state") or state.get("world_state") or _empty_world_state()
+            return {
+                "task": existing,
+                "world_state": world_state,
+                "world_status": _evaluate_world_status(existing, world_state, state),
+            }
+
+        task = _plan_dynamic_task(state)
+        if not task:
+            return {
+                "world_state": state.get("world_state") or _empty_world_state(),
+                "world_status": _empty_world_status(),
+                "thought_events": [
+                    *state.get("thought_events", []),
+                    _thought(
+                        "plan-task-skip",
+                        "无需任务计划",
+                        "当前输入不需要本地工具任务，后续会直接进入回答决策。",
+                        related_node="plan_task",
+                    ),
+                ],
+            }
+
+        world_state = task.get("world_state") or _empty_world_state()
+        return {
+            "task": task,
+            "world_state": world_state,
+            "world_status": _evaluate_world_status(task, world_state, state),
+            "thought_events": [
+                *state.get("thought_events", []),
+                _thought(
+                    "plan-task-created",
+                    "规划任务步骤",
+                    f"已生成动态任务计划，共 {len(task.get('steps') or [])} 个步骤。",
+                    related_node="plan_task",
+                ),
+            ],
+        }
+
+    return plan_task
+
+
 def route_after_agent_think(state: MemoryChatGraphState) -> str:
     """agent_think 后的条件边。"""
 
     decision = state.get("agent_decision") or {}
-    return "select_tool" if decision.get("type") == "tool_call" else route_answer_mode(state)
+    if decision.get("type") == "tool_call":
+        return "select_tool"
+    if decision.get("type") == "verify_goal":
+        return "verify_goal"
+    return route_answer_mode(state)
+
+
+def build_verify_goal_node():
+    """验收当前 Dynamic Execution Task 是否真的完成用户目标。
+
+    该节点把“step/tool 成功”和“goal 完成”分开：工具只提供事实，验收层判断这些
+    事实是否满足用户目标。第一版使用确定性规则，优先解决运行结果编造问题。
+    """
+
+    def verify_goal(state: MemoryChatGraphState) -> MemoryChatGraphState:
+        task = _task_with_step_queues(state.get("task") or {})
+        world_state = task.get("world_state") or state.get("world_state") or _empty_world_state()
+        verification = _verify_task_goal(task, world_state, state)
+        world_status = _world_status_from_verification(
+            _evaluate_world_status(task, world_state, state),
+            verification,
+        )
+        task = {**task, "world_state": world_state, "status": "COMPLETED" if verification.get("satisfied") else "REPLANNING"}  # type: ignore[typeddict-item]
+        return {
+            "task": task,
+            "world_state": world_state,
+            "world_status": world_status,
+            "goal_verification": verification,
+            "agent_decision": {
+                "type": "final_answer" if verification.get("satisfied") else "replan",
+                "reason": verification.get("reason", ""),
+            },
+            "thought_events": [
+                *state.get("thought_events", []),
+                _thought(
+                    "verify-goal",
+                    "验收任务目标",
+                    str(verification.get("reason") or "已完成目标验收。"),
+                    related_node="verify_goal",
+                ),
+            ],
+        }
+
+    return verify_goal
+
+
+def route_after_verify_goal(state: MemoryChatGraphState) -> str:
+    """目标验收后的条件边。"""
+
+    verification = state.get("goal_verification") or {}
+    return route_answer_mode(state) if verification.get("satisfied") else "agent_think"
+
+
+def _agent_replan_response(
+    state: MemoryChatGraphState,
+    task: TaskPayload,
+    world_status: WorldStatusPayload,
+    loop_count: int,
+) -> MemoryChatGraphState:
+    """为 agent_think 构造重规划后的下一步响应。
+
+    失败 task 必须先走 replan，不能掉到单步工具 planner 里反复试同类 exec 命令。
+    """
+
+    replanned = _replan_task_from_world_status(state, task, world_status)
+    if not replanned:
+        return {}
+    world_state = replanned.get("world_state") or _empty_world_state()
+    replanned = _task_with_step_queues(replanned)
+    ready_step = _select_ready_task_step(replanned)
+    action = _task_step_to_tool_action(ready_step, {**state, "task": replanned, "world_state": world_state}) if ready_step else None
+    planned_actions = (
+        [_to_agent_tool_action(action, index=0, task_boundary="same_turn_followup")]
+        if action is not None
+        else []
+    )
+    return {
+        "agent_loop_count": loop_count,
+        "task": _mark_task_step_status(replanned, str(ready_step.get("id")), "EXECUTING") if action is not None and ready_step else replanned,
+        "world_state": world_state,
+        "world_status": _evaluate_world_status(replanned, world_state, state),
+        "agent_decision": {
+            "type": "tool_call",
+            "reason": str(ready_step.get("description") if ready_step else "执行重规划后的下一步。"),
+            "tool_name": str(action.get("tool_name") if action else ""),
+        }
+        if planned_actions
+        else {"type": "final_answer", "reason": "任务目标尚未满足，但暂无可执行重规划步骤。"},
+        "planned_tool_actions": planned_actions,
+        "thought_events": [
+            *_complete_running_thoughts(state),
+            _thought(
+                "agent-think-replan",
+                "重规划后续步骤",
+                str(world_status.get("replan_reason") or "任务目标尚未完全满足，我会补充后续步骤。"),
+                related_node="agent_think",
+            ),
+        ],
+    }
+
+
+def _task_blocked_response(
+    state: MemoryChatGraphState,
+    task: TaskPayload,
+    world_status: WorldStatusPayload,
+    loop_count: int,
+) -> MemoryChatGraphState:
+    """Task 存在但当前没有可执行 step 时的硬门禁响应。
+
+    这里不能回退到旧单步工具 planner；否则 Task 队列和 WorldState 会脱节。
+    """
+
+    decision_reason = (
+        "动态任务没有剩余可执行步骤，准备进入目标验收。"
+        if world_status.get("goal_satisfied")
+        else "动态任务被阻塞，且当前没有可执行重规划步骤。"
+    )
+    return {
+        "agent_loop_count": loop_count,
+        "task": _task_with_step_queues(task),
+        "world_state": task.get("world_state") or _empty_world_state(),
+        "world_status": world_status,
+        "agent_decision": {
+            "type": "verify_goal" if world_status.get("goal_satisfied") else "final_answer",
+            "reason": decision_reason,
+        },
+        "thought_events": [
+            *_complete_running_thoughts(state),
+            _thought(
+                "agent-think-task-blocked",
+                "任务等待验收" if world_status.get("goal_satisfied") else "任务执行受阻",
+                str(world_status.get("replan_reason") or decision_reason),
+                related_node="agent_think",
+            ),
+        ],
+    }
 
 
 def build_select_tool_node():
@@ -860,14 +1106,41 @@ def build_generate_answer_node(
         retrieved_chunks = state.get("retrieved_chunks", [])
         needs_retrieval = bool(state.get("needs_retrieval", False))
         retrieval_grade = state.get("retrieval_grade", "none")
+        if _requires_local_operation_followup(state) and not state.get("tool_observations"):
+            return {
+                "assistant_answer": (
+                    "我还没有实际执行这一步。\n\n"
+                    "这轮输入看起来是在确认继续上一轮的本地操作，但本轮没有任何 "
+                    "`write_file` 或 `exec_command` 工具结果，所以我不能声称已经覆盖文件、"
+                    "也不能给出运行结果。请让我继续调用本地工具完成这一步。"
+                )
+            }
         if answer_generator is None:
             prompt_context = state.get("prompt_context", "")
+            task = _task_with_step_queues(state.get("task") or {})
+            world_status = state.get("world_status") or {}
+            if task and not bool(world_status.get("goal_satisfied")):
+                prompt_context = _append_tool_context(
+                    prompt_context,
+                    "## 动态任务未完成约束\n"
+                    "当前存在未完成的 Dynamic Execution Task，且 goal_satisfied=false。"
+                    "最终回答必须明确说明任务未完成和阻塞原因，不能声称已经完成用户目标，"
+                    "也不能声称自己没有本地工具能力。若缺少运行结果，必须说明尚未成功执行命令。",
+                )
             if _requires_write_file(user_message) and not _has_successful_write_observation(state):
                 prompt_context = _append_tool_context(
                     prompt_context,
                     "## 本地工具写入约束\n"
                     "用户本轮要求写入/保存本地文件，但本轮没有成功的 write_file observation。"
                     "最终回答必须明确说明尚未写入文件，不能声称已经保存或写入完成。",
+                )
+            if _requires_exec_result_followup(state) and not _has_successful_exec_observation(state.get("tool_observations", [])):
+                prompt_context = _append_tool_context(
+                    prompt_context,
+                    "## 本地命令运行约束\n"
+                    "当前用户请求或多轮上下文要求运行/编译/测试并返回结果，但本轮没有成功的 "
+                    "exec_command observation。最终回答必须说明尚未成功运行命令，不能编造运行结果、"
+                    "随机数、测试通过或构建成功。",
                 )
             return {
                 "assistant_answer": generate_memory_chat_answer(
@@ -995,6 +1268,7 @@ def build_persist_messages_node(session_factory: SessionFactory):
                 assistant.token_count = count_tokens(assistant_answer)
                 assistant.updated_at = utc_now()
                 conversation.updated_at = utc_now()
+                conversation.active_task = _serialize_active_task_for_conversation(state)
                 session.add(user)
                 session.add(assistant)
                 session.add(conversation)
@@ -1037,6 +1311,7 @@ def build_persist_messages_node(session_factory: SessionFactory):
                 raise RuntimeError("Assistant message id was not generated.")
 
             conversation.updated_at = utc_now()
+            conversation.active_task = _serialize_active_task_for_conversation(state)
             session.add(conversation)
             session.commit()
             return {
@@ -1289,7 +1564,8 @@ def _plan_dynamic_task(state: MemoryChatGraphState) -> TaskPayload | None:
     兼容层，不新增具体请求特化；真正长期方向是让 planner 输出完整 Task。
     """
 
-    if not _should_try_agent_tool_planner(state):
+    should_try = _should_try_agent_tool_planner(state) or _requires_local_operation_followup(state)
+    if not should_try:
         return None
     task = _llm_plan_dynamic_task(state)
     if task:
@@ -1298,11 +1574,160 @@ def _plan_dynamic_task(state: MemoryChatGraphState) -> TaskPayload | None:
     if action is None:
         roots = _default_local_operator_workspace_roots()
         action = _rule_plan_action(_resolve_user_message(state), workspace_roots=roots)
-    if action is None and _should_try_agent_tool_planner(state):
+    if action is None and should_try:
         action = _llm_plan_agent_tool_action(state)
     if action is None:
         return None
     return _task_from_single_action(state, action)
+
+
+def _task_with_step_queues(task: TaskPayload) -> TaskPayload:
+    """确保 task 同时具备 pending/completed/failed 三个执行队列。
+
+    这是双队列模型的兼容层：新逻辑读写队列字段，旧的 `steps` 仍作为所有 step
+    的镜像，供现有 graph 可视化、节点详情和测试读取。
+    """
+
+    if not task:
+        return task
+    updated = dict(task)
+    if not any(key in updated for key in ("pending_steps", "completed_steps", "failed_steps")):
+        pending: list[TaskStepPayload] = []
+        completed: list[TaskStepPayload] = []
+        failed: list[TaskStepPayload] = []
+        for step in list(updated.get("steps") or []):
+            status = step.get("status")
+            if status == "COMPLETED":
+                completed.append(dict(step))  # type: ignore[arg-type]
+            elif status == "FAILED":
+                failed.append(dict(step))  # type: ignore[arg-type]
+            elif status == "EXECUTING":
+                pending.append({**dict(step), "status": "PENDING"})  # type: ignore[arg-type]
+            else:
+                pending.append(dict(step))  # type: ignore[arg-type]
+        updated["pending_steps"] = pending
+        updated["completed_steps"] = completed
+        updated["failed_steps"] = failed
+    else:
+        updated["pending_steps"] = list(updated.get("pending_steps") or [])
+        updated["completed_steps"] = list(updated.get("completed_steps") or [])
+        updated["failed_steps"] = list(updated.get("failed_steps") or [])
+    updated["pending_steps"] = _dedupe_task_steps(list(updated.get("pending_steps") or []), keep="first")
+    updated["completed_steps"] = _dedupe_task_steps(list(updated.get("completed_steps") or []), keep="last")
+    updated["failed_steps"] = _dedupe_task_steps(list(updated.get("failed_steps") or []), keep="last")
+    previous_status = str(updated.get("status") or "")
+    updated["steps"] = _task_steps_snapshot(updated)  # type: ignore[arg-type]
+    updated["status"] = (
+        "REPLANNING" if previous_status == "REPLANNING" else _derive_task_status_from_queues(updated)
+    )  # type: ignore[typeddict-item]
+    return updated  # type: ignore[return-value]
+
+
+def _dedupe_task_steps(steps: list[TaskStepPayload], *, keep: Literal["first", "last"]) -> list[TaskStepPayload]:
+    """按 step.id 去重，并累计 attempt_count。
+
+    pending 队列保留第一次出现的位置，避免 replanner 把相同 step 重复插入队首；
+    completed/failed 历史保留最后一次结果，避免历史列表无限膨胀。
+    """
+
+    result: list[TaskStepPayload] = []
+    index_by_id: dict[str, int] = {}
+    for raw_step in steps:
+        step = dict(raw_step)
+        step_id = str(step.get("id") or "")
+        if not step_id:
+            result.append(step)  # type: ignore[arg-type]
+            continue
+        attempt_count = int(step.get("attempt_count") or step.get("retry_count") or 0)
+        if step_id not in index_by_id:
+            step["attempt_count"] = max(1, attempt_count or 1)
+            index_by_id[step_id] = len(result)
+            result.append(step)  # type: ignore[arg-type]
+            continue
+        existing = dict(result[index_by_id[step_id]])
+        merged_attempt = max(
+            int(existing.get("attempt_count") or existing.get("retry_count") or 1),
+            attempt_count or 1,
+        ) + 1
+        if keep == "last":
+            step["attempt_count"] = merged_attempt
+            if not step.get("last_error"):
+                step["last_error"] = existing.get("last_error")
+            result[index_by_id[step_id]] = step  # type: ignore[assignment]
+        else:
+            existing["attempt_count"] = merged_attempt
+            if step.get("last_error"):
+                existing["last_error"] = step.get("last_error")
+            result[index_by_id[step_id]] = existing  # type: ignore[assignment]
+    return result
+
+
+def _task_steps_snapshot(task: TaskPayload) -> list[TaskStepPayload]:
+    """生成兼容旧 UI 的 steps 镜像。"""
+
+    snapshot: list[TaskStepPayload] = []
+    snapshot.extend(dict(step) for step in task.get("completed_steps") or [])  # type: ignore[arg-type]
+    current_id = str(task.get("current_step_id") or "")
+    for step in task.get("pending_steps") or []:
+        updated = dict(step)
+        if current_id and str(updated.get("id")) == current_id:
+            updated["status"] = "EXECUTING"
+        snapshot.append(updated)  # type: ignore[arg-type]
+    snapshot.extend(dict(step) for step in task.get("failed_steps") or [])  # type: ignore[arg-type]
+    return snapshot
+
+
+def _derive_task_status_from_queues(task: TaskPayload) -> str:
+    """根据执行队列推导 task 状态。"""
+
+    if task.get("current_step_id"):
+        return "RUNNING"
+    if task.get("pending_steps"):
+        return "READY"
+    return "COMPLETED"
+
+
+def _new_task_payload(
+    *,
+    base: TaskPayload | None,
+    state: MemoryChatGraphState,
+    goal: str,
+    source_user_message: str,
+    steps: list[TaskStepPayload],
+    world_state: WorldStatePayload,
+    execution_history: list[dict],
+    plan_version: int,
+    replan_count: int,
+    pending_merge: Literal["replace", "prepend", "append"] = "replace",
+) -> TaskPayload:
+    """创建使用 pending/completed/failed 队列的 TaskPayload。"""
+
+    base = _task_with_step_queues(base or {})
+    task_id = str(base.get("id") or _task_id_from_user_message(_resolve_user_message(state)))
+    new_steps = _dedupe_task_steps([dict(step) for step in steps], keep="first")  # type: ignore[list-item]
+    pending_steps = new_steps
+    if pending_merge == "prepend":
+        # 当前失败 step 的恢复步骤插入队首，尚未执行的原计划留在队尾继续等待。
+        pending_steps.extend(dict(step) for step in base.get("pending_steps") or [])  # type: ignore[arg-type]
+    elif pending_merge == "append":
+        pending_steps = [dict(step) for step in base.get("pending_steps") or []]  # type: ignore[list-item]
+        pending_steps.extend(new_steps)
+    task: TaskPayload = {
+        "id": task_id,
+        "goal": goal,
+        "source_user_message": source_user_message,
+        "status": "READY",
+        "plan_version": plan_version,
+        "current_step_id": None,
+        "pending_steps": pending_steps,
+        "completed_steps": list(base.get("completed_steps") or []),
+        "failed_steps": list(base.get("failed_steps") or []),
+        "steps": [],
+        "world_state": world_state,
+        "execution_history": execution_history,
+        "replan_count": replan_count,
+    }
+    return _task_with_step_queues(task)
 
 
 def _llm_plan_dynamic_task(state: MemoryChatGraphState) -> TaskPayload | None:
@@ -1323,24 +1748,608 @@ def _llm_plan_dynamic_task(state: MemoryChatGraphState) -> TaskPayload | None:
     steps = [step for step in steps if step.get("kind") in {"tool", "reasoning", "decision", "final"}]
     if not steps:
         return None
-    return {
-        "id": _task_id_from_user_message(_resolve_user_message(state)),
-        "goal": str(payload.get("goal") or _resolve_user_message(state)),
-        "source_user_message": _resolve_user_message(state),
-        "status": "READY",
-        "plan_version": 1,
-        "current_step_id": None,
-        "steps": steps,
-        "world_state": _empty_world_state(),
-        "execution_history": [
+    return _new_task_payload(
+        base=None,
+        state=state,
+        goal=str(payload.get("goal") or _resolve_user_message(state)),
+        source_user_message=_resolve_user_message(state),
+        steps=steps,
+        world_state=_empty_world_state(),
+        execution_history=[
             {
                 "type": "planned",
                 "summary": str(payload.get("reason") or "planner 生成动态任务计划。"),
                 "payload": {"step_count": len(steps)},
             }
         ],
-        "replan_count": 0,
+        plan_version=1,
+        replan_count=0,
+    )
+
+
+def _replan_task_from_world_status(
+    state: MemoryChatGraphState,
+    task: TaskPayload,
+    world_status: WorldStatusPayload,
+) -> TaskPayload | None:
+    """基于 WorldStatus 重规划剩余步骤。
+
+    第一版优先调用同一个 Dynamic Task Planner，但会把当前 task/world_state/world_status
+    放进输入，要求 planner 只补后续步骤。LLM 失败时使用一个通用兜底：如果目标缺少
+    “运行结果”，且 world_state 已有写入文件，则补一个 exec_command step。
+    """
+
+    deterministic = _deterministic_replan_from_world_status(state, task, world_status)
+    if deterministic:
+        return deterministic
+    # 如果已经有未解决的工具失败，优先让通用 replanner 读取 stderr/stdout 和
+    # WorldState 后决定怎么修；只有“没有失败、只是缺运行结果”时才走机械 fallback。
+    has_active_failure = bool(world_status.get("last_error"))
+    if not has_active_failure:
+        fallback = _fallback_replan_missing_exec_result(state, task, world_status)
+        if fallback:
+            return fallback
+    # replan_count 只限制语义 LLM 重规划，确定性恢复不应被旧预算挡住。
+    if int(task.get("replan_count") or 0) >= 5:
+        return None
+    replanned = _llm_replan_dynamic_task(state, task, world_status)
+    if replanned:
+        return replanned
+    patched = _fallback_drop_unreferenced_failed_step(state, task, world_status)
+    if patched:
+        return patched
+    return _fallback_replan_missing_exec_result(state, task, world_status)
+
+
+def _deterministic_replan_from_world_status(
+    state: MemoryChatGraphState,
+    task: TaskPayload,
+    world_status: WorldStatusPayload,
+) -> TaskPayload | None:
+    """处理可确定恢复的工具契约错误。"""
+
+    if world_status.get("recovery_hint") == "read_then_write_same_path":
+        return _replan_read_before_write_same_path(state, task, world_status)
+    return None
+
+
+def _replan_read_before_write_same_path(
+    state: MemoryChatGraphState,
+    task: TaskPayload,
+    world_status: WorldStatusPayload,
+) -> TaskPayload | None:
+    """READ_BEFORE_WRITE_REQUIRED 的确定性恢复。
+
+    工具已经明确告诉我们：同一路径覆盖前必须先读。这里不交给 LLM 猜，直接补：
+      read_file(original_path) -> write_file(original_path, original_content, overwrite=true)
+    这样可以防止 agent 改写其他路径来绕过安全规则。
+    """
+
+    failed_step = _find_task_step(task, str(world_status.get("blocked_step_id") or ""))
+    if not failed_step or failed_step.get("tool_name") != "write_file":
+        return None
+    arguments = dict(failed_step.get("arguments") or {})
+    path = str(arguments.get("path") or world_status.get("recovery_path") or "")
+    if not path:
+        return None
+    read_step_id = f"read_before_{failed_step.get('id') or 'write'}"
+    retry_step_id = f"retry_{failed_step.get('id') or 'write'}"
+    world_state = task.get("world_state") or state.get("world_state") or _empty_world_state()
+    retry_arguments = dict(arguments)
+    retry_arguments["path"] = path
+    retry_arguments["overwrite"] = True
+    steps = [
+            {
+                "id": read_step_id,
+                "description": f"覆盖写入前读取原文件：{path}",
+                "kind": "tool",
+                "tool_name": "read_file",
+                "arguments": {"path": path},
+                "dependencies": [],
+                "status": "PENDING",
+                "retry_count": 0,
+                "output_ref": None,
+                "error": None,
+            },
+            {
+                "id": retry_step_id,
+                "description": f"读取后重试覆盖写入：{path}",
+                "kind": "tool",
+                "tool_name": "write_file",
+                "arguments": retry_arguments,
+                "dependencies": [read_step_id],
+                "status": "PENDING",
+                "retry_count": int(failed_step.get("retry_count") or 0) + 1,
+                "output_ref": None,
+                "error": None,
+            },
+        ]
+    return _new_task_payload(
+        base=_task_with_step_queues(task),
+        state=state,
+        goal=str(task.get("goal") or _resolve_user_message(state)),
+        source_user_message=str(task.get("source_user_message") or _resolve_user_message(state)),
+        steps=steps,  # type: ignore[arg-type]
+        world_state=world_state,
+        execution_history=[
+            *list(task.get("execution_history") or []),
+            {
+                "type": "replanned",
+                "summary": "write_file 触发 read-before-write 保护，补充同路径读取后重试写入。",
+                "payload": {
+                    "recovery_hint": "read_then_write_same_path",
+                    "path": path,
+                    "failed_step_id": failed_step.get("id"),
+                },
+            },
+        ],
+        plan_version=int(task.get("plan_version") or 1) + 1,
+        # read-before-write 是机械恢复，不消耗语义重规划预算。
+        replan_count=int(task.get("replan_count") or 0),
+        pending_merge="prepend",
+    )
+
+
+def _find_task_step(task: TaskPayload, step_id: str) -> TaskStepPayload | None:
+    """按 step id 查找任务步骤。"""
+
+    if not step_id:
+        return None
+    queued = _task_with_step_queues(task)
+    for step in (
+        list(queued.get("pending_steps") or [])
+        + list(queued.get("completed_steps") or [])
+        + list(queued.get("failed_steps") or [])
+        + list(queued.get("steps") or [])
+    ):
+        if str(step.get("id")) == step_id:
+            return step
+    return None
+
+
+def _llm_replan_dynamic_task(
+    state: MemoryChatGraphState,
+    task: TaskPayload,
+    world_status: WorldStatusPayload,
+) -> TaskPayload | None:
+    """让 planner 基于当前事实补充剩余步骤。"""
+
+    world_state = task.get("world_state") or state.get("world_state") or _empty_world_state()
+    recent_failures = _recent_failures_for_prompt(world_state)
+    prompt = (
+        "你是 AiMemo 的 Dynamic Execution Replanner。当前任务还没有满足用户目标，"
+        "请基于已有 task、world_state、world_status 只规划剩余步骤，不要重复已经成功完成的步骤。\n\n"
+        "规则：\n"
+        "- 如果已有文件写入成功，而目标要求运行结果，应补 exec_command。\n"
+        "- 如果工具失败，应基于 error/stderr 修改当前或后续步骤。\n"
+        "- 你必须先分析最近失败 observation 的 error_code/stdout/stderr，再决定新步骤。\n"
+        "- 禁止无修改地重复执行完全相同的失败工具调用；如果要重试同类工具，必须先改变前置条件，例如读取信息、修改文件、调整参数或生成新的中间产物。\n"
+        "- replan 只能生成能推进 WorldState 的步骤；不要生成已经成功完成且无需变更的重复步骤。\n"
+        "- 如果你确实需要重试旧 step，必须使用新的 step id，或在描述中明确 retry 的变化点。\n"
+        "- 如果失败 step 不再被任何 pending step 依赖，且继续执行剩余 pending 可以推进任务，可以返回 plan_patch.drop_failed_step。\n"
+        "- 如果 write_file 失败且 error_code=READ_BEFORE_WRITE_REQUIRED，必须补 read_file 原 write_file.path，再重试 write_file 原路径；不能换到其他路径。\n"
+        "- exec_command 必须设置合理 cwd；如果要运行某个文件，cwd 应靠近该文件所在目录。\n"
+        "- 只返回 JSON，格式可以是 Task Planner steps，或 {\"plan_patch\":{\"action\":\"drop_failed_step\",\"step_id\":\"...\",\"reason\":\"...\"}}。\n\n"
+        f"current_user_message:\n{_resolve_user_message(state)}\n\n"
+        f"recent_failures:\n{json.dumps(recent_failures, ensure_ascii=False)}\n\n"
+        f"task:\n{json.dumps(task, ensure_ascii=False)}\n\n"
+        f"world_status:\n{json.dumps(world_status, ensure_ascii=False)}"
+    )
+    debug_base = {
+        "kind": "llm_replan",
+        "task_id": task.get("id"),
+        "plan_version": task.get("plan_version"),
+        "replan_count": task.get("replan_count"),
+        "world_status": _replan_debug_compact(world_status),
+        "recent_failures": _replan_debug_compact(recent_failures),
+        "prompt_excerpt": _truncate_debug_text(prompt, 3000),
     }
+    try:
+        response = get_planner_chat_model().invoke([HumanMessage(content=prompt)])
+        raw_response = str(response.content)
+    except Exception as exc:
+        _append_replan_debug_to_task(
+            task,
+            {
+                **debug_base,
+                "status": "model_error",
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+        )
+        return None
+    try:
+        payload = parse_json_object(raw_response)
+    except Exception as exc:
+        _append_replan_debug_to_task(
+            task,
+            {
+                **debug_base,
+                "status": "parse_error",
+                "raw_response": _truncate_debug_text(raw_response, 4000),
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+        )
+        return None
+    patched = _apply_plan_patch_payload(state, task, world_status, payload)
+    if patched:
+        _append_replan_debug_to_task(
+            patched,
+            {
+                **debug_base,
+                "status": "accepted_patch",
+                "raw_response": _truncate_debug_text(raw_response, 4000),
+                "parsed_payload": _replan_debug_compact(payload),
+            },
+        )
+        return patched
+    raw_steps = payload.get("steps")
+    if not isinstance(raw_steps, list) or not raw_steps:
+        _append_replan_debug_to_task(
+            task,
+            {
+                **debug_base,
+                "status": "rejected_no_steps",
+                "raw_response": _truncate_debug_text(raw_response, 4000),
+                "parsed_payload": _replan_debug_compact(payload),
+            },
+        )
+        return None
+    steps = [_normalize_task_step(raw_step, index=index) for index, raw_step in enumerate(raw_steps) if isinstance(raw_step, dict)]
+    steps = [step for step in steps if step.get("kind") in {"tool", "reasoning", "decision", "final"}]
+    if not steps:
+        _append_replan_debug_to_task(
+            task,
+            {
+                **debug_base,
+                "status": "rejected_invalid_steps",
+                "raw_response": _truncate_debug_text(raw_response, 4000),
+                "parsed_payload": _replan_debug_compact(payload),
+            },
+        )
+        return None
+    replanned = _new_task_payload(
+        base=_task_with_step_queues(task),
+        state=state,
+        goal=str(task.get("goal") or _resolve_user_message(state)),
+        source_user_message=str(task.get("source_user_message") or _resolve_user_message(state)),
+        steps=steps,
+        world_state=world_state,
+        execution_history=[
+            *list(task.get("execution_history") or []),
+            {
+                "type": "replanned",
+                "summary": str(payload.get("reason") or world_status.get("replan_reason") or "补充剩余步骤。"),
+                "payload": {"step_count": len(steps), "missing_requirements": world_status.get("missing_requirements") or []},
+            },
+        ],
+        plan_version=int(task.get("plan_version") or 1) + 1,
+        replan_count=int(task.get("replan_count") or 0) + 1,
+        pending_merge=_pending_merge_strategy(world_status),
+    )
+    _append_replan_debug_to_task(
+        replanned,
+        {
+            **debug_base,
+            "status": "accepted_steps",
+            "raw_response": _truncate_debug_text(raw_response, 4000),
+            "parsed_payload": _replan_debug_compact(payload),
+            "normalized_step_count": len(steps),
+            "normalized_step_ids": [step.get("id") for step in steps],
+        },
+    )
+    return replanned
+
+
+def _append_replan_debug_to_task(task: TaskPayload, entry: dict) -> TaskPayload:
+    """把 replanner 调试记录写入 task.world_state.replan_debug。
+
+    参数：
+      task: 当前或新生成的 Task。函数会原地更新，便于失败路径也能留下记录。
+      entry: 单次 replanner 调用的压缩调试记录。
+
+    返回：
+      已带有调试记录的 task，方便调用方链式返回。
+    """
+
+    world_state = dict(task.get("world_state") or _empty_world_state())
+    debug_items = list(world_state.get("replan_debug") or [])
+    debug_items.append(entry)
+    world_state["replan_debug"] = debug_items[-10:]
+    task["world_state"] = world_state  # type: ignore[typeddict-item]
+    return task
+
+
+def _replan_debug_compact(value, *, depth: int = 0):
+    """压缩 replanner 调试值，避免 checkpoint/debug_payload 过大。"""
+
+    if depth >= 4:
+        return _truncate_debug_text(str(value), 800)
+    if isinstance(value, dict):
+        return {str(key): _replan_debug_compact(item, depth=depth + 1) for key, item in value.items()}
+    if isinstance(value, list):
+        items = [_replan_debug_compact(item, depth=depth + 1) for item in value[:10]]
+        if len(value) > 10:
+            items.append({"__truncated__": len(value) - 10})
+        return items
+    if isinstance(value, str):
+        return _truncate_debug_text(value, 1200)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _truncate_debug_text(str(value), 1200)
+
+
+def _truncate_debug_text(text: str, max_length: int) -> str:
+    """裁剪调试文本并标记被裁剪的长度。"""
+
+    content = str(text or "")
+    if len(content) <= max_length:
+        return content
+    return f"{content[:max_length]}\n...[truncated {len(content) - max_length} chars]"
+
+
+def _pending_merge_strategy(world_status: WorldStatusPayload) -> Literal["replace", "prepend", "append"]:
+    """根据重规划原因决定新 steps 如何合并进 pending 队列。"""
+
+    last_error = world_status.get("last_error") or {}
+    error_code = str(last_error.get("error_code") or "")
+    if error_code in {"INVALID_PLAN_DEPENDENCY", "NO_READY_STEP"}:
+        return "replace"
+    if last_error:
+        return "prepend"
+    if world_status.get("missing_requirements"):
+        return "append"
+    return "replace"
+
+
+def _apply_plan_patch_payload(
+    state: MemoryChatGraphState,
+    task: TaskPayload,
+    world_status: WorldStatusPayload,
+    payload: dict,
+) -> TaskPayload | None:
+    """应用 replanner 返回的通用 plan_patch。"""
+
+    patch = payload.get("plan_patch")
+    if not isinstance(patch, dict):
+        return None
+    if str(patch.get("action") or "") != "drop_failed_step":
+        return None
+    step_id = str(patch.get("step_id") or world_status.get("blocked_step_id") or "")
+    reason = str(patch.get("reason") or payload.get("reason") or "失败 step 不再阻塞剩余队列，继续执行 pending。")
+    return _drop_failed_step_if_unreferenced(state, task, world_status, step_id=step_id, reason=reason)
+
+
+def _fallback_drop_unreferenced_failed_step(
+    state: MemoryChatGraphState,
+    task: TaskPayload,
+    world_status: WorldStatusPayload,
+) -> TaskPayload | None:
+    """LLM 没给 steps/patch 时，对不再被依赖的失败 step 做通用 drop。"""
+
+    last_error = world_status.get("last_error") or {}
+    step_id = str(last_error.get("step_id") or world_status.get("blocked_step_id") or "")
+    if not step_id:
+        return None
+    return _drop_failed_step_if_unreferenced(
+        state,
+        task,
+        world_status,
+        step_id=step_id,
+        reason="失败 step 不再被 pending 依赖，保留失败历史并继续执行剩余队列。",
+    )
+
+
+def _drop_failed_step_if_unreferenced(
+    state: MemoryChatGraphState,
+    task: TaskPayload,
+    world_status: WorldStatusPayload,
+    *,
+    step_id: str,
+    reason: str,
+) -> TaskPayload | None:
+    """如果失败 step 不再被 pending 依赖，则解除 REPLANNING 并继续 pending。"""
+
+    queued = _task_with_step_queues(task)
+    if not step_id or _pending_depends_on_step(queued, step_id):
+        return None
+    if not queued.get("pending_steps"):
+        return None
+    updated = dict(queued)
+    updated["status"] = "READY"
+    updated["current_step_id"] = None
+    updated["plan_version"] = int(queued.get("plan_version") or 1) + 1
+    updated["execution_history"] = [
+        *list(queued.get("execution_history") or []),
+        {
+            "type": "plan_patched",
+            "summary": reason,
+            "payload": {
+                "action": "drop_failed_step",
+                "step_id": step_id,
+                "replan_reason": world_status.get("replan_reason"),
+            },
+        },
+    ]
+    return _task_with_step_queues(updated)  # type: ignore[arg-type]
+
+
+def _pending_depends_on_step(task: TaskPayload, step_id: str) -> bool:
+    """检查 pending 队列是否仍依赖某个失败 step。"""
+
+    for step in task.get("pending_steps") or []:
+        if step_id in [str(item) for item in step.get("dependencies") or []]:
+            return True
+    return False
+
+
+def _recent_failures_for_prompt(world_state: WorldStatePayload, *, limit: int = 3) -> list[dict]:
+    """提取最近失败摘要，放到 replanner prompt 的显眼位置。"""
+
+    failures = list(world_state.get("failures") or [])
+    return failures[-limit:]
+
+
+def _fallback_replan_missing_exec_result(
+    state: MemoryChatGraphState,
+    task: TaskPayload,
+    world_status: WorldStatusPayload,
+) -> TaskPayload | None:
+    """缺少运行结果时的通用兜底重规划。
+
+    这个 fallback 只负责“还没尝试运行”时补一个运行步骤。若相同 exec
+    已经失败，且失败后没有新的读/写/检索 observation 改变前置条件，就不能
+    机械重复同一命令，否则 agent 会在同一个错误上空转。
+    """
+
+    missing = " ".join(world_status.get("missing_requirements") or [])
+    if "运行结果" not in missing and "执行命令" not in missing:
+        return None
+    world_state = task.get("world_state") or state.get("world_state") or _empty_world_state()
+    written_files = dict(world_state.get("written_files") or {})
+    if not written_files:
+        return None
+    path = sorted(written_files)[-1]
+    cwd = str(Path(path).parent).replace("\\", "/") if path else "."
+    command = _infer_run_command_for_file(path)
+    if not command:
+        return None
+    if _has_unresolved_same_exec_failure(world_state, command=command, cwd=cwd):
+        return None
+    steps = [
+            {
+                "id": "run_generated_file",
+                "description": "运行已生成的文件并获取结果",
+                "kind": "tool",
+                "tool_name": "exec_command",
+                "arguments": {"command": command, "cwd": cwd, "timeout_ms": 30000, "max_output_bytes": 65536},
+                "dependencies": [],
+                "status": "PENDING",
+                "retry_count": 0,
+                "output_ref": None,
+                "error": None,
+            }
+        ]
+    return _new_task_payload(
+        base=_task_with_step_queues(task),
+        state=state,
+        goal=str(task.get("goal") or _resolve_user_message(state)),
+        source_user_message=str(task.get("source_user_message") or _resolve_user_message(state)),
+        steps=steps,  # type: ignore[arg-type]
+        world_state=world_state,
+        execution_history=[
+            *list(task.get("execution_history") or []),
+            {
+                "type": "replanned",
+                "summary": "目标仍缺少运行结果，补充执行命令步骤。",
+                "payload": {"missing_requirements": world_status.get("missing_requirements") or []},
+            },
+        ],
+        plan_version=int(task.get("plan_version") or 1) + 1,
+        replan_count=int(task.get("replan_count") or 0) + 1,
+        pending_merge=_pending_merge_strategy(world_status),
+    )
+
+
+def _has_unresolved_same_exec_failure(
+    world_state: WorldStatePayload,
+    *,
+    command: str,
+    cwd: str,
+) -> bool:
+    """判断相同 exec 失败后是否缺少新的前置条件变化。
+
+    参数：
+      world_state: 当前任务的事实状态，包含工具 observations。
+      command: fallback 准备再次执行的命令。
+      cwd: fallback 准备再次执行的工作目录。
+
+    返回 True 表示“同一命令刚失败过，且失败后没有任何可改变判断的动作”，
+    此时应阻止 fallback 重复入队。
+    """
+
+    observations = list(world_state.get("observations") or [])
+    normalized_command = _normalize_exec_command_signature(command)
+    normalized_cwd = _normalize_exec_cwd_signature(cwd)
+    for index in range(len(observations) - 1, -1, -1):
+        observation = observations[index]
+        if observation.get("tool_name") != "exec_command" or observation.get("ok"):
+            continue
+        data = dict(observation.get("data") or {})
+        arguments = dict(observation.get("arguments") or {})
+        failed_command = str(data.get("command") or arguments.get("command") or "")
+        failed_cwd = str(data.get("cwd") or arguments.get("cwd") or "")
+        if _normalize_exec_command_signature(failed_command) != normalized_command:
+            continue
+        if _normalize_exec_cwd_signature(failed_cwd) != normalized_cwd:
+            continue
+        later_observations = observations[index + 1 :]
+        return not _has_precondition_changing_observation(later_observations)
+    return False
+
+
+def _has_precondition_changing_observation(observations: list[dict]) -> bool:
+    """检查失败后是否出现了足以支撑重试的新事实。
+
+    成功写入会改变文件系统；成功读取/搜索/查看会改变 agent 对世界的认知。
+    这些都可以作为“重新尝试同类命令”的前置条件。单纯再次失败不算变化。
+    """
+
+    precondition_tools = {
+        "read_file",
+        "write_file",
+        "list_dir",
+        "get_file_info",
+        "search_files",
+        "search_text",
+    }
+    return any(
+        observation.get("ok") and observation.get("tool_name") in precondition_tools
+        for observation in observations
+    )
+
+
+def _normalize_exec_command_signature(command: str) -> str:
+    """把命令归一化成适合比较重复执行的签名。"""
+
+    return " ".join(str(command or "").strip().split()).lower()
+
+
+def _normalize_exec_cwd_signature(cwd: str) -> str:
+    """把 cwd 归一化，避免斜杠差异影响重复执行判断。"""
+
+    return str(cwd or ".").replace("\\", "/").rstrip("/").lower() or "."
+
+
+def _infer_run_command_for_file(path: str) -> str:
+    """根据文件扩展名推断短时运行命令。"""
+
+    suffix = Path(path).suffix.lower()
+    name = Path(path).name
+    if suffix == ".py":
+        return f"python {name}"
+    if suffix == ".js":
+        return f"node {name}"
+    if suffix == ".rs":
+        exe = Path(name).with_suffix(".exe").name
+        return f"rustc {name} -o {exe} && .\\{exe}"
+    return ""
+
+
+def _last_written_file_path(world_state: WorldStatePayload) -> str:
+    """读取最近记录的写入文件路径。"""
+
+    written_files = dict(world_state.get("written_files") or {})
+    if written_files:
+        return str(list(written_files.keys())[-1])
+    for observation in reversed(list(world_state.get("observations") or [])):
+        if observation.get("tool_name") == "write_file" and observation.get("ok"):
+            data = observation.get("data") or {}
+            if isinstance(data, str):
+                data = parse_json_object(data)
+            path = str((data or {}).get("path") or "")
+            if path:
+                return path
+    return ""
 
 
 def _build_dynamic_task_planner_prompt(state: MemoryChatGraphState) -> str:
@@ -1351,15 +2360,22 @@ def _build_dynamic_task_planner_prompt(state: MemoryChatGraphState) -> str:
         for message in state.get("recent_messages", [])[-6:]
     )
     observations = _tool_observations_to_context(list(state.get("tool_observations", [])))
+    followup_hint = _local_operation_followup_hint(state)
     return (
         "你是 AiMemo 的 Dynamic Execution Task Planner。你的任务是把当前用户请求拆成可执行步骤，"
         "不要只选择一个工具。\n\n"
         "必须区分 history 和 current：history 只能作为背景；current 是本轮任务边界。\n"
         "如果 current 是新的明确目标、路径或命令，不能延续 history 中上一轮工具任务。\n\n"
+        "如果 current 是“可以/继续/直接覆盖/按你说的”这类确认，而 history 中最近一条 assistant "
+        "明确提出了需要覆盖、保存、运行、测试或继续调用本地工具，则应把它视为上一轮本地操作的 continuation，"
+        "从 history 中提取路径、内容、命令和预期结果来规划真实工具步骤。\n\n"
         "可用 step.kind：tool、reasoning、decision、final。\n"
         "可用 tool：list_dir、read_file、search_files、search_text、get_file_info、write_file、exec_command。\n"
         "规则：\n"
+        "- read-before-write 是硬契约：任何可能覆盖已有文件的 write_file(overwrite=true) 之前，必须先 read_file 同一路径。\n"
         "- 修改已有文件必须先 read_file，再 reasoning 生成新内容，再 write_file(overwrite=true)。\n"
+        "- 如果前面用 exec_command 创建了项目或文件，后续覆盖这些新建文件也必须先 read_file 同一路径。\n"
+        "- 不允许在 read-before-write 失败后改写无关路径来绕过规则；恢复步骤必须继续使用原 write_file.path。\n"
         "- write_file 的 content 可以使用 content_ref 指向某个 reasoning step。\n"
         "- exec_command 只用于短时非交互终端命令，不用于读写文件。\n"
         "- 不要写入占位内容。\n"
@@ -1380,6 +2396,7 @@ def _build_dynamic_task_planner_prompt(state: MemoryChatGraphState) -> str:
         "]}\n\n"
         f"history:\n{recent_text or '无'}\n\n"
         f"current:\n{_resolve_user_message(state)}\n\n"
+        f"followup_hint:\n{followup_hint or '无'}\n\n"
         f"observations:\n{observations or '暂无'}"
     )
 
@@ -1398,18 +2415,17 @@ def _task_from_single_action(state: MemoryChatGraphState, action: dict) -> TaskP
         },
         index=0,
     )
-    return {
-        "id": _task_id_from_user_message(_resolve_user_message(state)),
-        "goal": _resolve_user_message(state),
-        "source_user_message": _resolve_user_message(state),
-        "status": "READY",
-        "plan_version": 1,
-        "current_step_id": None,
-        "steps": [step],
-        "world_state": _empty_world_state(),
-        "execution_history": [{"type": "planned", "summary": "由兼容单 action planner 生成任务。", "payload": {}}],
-        "replan_count": 0,
-    }
+    return _new_task_payload(
+        base=None,
+        state=state,
+        goal=_resolve_user_message(state),
+        source_user_message=_resolve_user_message(state),
+        steps=[step],
+        world_state=_empty_world_state(),
+        execution_history=[{"type": "planned", "summary": "由兼容单 action planner 生成任务。", "payload": {}}],
+        plan_version=1,
+        replan_count=0,
+    )
 
 
 def _normalize_task_step(raw_step: dict, *, index: int) -> TaskStepPayload:
@@ -1428,16 +2444,20 @@ def _normalize_task_step(raw_step: dict, *, index: int) -> TaskStepPayload:
         "status": "PENDING",
         "retry_count": int(raw_step.get("retry_count") or 0),
         "output_ref": raw_step.get("output_ref"),
+        "attempt_count": int(raw_step.get("attempt_count") or 0),
+        "last_error": raw_step.get("last_error"),
         "error": None,
     }
 
 
 def _select_ready_task_step(task: TaskPayload) -> TaskStepPayload | None:
-    """选择一个依赖已完成的 ready step。第一版串行执行。"""
+    """从 pending_steps 取出下一个依赖满足的 step。第一版串行执行。"""
 
-    steps = list(task.get("steps") or [])
-    completed = {str(step.get("id")) for step in steps if step.get("status") == "COMPLETED"}
-    for step in steps:
+    queued = _task_with_step_queues(task)
+    if queued.get("status") == "REPLANNING":
+        return None
+    completed = {str(step.get("id")) for step in queued.get("completed_steps") or []}
+    for step in queued.get("pending_steps") or []:
         if step.get("status") not in {"PENDING", "READY"}:
             continue
         dependencies = [str(item) for item in step.get("dependencies") or []]
@@ -1497,21 +2517,97 @@ def _generate_reasoning_step_output(step: TaskStepPayload, state: MemoryChatGrap
 
 
 def _mark_task_step_status(task: TaskPayload, step_id: str, status: str) -> TaskPayload:
-    """更新 task 中某个 step 的状态。"""
+    """更新 task 中某个 step 的状态。
+
+    双队列模型下：
+      - EXECUTING 只记录 current_step_id，不从 pending 出队。
+      - COMPLETED 从 pending 移入 completed。
+      - FAILED 从 pending 移入 failed。
+    """
 
     if not task:
         return task
-    steps: list[TaskStepPayload] = []
-    for step in task.get("steps") or []:
+    queued = _task_with_step_queues(task)
+    pending: list[TaskStepPayload] = []
+    completed = list(queued.get("completed_steps") or [])
+    failed = list(queued.get("failed_steps") or [])
+    matched: TaskStepPayload | None = None
+
+    for step in queued.get("pending_steps") or []:
         updated = dict(step)
-        if str(updated.get("id")) == step_id:
+        if str(updated.get("id")) != step_id:
+            pending.append(updated)  # type: ignore[arg-type]
+            continue
+        matched = updated  # type: ignore[assignment]
+        if status == "EXECUTING":
+            updated["status"] = "PENDING"  # type: ignore[typeddict-item]
+            pending.append(updated)  # type: ignore[arg-type]
+        elif status == "COMPLETED":
+            updated["status"] = "COMPLETED"  # type: ignore[typeddict-item]
+            completed.append(updated)  # type: ignore[arg-type]
+        elif status == "FAILED":
+            updated["status"] = "FAILED"  # type: ignore[typeddict-item]
+            failed.append(updated)  # type: ignore[arg-type]
+        else:
             updated["status"] = status  # type: ignore[typeddict-item]
-        steps.append(updated)  # type: ignore[arg-type]
-    updated_task = dict(task)
-    updated_task["steps"] = steps
-    updated_task["status"] = _derive_task_status(steps)  # type: ignore[typeddict-item]
+            pending.append(updated)  # type: ignore[arg-type]
+
+    if matched is None and status in {"COMPLETED", "FAILED"}:
+        for source in (queued.get("completed_steps") or [], queued.get("failed_steps") or []):
+            for step in source:
+                if str(step.get("id")) == step_id:
+                    matched = dict(step)  # type: ignore[assignment]
+                    matched["status"] = status  # type: ignore[index]
+
+    updated_task = dict(queued)
+    updated_task["pending_steps"] = pending
+    updated_task["completed_steps"] = _dedupe_task_steps(completed, keep="last")
+    updated_task["failed_steps"] = _dedupe_task_steps(failed, keep="last")
     updated_task["current_step_id"] = step_id if status == "EXECUTING" else None
+    updated_task = _task_with_step_queues(updated_task)  # type: ignore[arg-type]
+    if status == "FAILED":
+        # 失败的当前 step 必须先被 replan，不能让队尾步骤越过它继续执行。
+        updated_task["status"] = "REPLANNING"
     return updated_task  # type: ignore[return-value]
+
+
+def _step_error_from_observation(observation: AgentToolObservationPayload) -> dict | None:
+    """把工具 observation 摘成 step.last_error。"""
+
+    if observation.get("ok"):
+        return None
+    data = _observation_data_dict(observation)
+    return {
+        "tool_name": observation.get("tool_name"),
+        "error_code": observation.get("error_code"),
+        "message": observation.get("message"),
+        "command": data.get("command"),
+        "cwd": data.get("cwd"),
+        "exit_code": data.get("exit_code"),
+        "stdout_excerpt": _text_excerpt(data.get("stdout")),
+        "stderr_excerpt": _text_excerpt(data.get("stderr")),
+    }
+
+
+def _observation_data_dict(observation: AgentToolObservationPayload) -> dict:
+    """兼容 dict / JSON 字符串 / Python repr 字符串形式的 observation.data。"""
+
+    data = observation.get("data") or {}
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, str):
+        parsed = parse_json_object(data)
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _text_excerpt(value: object, *, limit: int = 1200) -> str:
+    """截取适合进入 prompt/debug 的文本片段。"""
+
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n...[truncated]"
 
 
 def _derive_task_status(steps: list[TaskStepPayload]) -> str:
@@ -1526,6 +2622,82 @@ def _task_has_terminal_status(task: TaskPayload) -> bool:
     return task.get("status") in {"COMPLETED", "FAILED", "CANCELLED", "SUPERSEDED"}
 
 
+def _restore_active_task_for_turn(
+    raw_active_task: str,
+    *,
+    user_message: str,
+    recent_messages: list[ChatMessagePayload],
+) -> TaskPayload:
+    """按当前用户输入恢复上一轮未完成任务。
+
+    参数：
+      raw_active_task: Conversation.active_task 中保存的 JSON 字符串。
+      user_message: 本轮用户输入。只有“继续/随便你/按你说的”等确认语义才恢复。
+      recent_messages: 最近业务消息，用于复用已有的 continuation 判断逻辑。
+
+    返回：
+      可继续执行的 Task；如果当前输入是新任务或没有未完成任务，返回空 dict。
+    """
+
+    task = _decode_active_task(raw_active_task)
+    if not task:
+        return {}
+    task = _task_with_step_queues(task)
+    if _task_has_terminal_status(task) or not task.get("pending_steps"):
+        return {}
+    if _is_new_tool_task(user_message) and not _looks_like_local_operation_confirmation(user_message):
+        return {}
+    probe_state: MemoryChatGraphState = {
+        "user_message": user_message,
+        "recent_messages": recent_messages,
+    }
+    if not _looks_like_local_operation_confirmation(user_message):
+        return {}
+    if not _assistant_suggested_local_operation(_latest_assistant_message_text(probe_state)):
+        return {}
+    restored = deepcopy(task)
+    restored["status"] = "READY"  # type: ignore[typeddict-item]
+    execution_history = list(restored.get("execution_history") or [])
+    execution_history.append(
+        {
+            "type": "continued_in_new_turn",
+            "summary": "用户确认继续上一轮未完成本地任务，已从 conversation.active_task 恢复。",
+            "payload": {"user_message": user_message},
+        }
+    )
+    restored["execution_history"] = execution_history  # type: ignore[typeddict-item]
+    return restored
+
+
+def _decode_active_task(raw_active_task: str) -> TaskPayload:
+    """解析 Conversation.active_task，兼容空值和历史坏数据。"""
+
+    if not raw_active_task:
+        return {}
+    try:
+        payload = json.loads(raw_active_task)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _serialize_active_task_for_conversation(state: MemoryChatGraphState) -> str:
+    """把未完成任务保存到 Conversation.active_task。
+
+    完成、失败、取消或没有剩余 pending step 时清空。这样下一轮不会误续旧任务；
+    只有真实未完成的本地执行目标才会跨 turn 保留。
+    """
+
+    task = _task_with_step_queues(state.get("task") or {})
+    if not task:
+        return "{}"
+    if _task_has_terminal_status(task):
+        return "{}"
+    if not task.get("pending_steps"):
+        return "{}"
+    return json.dumps(task, ensure_ascii=False)
+
+
 def _empty_world_state() -> WorldStatePayload:
     return {
         "cwd": None,
@@ -1535,8 +2707,319 @@ def _empty_world_state() -> WorldStatePayload:
         "generated_outputs": {},
         "observations": [],
         "failures": [],
+        "replan_debug": [],
         "approvals": [],
     }
+
+
+def _empty_world_status() -> WorldStatusPayload:
+    """构造空任务的 WorldStatus。"""
+
+    return {
+        "goal_satisfied": False,
+        "missing_requirements": [],
+        "requires_replan": False,
+        "replan_reason": "",
+        "last_error": None,
+        "blocked_step_id": None,
+        "recovery_hint": "",
+        "recovery_path": None,
+        "completed_steps": [],
+        "failed_steps": [],
+        "next_step_id": None,
+        "contradictions": [],
+        "acceptance_summary": [],
+    }
+
+
+def _verify_task_goal(
+    task: TaskPayload,
+    world_state: WorldStatePayload,
+    state: MemoryChatGraphState,
+) -> GoalVerificationPayload:
+    """基于真实工具事实验收当前 Task 是否满足用户目标。
+
+    参数：
+      task: 当前 Dynamic Execution Task。
+      world_state: 工具调用沉淀出的事实状态。
+      state: 当前 graph state，用于读取原始用户输入。
+
+    返回：
+      GoalVerificationPayload。`satisfied=true` 才允许成功式最终回答。
+    """
+
+    goal_text = f"{task.get('goal') or ''}\n{_resolve_user_message(state)}"
+    observations = list(world_state.get("observations") or [])
+    missing: list[str] = []
+    contradictions: list[str] = []
+    evidence: list[dict] = []
+
+    if _goal_requires_exec_result(goal_text):
+        exec_observation = _latest_successful_exec_observation(observations)
+        if exec_observation is None:
+            missing.append("缺少成功的命令执行结果。")
+        else:
+            data = _observation_data_dict(exec_observation)  # type: ignore[arg-type]
+            stdout = str(data.get("stdout") or "")
+            stderr = str(data.get("stderr") or "")
+            evidence.append(
+                {
+                    "source": "tool_observation",
+                    "tool_call_id": exec_observation.get("tool_call_id"),
+                    "step_id": _step_id_from_tool_call_id(str(exec_observation.get("tool_call_id") or "")),
+                    "tool_name": "exec_command",
+                    "field": "stdout",
+                    "value_excerpt": _text_excerpt(stdout or stderr),
+                }
+            )
+            output_problem = _exec_output_contradiction(goal_text, stdout, stderr)
+            if output_problem:
+                contradictions.append(output_problem)
+
+    satisfied = not missing and not contradictions
+    if satisfied:
+        reason = "目标验收通过，已有工具事实支撑最终回答。"
+    else:
+        reason_parts = [*missing, *contradictions]
+        reason = "目标验收未通过：" + "；".join(reason_parts)
+    return {
+        "satisfied": satisfied,
+        "reason": reason,
+        "missing_criteria": missing,
+        "contradictions": contradictions,
+        "evidence": evidence,
+    }
+
+
+def _world_status_from_verification(
+    world_status: WorldStatusPayload,
+    verification: GoalVerificationPayload,
+) -> WorldStatusPayload:
+    """把目标验收结果合并回 WorldStatus，供 agent_think 触发 replan。"""
+
+    updated = dict(world_status)
+    if verification.get("satisfied"):
+        updated["goal_satisfied"] = True
+        updated["requires_replan"] = False
+        updated["replan_reason"] = ""
+        updated["missing_requirements"] = []
+        updated["contradictions"] = []
+    else:
+        updated["goal_satisfied"] = False
+        updated["requires_replan"] = True
+        updated["replan_reason"] = str(verification.get("reason") or "目标验收未通过，需要重规划。")
+        updated["missing_requirements"] = list(verification.get("missing_criteria") or [])
+        updated["contradictions"] = list(verification.get("contradictions") or [])
+    updated["acceptance_summary"] = [
+        {
+            "satisfied": bool(verification.get("satisfied")),
+            "reason": verification.get("reason", ""),
+            "evidence_count": len(verification.get("evidence") or []),
+        }
+    ]
+    return updated  # type: ignore[return-value]
+
+
+def _latest_successful_exec_observation(observations: list[dict]) -> dict | None:
+    """读取最近一次成功 exec_command observation。"""
+
+    for observation in reversed(observations):
+        if observation.get("tool_name") != "exec_command" or not observation.get("ok"):
+            continue
+        data = _observation_data_dict(observation)  # type: ignore[arg-type]
+        if int(data.get("exit_code", 0) or 0) == 0:
+            return observation
+    return None
+
+
+def _exec_output_contradiction(goal_text: str, stdout: str, stderr: str) -> str:
+    """检查命令输出是否明显违背目标。
+
+    第一版只做高置信规则：用户明确要求随机数时，输出必须包含足够数量的数字。
+    其他目标先不做过度猜测，避免把通用能力写成语言/框架特化。
+    """
+
+    output = f"{stdout}\n{stderr}".strip()
+    if not output:
+        return "命令执行成功但没有输出，无法作为运行结果返回。"
+    expected_numbers = _expected_random_number_count(goal_text)
+    if expected_numbers:
+        numbers = re.findall(r"(?<![A-Za-z0-9_])-?\d+(?:\.\d+)?(?![A-Za-z0-9_])", output)
+        if len(numbers) < expected_numbers:
+            return f"用户目标要求生成 {expected_numbers} 个随机数，但命令输出中只识别到 {len(numbers)} 个数字。"
+    return ""
+
+
+def _expected_random_number_count(text: str) -> int:
+    """从用户目标中提取“生成 N 个随机数”的验收数量。"""
+
+    if "随机数" not in text and "random" not in text.lower():
+        return 0
+    match = re.search(r"(\d+)\s*个?\s*(?:随机数|random\s+numbers?)", text, flags=re.IGNORECASE)
+    return int(match.group(1)) if match else 0
+
+
+def _step_id_from_tool_call_id(tool_call_id: str) -> str | None:
+    """从 tool_call_id 中尽量还原 step_id。
+
+    旧格式可能是 `tool-1-exec_command`，没有 step 信息时返回 None。
+    """
+
+    return None
+
+
+def _evaluate_world_status(
+    task: TaskPayload,
+    world_state: WorldStatePayload,
+    state: MemoryChatGraphState,
+) -> WorldStatusPayload:
+    """基于 task + world_state 判断当前任务进展。
+
+    WorldState 是事实日志，WorldStatus 是执行判断层。第一版先做确定性判断：
+      - 尚未解决的失败 observation 会触发 requires_replan；failed_steps 仅保留历史。
+      - 用户目标包含“运行/结果/测试/验证”等意图时，必须看到成功 exec observation。
+      - completed_steps/failed_steps/next_step_id 用于前端调试和 agent_think 决策。
+    后续可以把缺失要求判断升级为 LLM evaluator，但底层事实仍来自这里。
+    """
+
+    task = _task_with_step_queues(task)
+    completed_steps = [str(step.get("id")) for step in task.get("completed_steps") or []]
+    failed_steps = [str(step.get("id")) for step in task.get("failed_steps") or []]
+    failures = list(world_state.get("failures") or [])
+    active_failures = _active_failures_for_world_state(failures, world_state)
+    invalid_plan_error = _invalid_plan_error(task)
+    last_error = invalid_plan_error or (active_failures[-1] if active_failures else None)
+    next_step = _select_ready_task_step(task)
+    blocked_step_id = str(last_error.get("step_id") or "") if last_error else ""
+    recovery_hint = str(last_error.get("recovery_hint") or "") if last_error else ""
+    recovery_path = str(last_error.get("path") or "") if last_error else ""
+    missing_requirements: list[str] = []
+    user_goal = f"{task.get('goal') or ''}\n{_resolve_user_message(state)}"
+    observations = list(world_state.get("observations") or [])
+
+    if _goal_requires_exec_result(user_goal) and not _has_successful_exec_observation(observations):
+        missing_requirements.append("需要成功执行命令并获得运行结果。")
+
+    requires_replan = bool(invalid_plan_error or active_failures or missing_requirements)
+    replan_reason = ""
+    if invalid_plan_error:
+        replan_reason = str(invalid_plan_error.get("message") or "动态任务计划不可执行，需要重新规划。")
+    elif active_failures:
+        failed_label = str(last_error.get("step_id") or "工具调用") if last_error else "工具调用"
+        replan_reason = f"{failed_label} 执行失败，需要基于错误结果重新规划当前或后续步骤。"
+    elif missing_requirements:
+        replan_reason = "任务目标仍缺少必要结果，需要补充后续步骤。"
+
+    terminal_completed = task.get("status") == "COMPLETED"
+    goal_satisfied = terminal_completed and not missing_requirements and not requires_replan
+    return {
+        "goal_satisfied": goal_satisfied,
+        "missing_requirements": missing_requirements,
+        "requires_replan": requires_replan,
+        "replan_reason": replan_reason,
+        "last_error": last_error,
+        "blocked_step_id": blocked_step_id or None,
+        "recovery_hint": recovery_hint,
+        "recovery_path": recovery_path or None,
+        "completed_steps": completed_steps,
+        "failed_steps": failed_steps,
+        "next_step_id": str(next_step.get("id")) if next_step else None,
+    }
+
+
+def _invalid_plan_error(task: TaskPayload) -> dict | None:
+    """检测 pending 非空但当前计划不可执行的结构错误。"""
+
+    queued = _task_with_step_queues(task)
+    pending = list(queued.get("pending_steps") or [])
+    if not pending or queued.get("status") == "REPLANNING":
+        return None
+    if _select_ready_task_step(queued) is not None:
+        return None
+    completed = {str(step.get("id")) for step in queued.get("completed_steps") or []}
+    known_steps = completed | {str(step.get("id")) for step in pending} | {str(step.get("id")) for step in queued.get("failed_steps") or []}
+    for step in pending:
+        for dependency in [str(item) for item in step.get("dependencies") or []]:
+            if dependency not in known_steps:
+                return {
+                    "step_id": str(step.get("id") or ""),
+                    "tool_name": step.get("tool_name"),
+                    "error_code": "INVALID_PLAN_DEPENDENCY",
+                    "message": f"动态计划中的 step `{step.get('id')}` 依赖不存在的 `{dependency}`。",
+                    "missing_dependency": dependency,
+                    "recovery_hint": "replace_pending_plan",
+                }
+    return {
+        "step_id": str(pending[0].get("id") or ""),
+        "tool_name": pending[0].get("tool_name"),
+        "error_code": "NO_READY_STEP",
+        "message": "pending_steps 非空，但没有依赖满足的可执行 step。",
+        "recovery_hint": "replace_pending_plan",
+    }
+
+
+def _active_failures_for_world_state(
+    failures: list[dict],
+    world_state: WorldStatePayload,
+) -> list[dict]:
+    """过滤已经被后续 observation 解决的失败。
+
+    例如 READ_BEFORE_WRITE_REQUIRED 后，如果同一路径已经 read_file 成功且 write_file
+    覆盖成功，这个失败就不再是 active failure，不能继续驱动 replan。
+    """
+
+    active: list[dict] = []
+    for failure in failures:
+        if _is_failure_resolved(failure, world_state):
+            continue
+        active.append(failure)
+    return active
+
+
+def _is_failure_resolved(failure: dict, world_state: WorldStatePayload) -> bool:
+    """判断某条失败是否已被后续工具结果解决。"""
+
+    if failure.get("recovery_hint") == "read_then_write_same_path":
+        path = str(failure.get("path") or "")
+        if not path:
+            return False
+        read_files = dict(world_state.get("read_files") or {})
+        written_files = dict(world_state.get("written_files") or {})
+        return path in read_files and path in written_files
+    if failure.get("tool_name") == "exec_command" and failure.get("error_code") == "COMMAND_EXITED_NON_ZERO":
+        return _has_successful_exec_observation(list(world_state.get("observations") or []))
+    return False
+
+
+def _goal_requires_exec_result(text: str) -> bool:
+    """判断用户目标是否要求实际运行、测试、验证或返回命令结果。"""
+
+    lowered = str(text or "").lower()
+    markers = [
+        "运行结果",
+        "执行结果",
+        "跑一下",
+        "运行",
+        "执行",
+        "测试",
+        "验证",
+        "run",
+        "execute",
+        "test",
+    ]
+    return any(marker in lowered for marker in markers)
+
+
+def _has_successful_exec_observation(observations: list[dict]) -> bool:
+    """检查是否已经有成功的 exec_command observation。"""
+
+    for observation in observations:
+        if observation.get("tool_name") != "exec_command" or not observation.get("ok"):
+            continue
+        data = dict(observation.get("data") or {})
+        if int(data.get("exit_code", 1) or 0) == 0:
+            return True
+    return False
 
 
 def _task_id_from_user_message(user_message: str) -> str:
@@ -1549,17 +3032,20 @@ def _update_task_after_tool_observation(
 ) -> TaskPayload:
     """工具返回后更新 Task step 状态和 WorldState。"""
 
-    task = dict(state.get("task") or {})
+    task = _task_with_step_queues(state.get("task") or {})
     if not task:
         return task  # type: ignore[return-value]
     action = state.get("pending_tool_action") or {}
     step_id = str(action.get("source_step_id") or action.get("tool_call_id") or "")
     if not step_id:
         return task  # type: ignore[return-value]
+    if not observation.get("ok"):
+        task = _attach_last_error_to_pending_step(task, step_id, _step_error_from_observation(observation))
     updated_task = _mark_task_step_status(task, step_id, "COMPLETED" if observation.get("ok") else "FAILED")
     world_state = _update_world_state_after_tool_observation(
         updated_task.get("world_state") or _empty_world_state(),
         observation,
+        step_id=step_id,
     )
     updated_task["world_state"] = world_state
     history = list(updated_task.get("execution_history") or [])
@@ -1575,9 +3061,34 @@ def _update_task_after_tool_observation(
     return updated_task  # type: ignore[return-value]
 
 
+def _attach_last_error_to_pending_step(
+    task: TaskPayload,
+    step_id: str,
+    error: dict | None,
+) -> TaskPayload:
+    """在 step 移入 failed 前写入 last_error。"""
+
+    if not error:
+        return task
+    queued = _task_with_step_queues(task)
+    pending: list[TaskStepPayload] = []
+    for step in queued.get("pending_steps") or []:
+        updated = dict(step)
+        if str(updated.get("id")) == step_id:
+            updated["last_error"] = error  # type: ignore[typeddict-item]
+            updated["error"] = error  # type: ignore[typeddict-item]
+            updated["attempt_count"] = int(updated.get("attempt_count") or 0) + 1  # type: ignore[typeddict-item]
+        pending.append(updated)  # type: ignore[arg-type]
+    updated_task = dict(queued)
+    updated_task["pending_steps"] = pending
+    return _task_with_step_queues(updated_task)  # type: ignore[arg-type]
+
+
 def _update_world_state_after_tool_observation(
     world_state: WorldStatePayload,
     observation: AgentToolObservationPayload,
+    *,
+    step_id: str = "",
 ) -> WorldStatePayload:
     """把工具 observation 写入 WorldState。"""
 
@@ -1587,11 +3098,21 @@ def _update_world_state_after_tool_observation(
     updated["observations"] = observations
     if not observation.get("ok"):
         failures = list(updated.get("failures") or [])
+        failure = _step_error_from_observation(observation) or {}
+        arguments = observation.get("arguments") or {}
         failures.append(
             {
+                "step_id": step_id,
                 "tool_name": observation.get("tool_name"),
                 "error_code": observation.get("error_code"),
                 "message": observation.get("message"),
+                "path": arguments.get("path") if isinstance(arguments, dict) else None,
+                "recovery_hint": _recovery_hint_for_tool_failure(observation),
+                "command": failure.get("command"),
+                "cwd": failure.get("cwd"),
+                "exit_code": failure.get("exit_code"),
+                "stdout_excerpt": failure.get("stdout_excerpt"),
+                "stderr_excerpt": failure.get("stderr_excerpt"),
             }
         )
         updated["failures"] = failures
@@ -1623,6 +3144,14 @@ def _update_world_state_after_tool_observation(
     elif tool_name == "exec_command":
         updated["cwd"] = data.get("cwd") or updated.get("cwd")
     return updated  # type: ignore[return-value]
+
+
+def _recovery_hint_for_tool_failure(observation: AgentToolObservationPayload) -> str:
+    """把确定性工具错误映射成恢复提示。"""
+
+    if observation.get("tool_name") == "write_file" and observation.get("error_code") == "READ_BEFORE_WRITE_REQUIRED":
+        return "read_then_write_same_path"
+    return ""
 
 
 def _update_world_state_for_reasoning(
@@ -1695,7 +3224,9 @@ def _build_agent_tool_planner_prompt(state: MemoryChatGraphState) -> str:
         "- 只有当本轮只是确认上一轮草稿，比如“你自己取文件名/按你说的写/就这样保存”时，才沿用上一轮目录和正文补文件名并 write_file。\n"
         "- 如果 get_file_info 返回某个目标文件 PATH_NOT_FOUND，而用户本意是创建文件，不要把它解释成目录不存在；下一步应考虑 write_file。\n"
         "- write_file 的 content 必须是真实正文，禁止写入“此处填写”“待补充”“TODO”等占位模板。\n"
-        "- 工具已经成功写入后，不要继续调用工具，应进入最终回答。\n"
+        "- 工具 observation 只说明某一步已经完成或失败，不能单独决定整个任务终止。\n"
+        "- write_file 成功后，如果当前目标还要求运行、编译、测试、验证或返回运行结果，必须继续选择 exec_command。\n"
+        "- 只有当用户目标中的所有要求都已经被 observation 覆盖时，才可以返回 needs_tool=false 并进入最终回答。\n"
         "- 不要因为路径在 C/D/E 盘或 Home 外就拒绝规划；路径策略由工具执行层判断。\n\n"
         "可用工具：list_dir、read_file、search_files、search_text、get_file_info、write_file、exec_command。\n"
         "exec_command 只用于短时、非交互终端命令，例如运行测试、查看版本、git status；不要用它读写文件。\n"
@@ -2034,6 +3565,98 @@ def _requires_write_file(user_message: str) -> bool:
     )
 
 
+def _requires_local_operation_followup(state: MemoryChatGraphState) -> bool:
+    """判断当前输入是否是在确认继续上一轮本地工具操作。
+
+    参数：
+      state: 当前 graph state，主要读取 current user_message 与 recent_messages。
+
+    返回：
+      True 表示本轮虽然没有明确路径/命令，但结合上一轮 assistant 的本地操作建议，
+      应进入工具规划；False 表示普通聊天或新任务。
+    """
+
+    user_message = _resolve_user_message(state)
+    if _is_new_tool_task(user_message) or _should_try_llm_tool_planner(user_message):
+        return False
+    if not _looks_like_local_operation_confirmation(user_message):
+        return False
+    assistant = _latest_assistant_message_text(state)
+    return _assistant_suggested_local_operation(assistant)
+
+
+def _requires_exec_result_followup(state: MemoryChatGraphState) -> bool:
+    """判断当前输入或上一轮上下文是否要求真实命令运行结果。"""
+
+    user_message = _resolve_user_message(state)
+    if _goal_requires_exec_result(user_message):
+        return True
+    if not _looks_like_local_operation_confirmation(user_message):
+        return False
+    assistant = _latest_assistant_message_text(state)
+    return _assistant_suggested_local_operation(assistant) and _goal_requires_exec_result(assistant)
+
+
+def _local_operation_followup_hint(state: MemoryChatGraphState) -> str:
+    """为 planner 提供跨轮确认的结构化提示。"""
+
+    if not _requires_local_operation_followup(state):
+        return ""
+    assistant = _latest_assistant_message_text(state)
+    return (
+        "current 看起来是在确认上一轮 assistant 的本地操作建议。"
+        "不要直接回答已完成；请规划真实工具步骤。最近 assistant 内容如下：\n"
+        f"{assistant[-1800:]}"
+    )
+
+
+def _looks_like_local_operation_confirmation(text: str) -> bool:
+    """识别“可以，继续/覆盖/按你说的”这类短确认。"""
+
+    normalized = str(text or "").strip()
+    if len(normalized) > 80:
+        return False
+    confirmation_keywords = ["可以", "好", "好的", "行", "嗯", "继续", "直接", "按你说的", "就这样", "覆盖", "重试"]
+    operation_keywords = ["继续", "直接", "覆盖", "保存", "写", "运行", "执行", "重试", "修正", "修改", "按你说的"]
+    return any(keyword in normalized for keyword in confirmation_keywords) and any(
+        keyword in normalized for keyword in operation_keywords
+    )
+
+
+def _latest_assistant_message_text(state: MemoryChatGraphState) -> str:
+    """读取最近一条 assistant 消息内容。"""
+
+    for message in reversed(state.get("recent_messages", [])):
+        if message.get("role") == "assistant":
+            return str(message.get("content") or "")
+    return ""
+
+
+def _assistant_suggested_local_operation(text: str) -> bool:
+    """判断上一轮 assistant 是否明确提出了本地文件/命令操作。"""
+
+    if not text:
+        return False
+    local_markers = [
+        "Cargo.toml",
+        "write_file",
+        "exec_command",
+        "cargo run",
+        "覆盖写入",
+        "直接覆盖",
+        "重新运行",
+        "运行结果",
+        "编译",
+        "保存",
+        "写入",
+        "本地",
+        "文件",
+        "命令",
+    ]
+    proposal_markers = ["需要我", "你希望我", "我需要", "我可以", "建议", "尝试", "继续", "直接"]
+    return any(marker in text for marker in local_markers) and any(marker in text for marker in proposal_markers)
+
+
 def _should_try_llm_tool_planner(user_message: str) -> bool:
     """判断是否值得调用本地工具 planner。
 
@@ -2202,6 +3825,7 @@ def _run_agent_tool_action(
             }
 
     updated_task = _update_task_after_tool_observation(state, observation)
+    updated_world_state = updated_task.get("world_state") or _empty_world_state()
     return {
         "tool_observations": [*state.get("tool_observations", []), observation],
         "tool_budget": max(int(state.get("tool_budget") or 0) - 1, 0),
@@ -2212,7 +3836,8 @@ def _run_agent_tool_action(
         "task": updated_task,
         # 顶层 world_state 是给调试 UI/后续节点快速读取的镜像，必须和 task.world_state
         # 使用同一份更新结果，不能再从旧 state 二次推导，否则 step 状态和观察事实会脱节。
-        "world_state": updated_task.get("world_state") or _empty_world_state(),
+        "world_state": updated_world_state,
+        "world_status": _evaluate_world_status(updated_task, updated_world_state, state),
         "turn_messages": [
             *state.get("turn_messages", []),
             _turn_message(
@@ -2294,6 +3919,7 @@ def _tool_observation_message(observation: AgentToolObservationPayload) -> str:
             "error_code": observation.get("error_code"),
             "message": observation.get("message"),
             "blocked": observation.get("blocked", False),
+            "error_detail": _step_error_from_observation(observation),
         }
     )
 

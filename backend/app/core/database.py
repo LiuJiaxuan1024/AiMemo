@@ -86,6 +86,7 @@ def migrate_existing_sqlite_schema() -> None:
             {
                 "summary": "TEXT DEFAULT ''",
                 "summary_message_id": "INTEGER",
+                "active_task": "TEXT DEFAULT '{}'",
                 "langgraph_thread_id": "VARCHAR(120) DEFAULT ''",
             },
         )

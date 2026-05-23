@@ -99,8 +99,14 @@ class LocalCommandExecutor:
             return _error("EXEC_FAILED", f"命令启动失败：{exc}")
 
         stdout, stderr, truncated = _truncate_outputs(stdout, stderr, max_output_bytes=max_output_bytes)
+        # 子进程成功启动不等于命令成功。agent 的重规划依赖 ok=false 来识别失败，
+        # 因此非 0 退出码必须作为工具失败回传，同时保留 stdout/stderr 供后续判断。
+        failed_with_exit_code = (not timed_out) and exit_code != 0
+        ok = (not timed_out) and (not failed_with_exit_code)
+        error_code = "COMMAND_TIMEOUT" if timed_out else ("COMMAND_EXITED_NON_ZERO" if failed_with_exit_code else "")
+        message = "命令超时，已终止。" if timed_out else ("命令以非 0 状态退出。" if failed_with_exit_code else "")
         return ToolResult(
-            ok=not timed_out,
+            ok=ok,
             tool_name="exec_command",
             data={
                 "command": normalized_command,
@@ -114,8 +120,8 @@ class LocalCommandExecutor:
                 "truncated": truncated,
                 "risk_level": decision.risk_level,
             },
-            error_code="COMMAND_TIMEOUT" if timed_out else "",
-            message="命令超时，已终止。" if timed_out else "",
+            error_code=error_code,
+            message=message,
             blocked=False,
         )
 

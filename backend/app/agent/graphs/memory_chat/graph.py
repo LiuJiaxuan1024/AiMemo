@@ -23,15 +23,18 @@ from app.agent.graphs.memory_chat.nodes import (
     build_check_tool_policy_node,
     build_load_turn_state_node,
     build_merge_prompt_context_node,
+    build_plan_task_node,
     build_persist_messages_node,
     build_observe_tool_result_node,
     build_run_read_tool_node,
     build_run_exec_tool_node,
     build_run_write_tool_node,
     build_select_tool_node,
+    build_verify_goal_node,
     dispatch_context_workers,
     route_after_agent_think,
     route_after_tool_policy,
+    route_after_verify_goal,
 )
 from app.agent.graphs.memory_chat.state import MemoryChatGraphState
 from app.agent.streaming import map_langgraph_stream_chunk
@@ -84,6 +87,7 @@ def build_memory_chat_graph(
     graph.add_node("build_l0_current_input", build_l0_current_input_node())
     graph.add_node("build_current_conversation_window", build_current_conversation_window_node())
     graph.add_node("merge_prompt_context", build_merge_prompt_context_node())
+    graph.add_node("plan_task", build_plan_task_node())
     graph.add_node("agent_think", build_agent_think_node())
     graph.add_node("select_tool", build_select_tool_node())
     graph.add_node("check_tool_policy", build_check_tool_policy_node())
@@ -91,6 +95,7 @@ def build_memory_chat_graph(
     graph.add_node("run_write_tool", build_run_write_tool_node(session_factory))
     graph.add_node("run_exec_tool", build_run_exec_tool_node(session_factory))
     graph.add_node("observe_tool_result", build_observe_tool_result_node())
+    graph.add_node("verify_goal", build_verify_goal_node())
     graph.add_node("generate_answer", build_generate_answer_node(answer_generator))
     graph.add_node(
         "generate_elf_bubble_answer",
@@ -113,11 +118,12 @@ def build_memory_chat_graph(
     graph.add_edge("build_l1_recent_messages", "merge_prompt_context")
     graph.add_edge("build_l0_current_input", "merge_prompt_context")
     graph.add_edge("build_current_conversation_window", "merge_prompt_context")
-    graph.add_edge("merge_prompt_context", "agent_think")
+    graph.add_edge("merge_prompt_context", "plan_task")
+    graph.add_edge("plan_task", "agent_think")
     graph.add_conditional_edges(
         "agent_think",
         route_after_agent_think,
-        ["select_tool", "generate_answer", "generate_elf_bubble_answer"],
+        ["select_tool", "verify_goal", "generate_answer", "generate_elf_bubble_answer"],
     )
     graph.add_edge("select_tool", "check_tool_policy")
     graph.add_conditional_edges(
@@ -129,6 +135,11 @@ def build_memory_chat_graph(
     graph.add_edge("run_write_tool", "observe_tool_result")
     graph.add_edge("run_exec_tool", "observe_tool_result")
     graph.add_edge("observe_tool_result", "agent_think")
+    graph.add_conditional_edges(
+        "verify_goal",
+        route_after_verify_goal,
+        ["agent_think", "generate_answer", "generate_elf_bubble_answer"],
+    )
     graph.add_edge("generate_answer", "persist_messages")
     graph.add_edge("generate_elf_bubble_answer", "persist_messages")
     graph.add_edge("persist_messages", END)
@@ -170,16 +181,15 @@ def run_memory_chat_graph(
         ).compile(checkpointer=checkpointer)
         config = {"configurable": {"thread_id": thread_id}}
         snapshot = app.get_state(config)
-        graph_input = (
-            None
-            if snapshot.next
-            else {
-                "conversation_id": conversation_id,
-                "user_message": user_message,
-                "answer_mode": answer_mode,
-                "user_message_id": user_message_id or 0,
-                "assistant_message_id": assistant_message_id or 0,
-            }
+        graph_input = _resolve_graph_input_for_turn(
+            app,
+            config,
+            snapshot=snapshot,
+            conversation_id=conversation_id,
+            user_message=user_message,
+            answer_mode=answer_mode,
+            user_message_id=user_message_id,
+            assistant_message_id=assistant_message_id,
         )
         result = app.invoke(
             graph_input,
@@ -236,16 +246,15 @@ def stream_memory_chat_graph(
         ).compile(checkpointer=checkpointer)
         config = {"configurable": {"thread_id": thread_id}}
         snapshot = app.get_state(config)
-        graph_input = (
-            None
-            if snapshot.next
-            else {
-                "conversation_id": conversation_id,
-                "user_message": user_message,
-                "answer_mode": answer_mode,
-                "user_message_id": user_message_id or 0,
-                "assistant_message_id": assistant_message_id or 0,
-            }
+        graph_input = _resolve_graph_input_for_turn(
+            app,
+            config,
+            snapshot=snapshot,
+            conversation_id=conversation_id,
+            user_message=user_message,
+            answer_mode=answer_mode,
+            user_message_id=user_message_id,
+            assistant_message_id=assistant_message_id,
         )
         latest_state: MemoryChatGraphState = {}
         for stream_item in app.stream(
@@ -315,6 +324,134 @@ def get_memory_chat_graph_mermaid() -> str:
     graph = build_memory_chat_graph(session_factory=session_scope)
     app = graph.compile()
     return app.get_graph(xray=True).draw_mermaid()
+
+
+def _resolve_graph_input_for_turn(
+    app,
+    config: dict,
+    *,
+    snapshot,
+    conversation_id: int,
+    user_message: str,
+    answer_mode: str,
+    user_message_id: int | None,
+    assistant_message_id: int | None,
+) -> MemoryChatGraphState | None:
+    """判断本次调用是恢复旧 graph，还是新用户输入要开启新一轮。
+
+    LangGraph 在 `snapshot.next` 非空时会从旧节点继续；即使传入新的 input，
+    它也会把新字段合并进旧 checkpoint 后继续跑旧节点。对聊天来说，这会造成
+    “上一轮 pending tool action 吞掉下一轮用户输入”的严重串状态。
+
+    因此只有当本次请求仍然指向同一条用户/assistant 草稿消息时才允许恢复；
+    如果来了新的消息，就先把旧 checkpoint 过期关闭，再从 START 重新进入。
+    """
+
+    next_input: MemoryChatGraphState = {
+        "conversation_id": conversation_id,
+        "user_message": user_message,
+        "answer_mode": answer_mode,  # type: ignore[typeddict-item]
+        "user_message_id": user_message_id or 0,
+        "assistant_message_id": assistant_message_id or 0,
+    }
+    if not snapshot.next:
+        return next_input
+    if _is_same_turn_resume(
+        snapshot.values,
+        user_message=user_message,
+        user_message_id=user_message_id,
+        assistant_message_id=assistant_message_id,
+    ):
+        return None
+    _expire_stale_checkpoint(app, config, snapshot=snapshot, next_input=next_input)
+    return next_input
+
+
+def _is_same_turn_resume(
+    values: dict,
+    *,
+    user_message: str,
+    user_message_id: int | None,
+    assistant_message_id: int | None,
+) -> bool:
+    """同一轮恢复判断。
+
+    有 message_id 时以业务消息 ID 为准；没有 message_id 的测试/非流式路径再退回
+    到 user_message 文本判断。这样既支持真正 resume，也避免新输入误接旧现场。
+    """
+
+    current_user_id = int(values.get("user_message_id") or 0)
+    current_assistant_id = int(values.get("assistant_message_id") or 0)
+    if user_message_id or assistant_message_id:
+        return (
+            current_user_id == int(user_message_id or 0)
+            and current_assistant_id == int(assistant_message_id or 0)
+        )
+    return str(values.get("user_message") or "") == user_message
+
+
+def _expire_stale_checkpoint(
+    app,
+    config: dict,
+    *,
+    snapshot,
+    next_input: MemoryChatGraphState,
+) -> None:
+    """把旧中断现场标记为过期，并关闭 `snapshot.next`。
+
+    `as_node="persist_messages"` 会让 LangGraph 把该 checkpoint 视作已到达终点。
+    我们同时清空工具队列和 pending action，后续新输入从 START 进入时不会继承旧动作。
+    """
+
+    old_task = dict((snapshot.values or {}).get("task") or {})
+    expired_task = _mark_task_superseded(old_task) if old_task else {}
+    app.update_state(
+        config,
+        {
+            "planned_tool_actions": [],
+            "pending_tool_action": None,
+            "tool_policy_result": {},
+            "tool_observations": [],
+            "tool_observation_context": "",
+            "agent_decision": {"type": "final_answer", "reason": "旧 checkpoint 被新用户输入过期。"},
+            "task": {},
+            "expired_task": expired_task,
+            "world_state": {},
+            "world_status": {},
+            "task_boundary": {
+                "type": "expired_stale_checkpoint",
+                "reason": "检测到新用户输入到达时旧 checkpoint 仍停在中间节点，已关闭旧现场并开启新一轮。",
+                "previous_task_id": old_task.get("id"),
+                "active_task_id": None,
+                "expired_task_id": old_task.get("id"),
+            },
+            "conversation_id": next_input.get("conversation_id"),
+            "user_message": next_input.get("user_message"),
+            "answer_mode": next_input.get("answer_mode"),
+            "user_message_id": next_input.get("user_message_id"),
+            "assistant_message_id": next_input.get("assistant_message_id"),
+        },
+        as_node="persist_messages",
+    )
+
+
+def _mark_task_superseded(task: dict) -> dict:
+    """返回一个标记为 SUPERSEDED 的旧 task 副本，供 checkpoint/debug 查看。"""
+
+    if not task:
+        return {}
+    updated = dict(task)
+    updated["status"] = "SUPERSEDED"
+    history = list(updated.get("execution_history") or [])
+    history.append(
+        {
+            "type": "superseded",
+            "summary": "旧 task 被新的用户输入取代。",
+            "payload": {},
+        }
+    )
+    updated["execution_history"] = history
+    return updated
 
 
 def _write_checkpoint_id_to_messages(

@@ -25,7 +25,8 @@ flowchart TD
     L1 --> Merge
     L0 --> Merge
     Window --> Merge
-    Merge --> AgentThink[agent_think]
+    Merge --> PlanTask[plan_task]
+    PlanTask --> AgentThink[agent_think]
     AgentThink --> Route{下一步}
     Route -->|调用工具| SelectTool[select_tool]
     SelectTool --> Policy[check_tool_policy]
@@ -38,6 +39,10 @@ flowchart TD
     RunWrite --> Observe
     RunExec --> Observe
     Observe --> AgentThink
+    Route -->|验收目标| Verify[verify_goal]
+    Verify -->|未通过| AgentThink
+    Verify -->|text| Generate
+    Verify -->|elf_bubble| BubbleGenerate
     Route -->|text| Generate[generate_answer]
     Route -->|elf_bubble| BubbleGenerate[generate_elf_bubble_answer]
     Generate --> Persist[persist_messages]
@@ -63,6 +68,9 @@ load_turn_state
   同时重置本轮派生字段，避免同一 thread 上一轮结果污染本轮。
   如果服务层已经预创建 user_message_id / assistant_message_id，会从 L1 recent_messages
   中排除这两条本轮草稿，避免当前输入被重复放入上下文。
+  如果 conversation.active_task 中存在未完成本地执行任务，并且当前输入是“继续/随便你/
+  按你说的/继续运行”等确认语义，则恢复该 task 和 world_state，让下一轮继续上一轮
+  未完成目标，而不是只基于短确认重新规划。
 
 dispatch_context_workers
   使用 LangGraph Send 分发上下文 worker。
@@ -94,16 +102,66 @@ merge_prompt_context
   按 L4 -> L3 -> L2 -> L1 history -> L0 current 顺序合并上下文。
   输出最终 prompt_context。
 
+plan_task
+  主对话 agent 的全局任务规划节点。它只负责把当前用户目标拆成 Dynamic Task：
+  `task.goal / task.pending_steps / task.completed_steps / task.failed_steps / task.world_state / world_status`。
+  `task.steps` 当前保留为前端 graph 与旧 checkpoint 的兼容镜像，不再作为执行来源。
+  如果本轮不需要本地工具任务，则不生成 task，后续由 agent_think 直接进入回答。
+  如果同一轮工具循环或 load_turn_state 跨 turn 恢复后已经存在 task，则保留旧 task，
+  不在每次回环时重复规划。
+
 agent_think
-  主对话 agent 循环的决策节点。它基于 prompt_context、已有工具观察结果、
-  当前用户目标和 tool_budget，决定下一步是执行动态任务步骤还是生成最终回答。
+  主对话 agent 循环的执行决策节点。它基于 plan_task 生成的 task、已有工具观察结果、
+  world_state/world_status 和 tool_budget，决定下一步是执行动态任务步骤、重规划当前步骤，
+  还是生成最终回答。
   普通聊天会直接进入最终回答；明确本地文件 read/write 请求会进入工具循环。
   每次决策都会追加一条 turn_messages，记录本轮 agent 的可恢复执行轨迹。
-  当前版本已经引入第一版 Dynamic Execution Task：agent_think 会优先让 planner
-  输出 task/steps/world_state，然后从 ready step 派生工具调用；旧的单 action planner
+  当前版本已经引入第一版队列式 Dynamic Execution Task：plan_task 把待执行步骤放入
+  `pending_steps`，agent_think 只从待执行队列中选择下一步；旧的单 action planner
   只作为兼容退路。
+  一旦本轮已经存在 task，agent_think 不允许绕过队列回退到旧单步 planner；
+  如果 pending 非空但没有 ready step，会被视为计划结构错误并进入 replan。
   如果还有 planned_tool_actions 未执行完，agent_think 会继续工具队列，而不会因为
   已经看到一次 observation 就提前进入最终回答。
+  某一步失败时，该 step 会进入 `failed_steps`，replanner 生成的一个或多个补救步骤
+  会插入 `pending_steps` 队首，原本未执行的后续步骤留在队尾等待。
+  如果是非法计划，例如 step 依赖不存在的 dependency，replanner 的新步骤会替换旧
+  pending 队列，避免把非法计划重复拼接回来。
+  如果失败 step 已经不被任何 pending step 依赖，replanner 可以返回
+  `plan_patch.drop_failed_step`：保留失败历史，解除 REPLANNING，继续执行剩余 pending。
+  如果仍有 pending 依赖该失败 step，则不能 drop，必须生成补救步骤。
+  同一队列或历史中的相同 `step.id` 会合并为一条记录，通过 `attempt_count`
+  和 `last_error` 表达重复尝试，避免 completed/failed 历史无限堆积。
+
+world_state / world_status
+  `world_state` 记录事实：读过哪些文件、写过哪些文件、执行过哪些命令、工具失败信息等。
+  `world_status` 是基于事实推导出的进展判断：目标是否满足、缺少哪些要求、是否需要重规划、
+  最近错误和下一步 step。工具 observation 不能单独决定任务终止，必须通过 world_status
+  反馈给 agent_think。
+  对 `READ_BEFORE_WRITE_REQUIRED` 这类确定性工具契约错误，world_status 会给出
+  `recovery_hint=read_then_write_same_path` 和原始 path，replan 会按同路径
+  `read_file -> write_file` 恢复，禁止换路径绕过覆盖保护。
+  如果用户目标要求“运行/执行/测试/返回运行结果”，但 world_state 里还没有成功的
+  `exec_command` observation，`missing_requirements` 会记录缺口并触发重规划。
+  因此 `write_file` 成功只能说明文件写入完成，不能单独代表整个任务完成。
+  read-before-write 属于机械恢复，不消耗语义重规划预算，也不能吞掉原始目标；
+  恢复完成后，graph 会继续检查是否仍缺少运行结果或是否还有未解决的 exec 失败。
+  对编译、运行、测试类失败，graph 不做语言特化修复，而是把 stderr/stdout、
+  已读写文件和原始目标交给通用 replanner，让 agent 自己决定是修改代码、
+  补依赖、调整命令还是插入检查步骤。
+  失败信息不能只保留错误码：`world_state.failures`、`world_status.last_error`、
+  step.`last_error` 和 replanner 的 `recent_failures` 区块都会携带 command、cwd、
+  exit_code、stdout/stderr 摘要。
+  replanner 不能无变化地重复执行完全相同的失败工具调用；如果要重试同类工具，
+  必须先改变前置条件，例如读取信息、修改文件、调整参数或生成新的中间产物。
+  `pending_steps` 为空也不能直接结束：graph 必须先确认 `goal_satisfied=true`；
+  如果仍缺少运行结果或其他目标产物，则继续重规划并向待执行队列补步骤。
+  当前版本新增 `verify_goal` 验收节点：当动态任务没有剩余可执行步骤时，agent_think
+  不再直接进入 generate_answer，而是先进入目标验收。验收层会基于真实工具
+  observation 检查用户目标是否完成；例如用户要求“生成 8 个随机数并返回运行结果”时，
+  即使 `exec_command` exit_code=0，也必须检查 stdout 中是否真的包含足够的数字。
+  如果最终仍被阻塞，generate_answer 会收到“任务未完成”约束，不能声称已经完成，
+  也不能说自己没有本地工具能力。
 
 select_tool
   从 agent_think 规划出的工具队列中取出下一次工具调用。
@@ -121,6 +179,14 @@ observe_tool_result
   把工具结果整理为 tool_observation_context，追加进 prompt_context，然后回到 agent_think。
   这样模型会基于真实工具结果继续判断或最终回答，而不是凭空声称已经完成。
   同时追加本轮观察消息，形成 user -> agent_think -> tool -> observe 的单轮轨迹。
+
+verify_goal
+  目标验收节点。它把“工具调用成功”和“用户目标完成”分开：工具 observation 只提供事实，
+  verify_goal 负责判断这些事实是否满足 task.goal。第一版使用确定性规则，优先防止
+  运行结果类请求被误判完成：如果用户要求运行、测试、执行或返回结果，必须存在成功的
+  exec_command observation；如果用户明确要求生成 N 个随机数，stdout 中必须能识别到
+  足够数量的数字。验收未通过时会把 missing_criteria / contradictions 写入
+  goal_verification 和 world_status，然后回到 agent_think 触发 replan。
 
 generate_answer
   调用 qwen3.5-plus 生成回答。
@@ -142,6 +208,9 @@ persist_messages
   优先更新服务层预创建的 user/assistant 草稿消息，把 assistant 改为 completed。
   如果没有草稿 ID，则按非流式路径创建一问一答。
   该节点仍会检查尾部是否已经存在同样一问一答，降低重试时重复写入风险。
+  同时维护 conversation.active_task：如果当前 Dynamic Task 仍有 pending_steps 且未进入
+  COMPLETED/FAILED/CANCELLED/SUPERSEDED，就保存为下一轮可恢复任务；如果任务已终止或没有
+  未执行步骤，则清空 active_task，避免后续新问题误续旧任务。
 
 enqueue summary job if needed
   这是 chat service 在 memory_chat_graph 完成后的轻量检查，不属于主 graph 节点。

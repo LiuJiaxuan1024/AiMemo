@@ -1,5 +1,6 @@
 param(
-  [switch]$SkipInstall
+  [switch]$SkipInstall,
+  [switch]$NoReload
 )
 
 $ErrorActionPreference = "Stop"
@@ -72,4 +73,9 @@ if (-not $SkipInstall) {
 
 Write-Host "Starting AiMemo gateway at http://127.0.0.1:8000 ..."
 Write-Host "AiMemo app will be available at http://127.0.0.1:8000/app after frontend build."
-& $venvPython -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+$uvicornArgs = @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000")
+if (-not $NoReload) {
+  # Development startup should pick up Python source edits without requiring a full script restart.
+  $uvicornArgs += "--reload"
+}
+& $venvPython @uvicornArgs

@@ -241,6 +241,21 @@ def test_exec_command_runs_short_readonly_command(tmp_path: Path):
     assert "Python" in (result.data["stdout"] + result.data["stderr"])
 
 
+def test_exec_command_reports_non_zero_exit_as_failure(tmp_path: Path):
+    """非 0 退出码必须反馈为失败，供 agent 根据 stderr 触发修复或重规划。"""
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    executor = LocalCommandExecutor(LocalOperatorPolicy.from_roots([str(workspace)]))
+
+    result = executor.exec_command(command="python -c \"import sys; sys.exit(7)\"", cwd=".")
+
+    assert result.ok is False
+    assert result.blocked is False
+    assert result.error_code == "COMMAND_EXITED_NON_ZERO"
+    assert result.data["exit_code"] == 7
+
+
 def test_exec_command_blocks_destructive_command(tmp_path: Path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

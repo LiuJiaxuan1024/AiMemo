@@ -86,6 +86,8 @@ class TaskStepPayload(TypedDict, total=False):
         "SUPERSEDED",
     ]
     retry_count: int
+    attempt_count: int
+    last_error: dict | None
     output_ref: str | None
     error: dict | None
 
@@ -100,7 +102,46 @@ class WorldStatePayload(TypedDict, total=False):
     generated_outputs: dict
     observations: list[dict]
     failures: list[dict]
+    # replanner 每次调用的压缩调试记录。用于定位“模型没规划好”还是“解析/合并失败”。
+    replan_debug: list[dict]
     approvals: list[dict]
+
+
+class WorldStatusPayload(TypedDict, total=False):
+    """基于 WorldState 推导出的任务进展评估。
+
+    WorldState 记录“发生了什么”，WorldStatus 判断“这些事实对当前目标意味着什么”。
+    agent_think 只消费这个评估结果来决定继续、重规划或最终回答，避免工具 observation
+    单独越权决定任务终止。
+    """
+
+    goal_satisfied: bool
+    missing_requirements: list[str]
+    requires_replan: bool
+    replan_reason: str
+    last_error: dict | None
+    blocked_step_id: str | None
+    recovery_hint: str
+    recovery_path: str | None
+    completed_steps: list[str]
+    failed_steps: list[str]
+    next_step_id: str | None
+    contradictions: list[str]
+    acceptance_summary: list[dict]
+
+
+class GoalVerificationPayload(TypedDict, total=False):
+    """当前 Task 的目标验收结果。
+
+    该字段用于把“工具调用成功”和“用户目标完成”分开。工具 observation 是事实，
+    goal_verification 是基于事实对用户目标的验收判断。
+    """
+
+    satisfied: bool
+    reason: str
+    missing_criteria: list[str]
+    contradictions: list[str]
+    evidence: list[dict]
 
 
 class TaskPayload(TypedDict, total=False):
@@ -123,6 +164,11 @@ class TaskPayload(TypedDict, total=False):
     ]
     plan_version: int
     current_step_id: str | None
+    # pending_steps 是执行队列；completed_steps/failed_steps 是执行日志。
+    # 旧的 steps 字段暂时保留为三者的镜像，兼容现有前端 graph 与测试。
+    pending_steps: list[TaskStepPayload]
+    completed_steps: list[TaskStepPayload]
+    failed_steps: list[TaskStepPayload]
     steps: list[TaskStepPayload]
     world_state: WorldStatePayload
     execution_history: list[dict]
@@ -220,6 +266,8 @@ class MemoryChatGraphState(TypedDict, total=False):
     expired_task: TaskPayload
     task: TaskPayload
     world_state: WorldStatePayload
+    world_status: WorldStatusPayload
+    goal_verification: GoalVerificationPayload
     tool_policy_result: dict
     tool_observations: list[AgentToolObservationPayload]
     tool_observation_context: str

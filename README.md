@@ -171,6 +171,11 @@ DASHSCOPE_API_KEY=你的百炼 API Key
 桌面精灵:      Memo Elf Tauri 窗口
 ```
 
+一键脚本还会检查后端托管入口 `http://127.0.0.1:8000/app` 使用的
+`frontend/dist` 是否缺失或过期；如果前端源码比上次构建更新，会自动执行
+`npm run build`。Windows 后端开发启动默认启用 uvicorn reload，因此 Python
+源码修改后会自动重载进程。
+
 Windows PowerShell：
 
 ```powershell

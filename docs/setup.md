@@ -95,6 +95,12 @@ API 文档:     http://127.0.0.1:8000/docs
 桌面精灵:     Memo Elf Tauri 透明窗口
 ```
 
+一键脚本会在启动前刷新后端托管入口使用的前端产物：
+`http://127.0.0.1:8000/app` 读取的是 `frontend/dist`，不是 Vite 的
+`5173` 开发产物。脚本会检查 `dist/index.html` 是否缺失或比前端源码旧，
+必要时自动执行 `npm run build`。Windows 后端开发启动默认启用 uvicorn
+reload，便于 Python 代码改动后自动生效。
+
 依赖已经安装好时，可以跳过安装：
 
 Windows PowerShell：
