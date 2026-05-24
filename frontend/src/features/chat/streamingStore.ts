@@ -257,19 +257,44 @@ export function applyChatStreamEvent(conversationId: number, event: ChatStreamEv
     return;
   }
   if (event.event === "error") {
-    streamingStore.patch(conversationId, {
-      error: event.data.message,
-      isStreaming: false,
-      streamingTurnId: null,
+    streamingStore.update(conversationId, (current) => {
+      const messages = current.messages.map((message) =>
+        message.isStreaming && message.role === "assistant"
+          ? {
+              ...message,
+              isStreaming: false,
+              status: "failed",
+            }
+          : message,
+      );
+      return {
+        ...current,
+        messages,
+        error: event.data.message,
+        isStreaming: false,
+        streamingTurnId: null,
+        thoughts: [],
+        pendingOptimisticIds: null,
+        abortController: null,
+      };
     });
     return;
   }
   if (event.event === "turn_unavailable") {
     // buffer 已经过期：把 streaming 标志关掉，主消息由 listMessages 拿到。
-    streamingStore.patch(conversationId, {
+    streamingStore.update(conversationId, (current) => ({
+      ...current,
+      messages: current.messages.map((message) =>
+        message.isStreaming && message.role === "assistant"
+          ? { ...message, isStreaming: false }
+          : message,
+      ),
       isStreaming: false,
       streamingTurnId: null,
-    });
+      thoughts: [],
+      pendingOptimisticIds: null,
+      abortController: null,
+    }));
     return;
   }
 }

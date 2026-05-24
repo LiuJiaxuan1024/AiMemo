@@ -322,6 +322,22 @@ export function ChatWindow() {
           conversationId,
           currentError instanceof Error ? currentError.message : "发送失败",
         );
+        streamingStore.update(conversationId, (current) => {
+          const messages = current.messages.map((message) =>
+            message.isStreaming && message.role === "assistant"
+              ? { ...message, isStreaming: false, status: "failed" }
+              : message,
+          );
+          return {
+            ...current,
+            messages,
+            isStreaming: false,
+            streamingTurnId: null,
+            thoughts: [],
+            pendingOptimisticIds: null,
+            abortController: null,
+          };
+        });
       }
     } finally {
       const latest = streamingStore.peek(conversationId);

@@ -297,6 +297,33 @@ def test_exec_command_reports_non_zero_exit_as_failure(tmp_path: Path):
     assert result.data["exit_code"] == 7
 
 
+def test_exec_command_turns_pipe_broken_into_tool_failure(tmp_path: Path, monkeypatch):
+    """Windows 管道断开不应把整个 agent loop 炸掉。"""
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    executor = LocalCommandExecutor(LocalOperatorPolicy.from_roots([str(workspace)]))
+
+    class FakeProc:
+        returncode = None
+
+        def communicate(self, timeout=None):  # noqa: ARG002
+            raise OSError(233, "管道的另一端上无任何进程。")
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr("app.local_operator.command._spawn_subprocess", lambda *args, **kwargs: FakeProc())
+
+    result = executor.exec_command(command="python --version", cwd=".")
+
+    assert result.ok is False
+    assert result.error_code == "COMMAND_PIPE_BROKEN"
+    assert result.blocked is False
+    assert result.data["pipe_broken"] is True
+    assert "管道断开" in result.message
+
+
 def test_exec_command_blocks_destructive_command(tmp_path: Path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

@@ -406,6 +406,52 @@ def test_memory_chat_graph_retrieves_notes_when_needed(
     assert result["retrieved_chunks"][0]["content"] == "今天中午我想点炸鸡吃"
 
 
+def test_memory_chat_graph_degrades_when_l3_retriever_fails(
+    session,
+    session_factory,
+    tmp_path: Path,
+):
+    """L3 检索链路失败时不能中断主对话。"""
+
+    conversation = create_conversation(session, ConversationCreate(title="检索降级"))
+
+    def fake_planner(user_message, recent_messages):
+        return RetrievalPlan(
+            intent="rag",
+            needs_retrieval=True,
+            needs_query_rewrite=False,
+            retrieval_query=user_message,
+            confidence=0.9,
+            reason="测试强制检索。",
+            source="test",
+        )
+
+    def broken_retriever(current_session, *, query: str, limit: int):
+        raise OSError(233, "管道的另一端上无任何进程。")
+
+    def fake_answer(user_message, recent_messages, retrieved_chunks, needs_retrieval, retrieval_grade):
+        assert retrieved_chunks == []
+        assert needs_retrieval is False
+        assert retrieval_grade == "none"
+        return "检索暂时不可用，但我还能继续回答。"
+
+    result = run_memory_chat_graph(
+        conversation_id=conversation.id,
+        user_message="帮我打开 bilibili",
+        session_factory=session_factory,
+        checkpoint_path=str(tmp_path / "checkpoints.db"),
+        planner=fake_planner,
+        retriever=broken_retriever,
+        answer_generator=fake_answer,
+    )
+
+    assert result["needs_retrieval"] is False
+    assert result["retrieval_grade"] == "none"
+    assert result["retrieval_debug"]["degraded"] is True
+    assert result["retrieval_debug"]["failed_stage"] == "retriever"
+    assert "L3 检索失败" in result["retrieval_grade_reason"]
+
+
 def test_memory_chat_graph_elf_bubble_mode_persists_joined_bubbles(
     session,
     session_factory,

@@ -2,6 +2,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 import json
 import logging
+import traceback
 import threading
 from time import perf_counter
 
@@ -552,6 +553,14 @@ def _run_turn_to_buffer(
         buffer.append(_sse("done", done_payload))
     except Exception as exc:
         logger.exception("chat turn %s worker crashed", turn_id)
+        exception_detail = _build_exception_detail(exc)
+        debug_payload.setdefault("diagnostics", []).append(
+            {
+                "code": "CHAT_TURN_WORKER_CRASHED",
+                "message": exception_detail["message"],
+                "exception": exception_detail,
+            }
+        )
         for node_name, node_status in list(node_statuses.items()):
             if node_status == "running":
                 node_statuses[node_name] = "failed"
@@ -587,12 +596,22 @@ def _run_turn_to_buffer(
                     session,
                     turn_id,
                     node_statuses=node_statuses,
-                    error=str(exc),
+                    error=exception_detail["message"],
                     debug_payload=debug_payload,
                 )
         except Exception:
             logger.exception("failed to persist failure state for chat turn %s", turn_id)
-        buffer.append(_sse("error", {"turn_id": turn_id, "message": str(exc), "node_statuses": node_statuses}))
+        buffer.append(
+            _sse(
+                "error",
+                {
+                    "turn_id": turn_id,
+                    "message": exception_detail["message"],
+                    "exception": exception_detail,
+                    "node_statuses": node_statuses,
+                },
+            )
+        )
     finally:
         buffer.mark_done()
 
@@ -834,6 +853,25 @@ def _mark_answer_token_timing(debug_payload: dict, started_at: float) -> None:
 
 def _elapsed_ms_since(started_at: float) -> int:
     return int((perf_counter() - started_at) * 1000)
+
+
+def _build_exception_detail(exc: Exception) -> dict:
+    """把异常整理成便于排查的结构化信息。
+
+    turn.error 仍保留一行简短摘要；完整 traceback 写入 debug_payload，
+    这样前端 graph 面板和后端日志都能看到真正的失败位置。
+    """
+
+    exc_type = type(exc).__name__
+    message = str(exc).strip() or exc_type
+    traceback_text = "".join(
+        traceback.format_exception(type(exc), exc, exc.__traceback__)
+    )
+    return {
+        "type": exc_type,
+        "message": f"{exc_type}: {message}",
+        "traceback": traceback_text,
+    }
 
 
 def _create_streaming_message_pair(

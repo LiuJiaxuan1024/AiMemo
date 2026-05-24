@@ -34,6 +34,8 @@ let lastElfEventId = 0;
 let bubbleHideTimer: number | null = null;
 let bubbleSequenceTimer: number | null = null;
 let isElfChatRunning = false;
+let activeToolCallIds = new Set<string>();
+let toolProgressCount = 0;
 
 elf?.addEventListener("pointerdown", (event) => {
   if (event.button !== 0) {
@@ -279,6 +281,8 @@ function applyElfEvent(event: ElfEvent) {
 
 async function streamElfChat(message: string) {
   isElfChatRunning = true;
+  activeToolCallIds = new Set<string>();
+  toolProgressCount = 0;
   setChatInputEnabled(false);
   hideChatPanel();
   clearBubbleSequence();
@@ -319,6 +323,9 @@ async function streamElfChat(message: string) {
         if (event.event === "answer_delta") {
           answer += String(event.data.content ?? "");
         }
+        if (event.event === "tool_invocation") {
+          applyElfToolProgress(event.data);
+        }
         if (event.event === "done" && Array.isArray(event.data.bubbles)) {
           graphBubbles = normalizeGraphBubbles(event.data.bubbles);
         }
@@ -333,6 +340,9 @@ async function streamElfChat(message: string) {
       if (event?.event === "answer_delta") {
         answer += String(event.data.content ?? "");
       }
+      if (event?.event === "tool_invocation") {
+        applyElfToolProgress(event.data);
+      }
       if (event?.event === "done" && Array.isArray(event.data.bubbles)) {
         graphBubbles = normalizeGraphBubbles(event.data.bubbles);
       }
@@ -346,9 +356,84 @@ async function streamElfChat(message: string) {
     }, 650);
   } catch (error) {
     isElfChatRunning = false;
+    activeToolCallIds = new Set<string>();
     setChatInputEnabled(true);
     throw error;
   }
+}
+
+function applyElfToolProgress(data: Record<string, unknown>) {
+  const toolName = String(data.tool_name ?? "");
+  if (!toolName) {
+    return;
+  }
+  const toolCallId = String(data.tool_call_id ?? `${toolName}-${toolProgressCount}`);
+  const running = Boolean(data.running);
+  if (running) {
+    activeToolCallIds.add(toolCallId);
+    toolProgressCount += 1;
+    showChatBubble(
+      {
+        text: describeRunningTool(toolName, data.arguments),
+        emoji: "working_focus",
+      },
+      5200,
+    );
+    return;
+  }
+
+  if (activeToolCallIds.has(toolCallId)) {
+    activeToolCallIds.delete(toolCallId);
+  }
+  const ok = Boolean(data.ok);
+  showChatBubble(
+    {
+      text: describeFinishedTool(toolName, data, ok),
+      emoji: ok ? "thinking" : "error_worried",
+    },
+    ok ? 3600 : 6200,
+  );
+}
+
+function describeRunningTool(toolName: string, rawArgs: unknown) {
+  const args = isRecord(rawArgs) ? rawArgs : {};
+  if (toolName === "search_files") {
+    const pattern = String(args.pattern ?? "目标文件");
+    const root = String(args.root ?? "");
+    return root ? `我正在 ${root} 里找 ${pattern}，磁盘搜索可能要稍等一下。` : `我正在查找 ${pattern}。`;
+  }
+  if (toolName === "exec_command" || toolName === "exec_command_background") {
+    return "我正在执行启动命令，先等它返回结果。";
+  }
+  if (toolName === "read_file") {
+    return "我正在读取文件内容。";
+  }
+  if (toolName === "write_file") {
+    return "我正在写入文件。";
+  }
+  return `我正在调用 ${toolName}。`;
+}
+
+function describeFinishedTool(toolName: string, data: Record<string, unknown>, ok: boolean) {
+  if (!ok) {
+    const message = String(data.message ?? data.error_code ?? "工具执行失败");
+    return message.length > 64 ? `${message.slice(0, 64)}...` : message;
+  }
+  const summary = String(data.result_summary ?? "").trim();
+  if (summary) {
+    return summary.length > 72 ? `${summary.slice(0, 72)}...` : summary;
+  }
+  if (toolName === "search_files") {
+    return "这一步搜索完成了，我继续判断下一步。";
+  }
+  if (toolName === "exec_command" || toolName === "exec_command_background") {
+    return "命令已经执行完了，我看看结果。";
+  }
+  return "这一步工具执行完成了。";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function normalizeGraphBubbles(rawBubbles: unknown[]): ChatBubblePart[] {

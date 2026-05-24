@@ -36,11 +36,10 @@ export function MessageList({ endRef, messages, onOpenGraph, thoughts = [] }: Me
           isStreaming ? thoughts : message.thoughts,
         );
         const hasSegments = segments.length > 0;
+        const hasVisibleWork = hasVisibleAssistantWork(segments, thoughts, message.content);
         const isAssistantWarmingUp =
           isStreaming &&
-          message.content.length === 0 &&
-          thoughts.length === 0 &&
-          !hasSegments;
+          !hasVisibleWork;
 
         return (
           <article className={`chat-message ${message.role}`} key={message.id}>
@@ -53,6 +52,7 @@ export function MessageList({ endRef, messages, onOpenGraph, thoughts = [] }: Me
                       segments={segments}
                       thoughtsByStep={stepThoughts}
                       isStreaming={isStreaming}
+                      showWarmingUp={isAssistantWarmingUp}
                     />
                   ) : (
                     <StreamingMarkdown content={message.content} streaming={isStreaming} />
@@ -84,9 +84,23 @@ export function MessageList({ endRef, messages, onOpenGraph, thoughts = [] }: Me
   );
 }
 
-function TypingIndicator() {
+function TypingIndicator({
+  compact = false,
+  variant = "initial",
+}: {
+  compact?: boolean;
+  variant?: "initial" | "tail";
+}) {
   return (
-    <div className="chat-typing-indicator" aria-live="polite" aria-label="正在生成回复">
+    <div
+      className={[
+        "chat-typing-indicator",
+        compact ? "chat-typing-indicator--compact" : "",
+        variant === "tail" ? "chat-typing-indicator--tail" : "",
+      ].filter(Boolean).join(" ")}
+      aria-live="polite"
+      aria-label="正在生成回复"
+    >
       <div className="chat-typing-indicator__header">
         <PulseGlyph active />
         <span className="chat-typing-indicator__label">
@@ -117,6 +131,7 @@ interface ChronologicalTimelineProps {
   segments: MessageSegment[];
   thoughtsByStep: Map<number, ChatThought[]>;
   isStreaming: boolean;
+  showWarmingUp: boolean;
 }
 
 /**
@@ -124,12 +139,19 @@ interface ChronologicalTimelineProps {
  * 每个 segment 顺序渲染 thought → text → tool cards。
  * 这样工具卡片紧贴产生它的那段叙述，避免“工具放最上、文字放最下”的割裂体验。
  */
-function ChronologicalTimeline({ segments, thoughtsByStep, isStreaming }: ChronologicalTimelineProps) {
+function ChronologicalTimeline({
+  segments,
+  thoughtsByStep,
+  isStreaming,
+  showWarmingUp,
+}: ChronologicalTimelineProps) {
   const lastIndex = segments.length - 1;
   // 把所有未挂到 segment 的 thought（一般是 step_index=0 的全局/兜底 thought）放最前面。
   const orphanThoughts = orphansBeforeSegments(thoughtsByStep, segments);
+  const showThinkingTail = isStreaming && !showWarmingUp && shouldShowThinkingTail(segments);
   return (
     <div className="chat-segment-timeline">
+      {showWarmingUp ? <TypingIndicator compact /> : null}
       {orphanThoughts.length > 0 ? <SegmentThoughts thoughts={orphanThoughts} /> : null}
       {segments.map((segment, idx) => {
         const isLast = idx === lastIndex;
@@ -157,8 +179,37 @@ function ChronologicalTimeline({ segments, thoughtsByStep, isStreaming }: Chrono
           </div>
         );
       })}
+      {showThinkingTail ? <TypingIndicator compact variant="tail" /> : null}
     </div>
   );
+}
+
+function hasVisibleAssistantWork(
+  segments: MessageSegment[],
+  thoughts: ChatThought[],
+  content: string,
+): boolean {
+  if (content.trim().length > 0) {
+    return true;
+  }
+  if (thoughts.some((thought) => thought.title.trim() || thought.summary.trim())) {
+    return true;
+  }
+  return segments.some(
+    (segment) => segment.text.trim().length > 0 || segment.tools.length > 0,
+  );
+}
+
+function shouldShowThinkingTail(segments: MessageSegment[]): boolean {
+  const lastSegment = segments.length > 0 ? segments[segments.length - 1] : undefined;
+  if (!lastSegment) {
+    return false;
+  }
+  // 最终回答 token 正在流出时，光标已经承担“正在生成”的反馈；这里避免重复动画。
+  if (lastSegment.text.trim().length > 0 && lastSegment.tools.length === 0) {
+    return false;
+  }
+  return true;
 }
 
 function orphansBeforeSegments(

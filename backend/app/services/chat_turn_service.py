@@ -1,4 +1,5 @@
 import json
+from datetime import timedelta
 
 from fastapi import HTTPException, status
 from sqlmodel import Session, select
@@ -8,6 +9,7 @@ from app.agent.graphs.memory_chat.graph import build_memory_chat_graph
 from app.agent.graphs.memory_chat.graph import get_memory_chat_graph_mermaid
 from app.core.config import settings
 from app.core.database import session_scope
+from app.models.agent_operation import AgentOperation
 from app.models.chat_message import ChatMessage
 from app.models.chat_turn import ChatTurn
 from app.models.note import utc_now
@@ -37,6 +39,9 @@ MEMORY_CHAT_NODE_ORDER = [
     "generate_elf_bubble_answer",
     "persist_messages",
 ]
+
+STALE_CHAT_TURN_TIMEOUT_SECONDS = 10 * 60
+TOOLS_NOT_ENTERED_ERROR_CODE = "TOOLS_NODE_NOT_ENTERED_AFTER_AGENT_TOOL_CALL"
 
 
 def initial_node_statuses() -> dict[str, str]:
@@ -194,6 +199,7 @@ def list_active_chat_turns(
     便于前端先恢复消息列表 + 状态条，再决定要不要订阅 SSE。
     """
 
+    recover_stale_chat_turns(session, conversation_id=conversation_id)
     turns = session.exec(
         select(ChatTurn)
         .where(
@@ -264,6 +270,8 @@ def get_chat_turn_graph_by_message(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Chat turn graph was not found for this message",
         )
+    recover_stale_chat_turns(session, conversation_id=conversation_id, turn_id=turn.id)
+    session.refresh(turn)
     return _to_chat_turn_graph_read(turn)
 
 
@@ -290,7 +298,127 @@ def get_chat_turn_graph_by_turn(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Chat turn graph was not found",
         )
+    recover_stale_chat_turns(session, conversation_id=conversation_id, turn_id=turn.id)
+    session.refresh(turn)
     return _to_chat_turn_graph_read(turn)
+
+
+def recover_stale_chat_turns(
+    session: Session,
+    *,
+    conversation_id: int | None = None,
+    turn_id: int | None = None,
+    timeout_seconds: int = STALE_CHAT_TURN_TIMEOUT_SECONDS,
+) -> int:
+    """把陈旧 running turn 收敛为 failed，并写入可排查的诊断 payload。
+
+    SSE/桌面精灵请求被浏览器刷新、进程关闭或异常打断时，worker 可能来不及走
+    chat_service 的 except/finally 路径，DB 中就会留下 status=running 的 turn。
+    这里在读取 active turns / graph 时做懒恢复，避免用户长期看到“还在运行”。
+    """
+
+    cutoff = utc_now() - timedelta(seconds=timeout_seconds)
+    statement = select(ChatTurn).where(ChatTurn.status == "running", ChatTurn.updated_at < cutoff)
+    if conversation_id is not None:
+        statement = statement.where(ChatTurn.conversation_id == conversation_id)
+    if turn_id is not None:
+        statement = statement.where(ChatTurn.id == turn_id)
+
+    recovered = 0
+    for turn in session.exec(statement).all():
+        diagnostic = _diagnose_stale_chat_turn(session, turn)
+        node_statuses = _decode_json_object(turn.node_statuses)
+        for node_name, node_status in list(node_statuses.items()):
+            if node_status == "running":
+                node_statuses[node_name] = "failed"
+        # 如果 agent 已经产出 tool_calls，但 tools 从未执行，直接把 tools 节点标为 failed，
+        # graph 面板会比单纯 pending 更清楚地暴露断点位置。
+        if diagnostic.get("code") == TOOLS_NOT_ENTERED_ERROR_CODE:
+            node_statuses["tools"] = "failed"
+
+        debug_payload = _decode_json_any(turn.debug_payload, fallback={})
+        debug_payload.setdefault("diagnostics", []).append(diagnostic)
+        debug_payload.setdefault("events", {})["stale_turn_recovered"] = 0
+        turn.status = "failed"
+        turn.node_statuses = json.dumps(node_statuses, ensure_ascii=False)
+        turn.debug_payload = json.dumps(debug_payload, ensure_ascii=False)
+        turn.error = diagnostic["message"]
+        turn.updated_at = utc_now()
+        session.add(turn)
+
+        if turn.assistant_message_id:
+            assistant = session.get(ChatMessage, turn.assistant_message_id)
+            if assistant and assistant.status == "streaming":
+                assistant.status = "failed"
+                assistant.updated_at = utc_now()
+                session.add(assistant)
+        recovered += 1
+
+    if recovered:
+        session.commit()
+    return recovered
+
+
+def _diagnose_stale_chat_turn(session: Session, turn: ChatTurn) -> dict:
+    """识别常见卡点，优先暴露 agent 已请求工具但 tools 未落审计的断点。"""
+
+    node_statuses = _decode_json_object(turn.node_statuses)
+    debug_payload = _decode_json_any(turn.debug_payload, fallback={})
+    agent_state = (
+        debug_payload.get("nodes", {})
+        .get("agent", {})
+        .get("state", {})
+        if isinstance(debug_payload, dict)
+        else {}
+    )
+    tool_calls = []
+    if isinstance(agent_state, dict):
+        decision = agent_state.get("agent_decision") or {}
+        if isinstance(decision, dict):
+            tool_calls = [call for call in decision.get("tool_calls") or [] if isinstance(call, dict)]
+
+    operations = session.exec(
+        select(AgentOperation).where(
+            AgentOperation.conversation_id == turn.conversation_id,
+            AgentOperation.created_at >= turn.created_at,
+            AgentOperation.created_at <= turn.updated_at,
+        )
+    ).all()
+    recent_operation_count = len(operations)
+
+    if (
+        node_statuses.get("agent") == "succeeded"
+        and node_statuses.get("tools") == "pending"
+        and tool_calls
+        and recent_operation_count == 0
+    ):
+        tool_names = [
+            str(call.get("name") or call.get("tool_name") or "unknown")
+            for call in tool_calls[:8]
+        ]
+        return {
+            "code": TOOLS_NOT_ENTERED_ERROR_CODE,
+            "message": (
+                "agent 已生成工具调用，但 tools 节点没有落地任何 AgentOperation 审计记录；"
+                "通常表示 SSE/桌面请求在 agent->tools 之间中断，或 LangGraph 未继续调度 tools。"
+            ),
+            "turn_id": turn.id,
+            "conversation_id": turn.conversation_id,
+            "tool_call_count": len(tool_calls),
+            "tool_names": tool_names,
+            "operation_count_since_turn": recent_operation_count,
+            "updated_at": turn.updated_at.isoformat(),
+        }
+
+    return {
+        "code": "STALE_RUNNING_CHAT_TURN",
+        "message": "该对话轮次长时间保持 running，已自动标记为 failed 以便排查。",
+        "turn_id": turn.id,
+        "conversation_id": turn.conversation_id,
+        "node_statuses": node_statuses,
+        "operation_count_since_turn": recent_operation_count,
+        "updated_at": turn.updated_at.isoformat(),
+    }
 
 
 def get_chat_turn_state_history(

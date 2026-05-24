@@ -81,6 +81,10 @@ class LocalCommandExecutor:
         max_output_bytes = min(max(int(max_output_bytes or DEFAULT_MAX_OUTPUT_BYTES), 1_024), MAX_OUTPUT_BYTES)
         started_at = time.perf_counter()
         timed_out = False
+        pipe_broken = False
+        exit_code = -1
+        stdout = ""
+        stderr = ""
         try:
             proc = _spawn_subprocess(normalized_command, cwd=resolved_cwd)
         except OSError as exc:
@@ -102,6 +106,14 @@ class LocalCommandExecutor:
                 exit_code = -1
                 stdout = stdout_raw or ""
                 stderr = stderr_raw or f"命令执行超过 {timeout_ms}ms，已终止。"
+            except OSError as exc:
+                # Windows 上当子进程被外部强杀、stdout/stderr 管道断开时，
+                # communicate 可能抛出 WinError 233。这个场景不应把整个 agent loop
+                # 炸掉，而应转成可观测的工具失败，让上层根据 stderr / exit_code 重规划。
+                pipe_broken = True
+                exit_code = proc.returncode if proc.returncode is not None else -1
+                stdout = ""
+                stderr = f"命令执行时管道断开：{exc}"
         finally:
             # 防御性兜底：若上面任意分支异常，确保子进程及其孙子进程不残留。
             if proc.poll() is None:
@@ -113,9 +125,21 @@ class LocalCommandExecutor:
         # 子进程成功启动不等于命令成功。agent 的重规划依赖 ok=false 来识别失败，
         # 因此非 0 退出码必须作为工具失败回传，同时保留 stdout/stderr 供后续判断。
         failed_with_exit_code = (not timed_out) and exit_code != 0
-        ok = (not timed_out) and (not failed_with_exit_code)
-        error_code = "COMMAND_TIMEOUT" if timed_out else ("COMMAND_EXITED_NON_ZERO" if failed_with_exit_code else "")
-        message = "命令超时，已终止。" if timed_out else ("命令以非 0 状态退出。" if failed_with_exit_code else "")
+        ok = (not timed_out) and (not failed_with_exit_code) and (not pipe_broken)
+        error_code = (
+            "COMMAND_TIMEOUT"
+            if timed_out
+            else ("COMMAND_PIPE_BROKEN" if pipe_broken else ("COMMAND_EXITED_NON_ZERO" if failed_with_exit_code else ""))
+        )
+        message = (
+            "命令超时，已终止。"
+            if timed_out
+            else (
+                "命令执行时管道断开。"
+                if pipe_broken
+                else ("命令以非 0 状态退出。" if failed_with_exit_code else "")
+            )
+        )
         return ToolResult(
             ok=ok,
             tool_name="exec_command",
@@ -128,6 +152,7 @@ class LocalCommandExecutor:
                 "stderr": stderr,
                 "duration_ms": int((time.perf_counter() - started_at) * 1000),
                 "timed_out": timed_out,
+                "pipe_broken": pipe_broken,
                 "truncated": truncated,
                 "risk_level": decision.risk_level,
             },

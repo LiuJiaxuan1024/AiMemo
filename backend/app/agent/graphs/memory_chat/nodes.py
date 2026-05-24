@@ -238,45 +238,100 @@ def build_l3_retrieved_memory_node(
         user_message = _resolve_user_message(state)
         recent_messages = state.get("recent_messages", [])
         total_started_at = now_counter()
-        planner_started_at = now_counter()
-        plan = (planner or default_retrieval_planner)(user_message, recent_messages)
-        planner_elapsed_ms = elapsed_ms(planner_started_at)
-
+        failed_stage = ""
+        planner_elapsed_ms = 0
+        retriever_elapsed_ms = 0
+        grade_elapsed_ms = 0
+        layer_elapsed_ms = 0
+        plan = RetrievalPlan(
+            intent="direct",
+            needs_retrieval=False,
+            needs_query_rewrite=False,
+            retrieval_query="",
+            confidence=0.0,
+            reason="L3 检索未执行。",
+            source="fallback",
+        )
         retrieved_chunks: list[RetrievedChunkPayload] = []
         retrieval_grade: Literal["good", "weak", "poor", "none"] = "none"
         retrieval_grade_reason = "本轮未查询个人知识库。"
-        retrieval_query = plan.retrieval_query or user_message
-        retriever_elapsed_ms = 0
-        grade_elapsed_ms = 0
-        if plan.needs_retrieval:
-            with session_factory() as session:
-                retriever_started_at = now_counter()
-                results = retriever(session, query=retrieval_query, limit=limit)
-                retriever_elapsed_ms = elapsed_ms(retriever_started_at)
-            retrieved_chunks = [_to_retrieved_chunk_payload(result) for result in results]
-            grade_started_at = now_counter()
-            retrieval_grade, retrieval_grade_reason = _grade_retrieval_chunks(retrieved_chunks)
-            grade_elapsed_ms = elapsed_ms(grade_started_at)
+        retrieval_query = user_message
 
-        layer_started_at = now_counter()
-        layer = build_retrieved_memory_layer(
-            retrieved_chunks,
-            plan.needs_retrieval,
-            retrieval_grade,
-            ContextBudget(),
-        )
-        layer_elapsed_ms = elapsed_ms(layer_started_at)
-        retrieval_debug = {
-            "planner_ms": planner_elapsed_ms,
-            "retriever_ms": retriever_elapsed_ms,
-            "grade_ms": grade_elapsed_ms,
-            "layer_ms": layer_elapsed_ms,
-            "total_ms": elapsed_ms(total_started_at),
-            "planner_source": plan.source,
-            "needs_retrieval": plan.needs_retrieval,
-            "retrieval_query": retrieval_query if plan.needs_retrieval else "",
-            "retrieved_count": len(retrieved_chunks),
-        }
+        try:
+            failed_stage = "planner"
+            planner_started_at = now_counter()
+            plan = (planner or default_retrieval_planner)(user_message, recent_messages)
+            planner_elapsed_ms = elapsed_ms(planner_started_at)
+
+            retrieval_query = plan.retrieval_query or user_message
+            if plan.needs_retrieval:
+                failed_stage = "retriever"
+                with session_factory() as session:
+                    retriever_started_at = now_counter()
+                    results = retriever(session, query=retrieval_query, limit=limit)
+                    retriever_elapsed_ms = elapsed_ms(retriever_started_at)
+                retrieved_chunks = [_to_retrieved_chunk_payload(result) for result in results]
+                failed_stage = "grade"
+                grade_started_at = now_counter()
+                retrieval_grade, retrieval_grade_reason = _grade_retrieval_chunks(retrieved_chunks)
+                grade_elapsed_ms = elapsed_ms(grade_started_at)
+
+            failed_stage = "layer"
+            layer_started_at = now_counter()
+            layer = build_retrieved_memory_layer(
+                retrieved_chunks,
+                plan.needs_retrieval,
+                retrieval_grade,
+                ContextBudget(),
+            )
+            layer_elapsed_ms = elapsed_ms(layer_started_at)
+            retrieval_debug = {
+                "planner_ms": planner_elapsed_ms,
+                "retriever_ms": retriever_elapsed_ms,
+                "grade_ms": grade_elapsed_ms,
+                "layer_ms": layer_elapsed_ms,
+                "total_ms": elapsed_ms(total_started_at),
+                "planner_source": plan.source,
+                "needs_retrieval": plan.needs_retrieval,
+                "retrieval_query": retrieval_query if plan.needs_retrieval else "",
+                "retrieved_count": len(retrieved_chunks),
+            }
+        except Exception as exc:
+            # L3 是增强上下文，不应因为 embedding/API/检索链路波动阻断主对话。
+            layer_started_at = now_counter()
+            layer = build_retrieved_memory_layer([], False, "none", ContextBudget())
+            layer_elapsed_ms = elapsed_ms(layer_started_at)
+            retrieval_debug = {
+                "planner_ms": planner_elapsed_ms,
+                "retriever_ms": retriever_elapsed_ms,
+                "grade_ms": grade_elapsed_ms,
+                "layer_ms": layer_elapsed_ms,
+                "total_ms": elapsed_ms(total_started_at),
+                "planner_source": plan.source,
+                "needs_retrieval": False,
+                "retrieval_query": "",
+                "retrieved_count": 0,
+                "degraded": True,
+                "failed_stage": failed_stage or "unknown",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+            plan = RetrievalPlan(
+                intent="direct",
+                needs_retrieval=False,
+                needs_query_rewrite=False,
+                retrieval_query="",
+                confidence=0.0,
+                reason="L3 检索失败，已降级为直接回答。",
+                source="fallback",
+            )
+            retrieval_query = ""
+            retrieved_chunks = []
+            retrieval_grade = "none"
+            retrieval_grade_reason = "L3 检索失败，已降级为直接回答。"
+            emit_timing("memory_chat.l3_failed", **retrieval_debug)
+            logger.exception("memory_chat.l3_failed %s", retrieval_debug)
+
         logger.info("memory_chat.l3_timing %s", retrieval_debug)
         return {
             "intent": plan.intent,
@@ -510,6 +565,24 @@ def build_tools_node(session_factory: SessionFactory):
         # tools 节点没有自己的 step 概念：它的工作隶属于刚刚那一次 agent 调用。
         # 所以这里复用 state 里 agent 写入的 agent_step_index，所有 thought 都跟着这一步。
         step_index = int(state.get("agent_step_index") or 0)
+        tool_names = [
+            str(call.get("name") or call.get("tool_name") or "unknown")
+            for call in tool_calls
+        ]
+        logger.info(
+            "memory_chat.tools_entered conversation_id=%s step_index=%s tool_count=%s tool_names=%s",
+            state.get("conversation_id"),
+            step_index,
+            len(tool_calls),
+            tool_names,
+        )
+        emit_timing(
+            "memory_chat.tools_entered",
+            conversation_id=state.get("conversation_id"),
+            step_index=step_index,
+            tool_count=len(tool_calls),
+            tool_names=tool_names,
+        )
         observations_before = len(state.get("tool_observations", []))
         working_state: MemoryChatGraphState = dict(state)
         allowed = READ_TOOL_NAMES | WRITE_TOOL_NAMES | EXEC_TOOL_NAMES
@@ -568,6 +641,14 @@ def build_tools_node(session_factory: SessionFactory):
             }
 
         def _invoke_one(snapshot: MemoryChatGraphState, action: dict) -> dict:
+            logger.info(
+                "memory_chat.tool_start conversation_id=%s step_index=%s tool_call_id=%s tool_name=%s arguments=%s",
+                state.get("conversation_id"),
+                step_index,
+                action.get("tool_call_id"),
+                action.get("tool_name"),
+                action.get("arguments"),
+            )
             _emit_running(action)
             update = _run_agent_tool_action(
                 snapshot,
@@ -583,6 +664,16 @@ def build_tools_node(session_factory: SessionFactory):
             for observation in updated_obs[len(prev_obs):]:
                 final_observation = dict(observation)
                 final_observation["running"] = False
+                logger.info(
+                    "memory_chat.tool_finish conversation_id=%s step_index=%s tool_call_id=%s tool_name=%s ok=%s error_code=%s message=%s",
+                    state.get("conversation_id"),
+                    step_index,
+                    final_observation.get("tool_call_id"),
+                    final_observation.get("tool_name"),
+                    final_observation.get("ok"),
+                    final_observation.get("error_code"),
+                    final_observation.get("message"),
+                )
                 _emit_observation(final_observation)
             return update
 

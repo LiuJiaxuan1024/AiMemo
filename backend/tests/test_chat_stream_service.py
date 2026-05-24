@@ -1,10 +1,12 @@
 import json
 import threading
 import time
+from datetime import timedelta
 from pathlib import Path
 
 from sqlmodel import select
 
+from app.models.note import utc_now
 from app.models.chat_message import ChatMessage
 from app.models.chat_turn import ChatTurn
 from app.schemas.conversation import ConversationCreate
@@ -353,6 +355,53 @@ def test_stream_existing_turn_events_reports_unavailable_after_cleanup(
     assert replay[0]["data"]["turn_id"] == turn_id
 
 
+def test_stream_chat_persists_exception_detail_when_worker_crashes(
+    session,
+    session_factory,
+    tmp_path: Path,
+    monkeypatch,
+):
+    """worker 异常时应把完整 traceback 写进 debug_payload，方便前端排障。"""
+
+    chat_turn_buffer.reset_for_tests()
+    conversation = create_conversation(session, ConversationCreate(title="失败堆栈"))
+    checkpoint_path = tmp_path / "checkpoints.db"
+
+    def fake_stream_memory_chat_graph(**kwargs):
+        yield {"event": "node", "node": "load_turn_state", "state": {}}
+        raise RuntimeError("boom from graph")
+
+    monkeypatch.setattr(
+        "app.services.chat_service.stream_memory_chat_graph",
+        fake_stream_memory_chat_graph,
+    )
+
+    events = stream_conversation_chat_events(
+        conversation.id,
+        message="失败",
+        session_factory=session_factory,
+        checkpoint_path=str(checkpoint_path),
+    )
+    primary = [_parse_sse(event) for event in events]
+    turn_id = primary[0]["data"]["turn_id"]
+
+    assert primary[-1]["event"] == "error"
+    assert "boom from graph" in primary[-1]["data"]["message"]
+    assert primary[-1]["data"]["exception"]["type"] == "RuntimeError"
+    assert "traceback" in primary[-1]["data"]["exception"]
+
+    turn = session.get(ChatTurn, turn_id)
+    assert turn is not None
+    assert turn.status == "failed"
+    assert "RuntimeError" in turn.error
+    debug_payload = json.loads(turn.debug_payload)
+    diagnostic = debug_payload["diagnostics"][-1]
+    assert diagnostic["code"] == "CHAT_TURN_WORKER_CRASHED"
+    assert diagnostic["exception"]["type"] == "RuntimeError"
+    assert "boom from graph" in diagnostic["exception"]["message"]
+    assert "traceback" in diagnostic["exception"]
+
+
 def test_list_active_chat_turns_returns_only_running_turns(session):
     """active-turns 接口只能返回 running 状态的 turn，按创建顺序排序。"""
 
@@ -379,6 +428,85 @@ def test_list_active_chat_turns_returns_only_running_turns(session):
     assert [item.turn_id for item in result.items] == [running_turn.id]
     assert result.items[0].status == "running"
     assert result.items[0].node_statuses == {"agent": "running"}
+
+
+def test_stale_turn_with_agent_tool_calls_is_marked_failed_with_diagnostic(session):
+    """agent 已产出 tool_calls 但 tools 未落审计时，应自动收敛并写入诊断。"""
+
+    chat_turn_buffer.reset_for_tests()
+    conversation = create_conversation(session, ConversationCreate(title="陈旧 turn 诊断"))
+    user = ChatMessage(
+        conversation_id=conversation.id,
+        role="user",
+        content="你自己找吧",
+        status="completed",
+    )
+    assistant = ChatMessage(
+        conversation_id=conversation.id,
+        role="assistant",
+        content="我开始找。",
+        status="streaming",
+    )
+    session.add(user)
+    session.add(assistant)
+    session.flush()
+
+    stale_time = utc_now() - timedelta(minutes=20)
+    turn = ChatTurn(
+        conversation_id=conversation.id,
+        user_message_id=user.id,
+        assistant_message_id=assistant.id,
+        thread_id=f"conversation:{conversation.id}",
+        status="running",
+        node_statuses=json.dumps(
+            {
+                "agent": "succeeded",
+                "tools": "pending",
+                "persist_messages": "pending",
+            },
+            ensure_ascii=False,
+        ),
+        debug_payload=json.dumps(
+            {
+                "nodes": {
+                    "agent": {
+                        "state": {
+                            "agent_decision": {
+                                "type": "tool_call",
+                                "tool_calls": [
+                                    {
+                                        "id": "call-search",
+                                        "name": "search_files",
+                                        "args": {"root": "C:\\", "pattern": "YuanShen.exe"},
+                                    }
+                                ],
+                            }
+                        }
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        created_at=stale_time,
+        updated_at=stale_time,
+    )
+    session.add(turn)
+    session.commit()
+
+    result = list_active_chat_turns(session, conversation_id=conversation.id)
+
+    assert result.items == []
+    session.refresh(turn)
+    session.refresh(assistant)
+    assert turn.status == "failed"
+    assert assistant.status == "failed"
+    assert "agent 已生成工具调用" in turn.error
+    node_statuses = json.loads(turn.node_statuses)
+    assert node_statuses["tools"] == "failed"
+    debug_payload = json.loads(turn.debug_payload)
+    diagnostic = debug_payload["diagnostics"][-1]
+    assert diagnostic["code"] == "TOOLS_NODE_NOT_ENTERED_AFTER_AGENT_TOOL_CALL"
+    assert diagnostic["tool_names"] == ["search_files"]
 
 
 def _wait_until(predicate, *, timeout: float, interval: float = 0.05) -> None:
