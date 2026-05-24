@@ -3,7 +3,16 @@ import type { RefObject } from "react";
 
 import { Button, EmptyState } from "../../shared/ui";
 import { MarkdownMessage } from "./MarkdownMessage";
-import type { ChatThought, DraftAssistantMessage } from "./types";
+import { PulseGlyph } from "./PulseGlyph";
+import { groupThoughtsByStep } from "./streamingStore";
+import { ToolCallCard } from "./ToolCallCard";
+import { VerbRotator } from "./VerbRotator";
+import type {
+  ChatThought,
+  DraftAssistantMessage,
+  MessageSegment,
+  ToolInvocation,
+} from "./types";
 
 interface MessageListProps {
   endRef: RefObject<HTMLDivElement | null>;
@@ -13,50 +22,255 @@ interface MessageListProps {
 }
 
 export function MessageList({ endRef, messages, onOpenGraph, thoughts = [] }: MessageListProps) {
-  const activeThought = thoughts[thoughts.length - 1];
-  const collapsedThoughts = thoughts.slice(0, -1);
-
   return (
     <div className="chat-message-list">
       {messages.length === 0 ? (
-        <EmptyState className="chat-empty">向 Ai 记提一个关于笔记或记忆的问题</EmptyState>
+        <EmptyState className="chat-empty">向 AiMemo 提一个关于笔记或记忆的问题</EmptyState>
       ) : null}
-      {messages.map((message) => (
-        <article className={`chat-message ${message.role}`} key={message.id}>
-          <div className="chat-message-bubble">
-            {message.role === "assistant" ? (
-              <MarkdownMessage content={message.content} fallback={message.isStreaming ? "正在思考..." : ""} />
-            ) : (
-              <p>{message.content}</p>
-            )}
-            {message.role === "assistant" && message.turn_id ? (
-              <Button
-                aria-label="查看本轮 graph"
-                onClick={() => onOpenGraph(message)}
-                size="icon"
-                title="查看本轮 graph"
-              >
-                <GitBranch aria-hidden="true" size={16} />
-              </Button>
-            ) : null}
-          </div>
-        </article>
-      ))}
-      {activeThought ? (
-        <div className="chat-thought-stack">
-          {collapsedThoughts.map((thought) => (
-            <details className="chat-thought collapsed" key={thought.id}>
-              <summary>{thought.title}</summary>
-              <p>{thought.summary}</p>
-            </details>
-          ))}
-          <div className="chat-thought active">
-            <span>{activeThought.title}</span>
-            <p>{activeThought.summary}</p>
-          </div>
-        </div>
-      ) : null}
+      {messages.map((message) => {
+        const isAssistant = message.role === "assistant";
+        const isStreaming = isAssistant && message.isStreaming === true;
+        // 优先使用 segments：streaming 期间由 streamingStore 实时拼装；done 后从落库消息恢复。
+        const segments = message.segments ?? [];
+        const stepThoughts = groupThoughtsByStep(
+          isStreaming ? thoughts : message.thoughts,
+        );
+        const hasSegments = segments.length > 0;
+        const isAssistantWarmingUp =
+          isStreaming &&
+          message.content.length === 0 &&
+          thoughts.length === 0 &&
+          !hasSegments;
+
+        return (
+          <article className={`chat-message ${message.role}`} key={message.id}>
+            <div className="chat-message-bubble">
+              <div className="chat-message-content">
+                {isAssistantWarmingUp ? <TypingIndicator /> : null}
+                {isAssistant ? (
+                  hasSegments ? (
+                    <ChronologicalTimeline
+                      segments={segments}
+                      thoughtsByStep={stepThoughts}
+                      isStreaming={isStreaming}
+                    />
+                  ) : (
+                    <StreamingMarkdown content={message.content} streaming={isStreaming} />
+                  )
+                ) : (
+                  <p>{message.content}</p>
+                )}
+                {/* done 后的旧版兜底：没有 segments 但有 thoughts，仍折叠展示思考链。 */}
+                {isAssistant && !isStreaming && !hasSegments && message.thoughts?.length ? (
+                  <ThoughtRecap thoughts={message.thoughts} />
+                ) : null}
+              </div>
+              {isAssistant && message.turn_id ? (
+                <Button
+                  aria-label="查看本轮 graph"
+                  onClick={() => onOpenGraph(message)}
+                  size="icon"
+                  title="查看本轮 graph"
+                >
+                  <GitBranch aria-hidden="true" size={16} />
+                </Button>
+              ) : null}
+            </div>
+          </article>
+        );
+      })}
       <div ref={endRef} />
     </div>
+  );
+}
+
+function TypingIndicator() {
+  return (
+    <div className="chat-typing-indicator" aria-live="polite" aria-label="正在生成回复">
+      <div className="chat-typing-indicator__header">
+        <PulseGlyph active />
+        <span className="chat-typing-indicator__label">
+          <span className="chat-typing-indicator__title">Thinking</span>
+          <span className="chat-typing-indicator__sep">·</span>
+          <VerbRotator />
+        </span>
+      </div>
+      <div className="chat-typing-indicator__dots" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </div>
+    </div>
+  );
+}
+
+function StreamingMarkdown({ content, streaming }: { content: string; streaming: boolean }) {
+  return (
+    <div className={`chat-answer-stream ${streaming ? "is-streaming" : ""}`}>
+      <MarkdownMessage content={content} fallback="" />
+      {streaming && content.length > 0 ? <span className="chat-stream-caret" aria-hidden="true" /> : null}
+    </div>
+  );
+}
+
+interface ChronologicalTimelineProps {
+  segments: MessageSegment[];
+  thoughtsByStep: Map<number, ChatThought[]>;
+  isStreaming: boolean;
+}
+
+/**
+ * 串行化展示一条 assistant 消息：按 step_index 升序，
+ * 每个 segment 顺序渲染 thought → text → tool cards。
+ * 这样工具卡片紧贴产生它的那段叙述，避免“工具放最上、文字放最下”的割裂体验。
+ */
+function ChronologicalTimeline({ segments, thoughtsByStep, isStreaming }: ChronologicalTimelineProps) {
+  const lastIndex = segments.length - 1;
+  // 把所有未挂到 segment 的 thought（一般是 step_index=0 的全局/兜底 thought）放最前面。
+  const orphanThoughts = orphansBeforeSegments(thoughtsByStep, segments);
+  return (
+    <div className="chat-segment-timeline">
+      {orphanThoughts.length > 0 ? <SegmentThoughts thoughts={orphanThoughts} /> : null}
+      {segments.map((segment, idx) => {
+        const isLast = idx === lastIndex;
+        const segmentStreaming = isStreaming && isLast && segment.tools.length === 0;
+        const stepThoughts = thoughtsByStep.get(segment.step_index) ?? [];
+        return (
+          <div className="chat-segment" key={`step-${segment.step_index}`}>
+            {stepThoughts.length > 0 ? <SegmentThoughts thoughts={stepThoughts} /> : null}
+            {segment.text.length > 0 ? (
+              <StreamingMarkdown content={segment.text} streaming={segmentStreaming} />
+            ) : null}
+            {segment.tools.length > 0 ? (
+              <div className="chat-segment__tools">
+                {segment.tools.map((tool) => (
+                  <ToolCallCard
+                    key={tool.tool_call_id || `${tool.tool_name}-${segment.step_index}`}
+                    toolName={tool.tool_name}
+                    args={tool.arguments}
+                    summary={tool.result_summary || tool.message}
+                    status={toolCardStatus(tool)}
+                  />
+                ))}
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function orphansBeforeSegments(
+  thoughtsByStep: Map<number, ChatThought[]>,
+  segments: MessageSegment[],
+): ChatThought[] {
+  const segmentSteps = new Set(segments.map((segment) => segment.step_index));
+  const orphans: ChatThought[] = [];
+  for (const [step, list] of thoughtsByStep) {
+    if (!segmentSteps.has(step)) {
+      orphans.push(...list);
+    }
+  }
+  return orphans;
+}
+
+function toolCardStatus(tool: ToolInvocation): "completed" | "failed" | "running" {
+  // running 卡片的 ok/blocked 此时还没有真实意义（工具还没跑完），优先看 running 标志。
+  if (tool.running) {
+    return "running";
+  }
+  if (tool.blocked || !tool.ok) {
+    return "failed";
+  }
+  return "completed";
+}
+
+function SegmentThoughts({ thoughts }: { thoughts: ChatThought[] }) {
+  return (
+    <ul className="chat-segment-thoughts" aria-live="polite">
+      {thoughts.map((thought, index) => {
+        const status = normalizeStatus(thought.status);
+        return (
+          <li
+            className={`chat-segment-thoughts__item chat-segment-thoughts__item--${status}`}
+            key={`${thought.id}-${index}`}
+          >
+            <span className="chat-segment-thoughts__icon" aria-hidden="true">
+              {statusGlyph(status)}
+            </span>
+            <div className="chat-segment-thoughts__body">
+              <span className="chat-segment-thoughts__title">{thought.title}</span>
+              {thought.summary ? (
+                <span className="chat-segment-thoughts__summary"> {thought.summary}</span>
+              ) : null}
+            </div>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+type ThoughtStatus = "running" | "completed" | "failed" | "interrupted";
+
+function normalizeStatus(value: string | undefined): ThoughtStatus {
+  if (value === "running" || value === "completed" || value === "failed" || value === "interrupted") {
+    return value;
+  }
+  return "completed";
+}
+
+function statusGlyph(status: ThoughtStatus) {
+  switch (status) {
+    case "running":
+      return <PulseGlyph active />;
+    case "failed":
+      return <span className="chat-step-icon chat-step-icon--failed">✕</span>;
+    case "interrupted":
+      return <span className="chat-step-icon chat-step-icon--interrupted">⏸</span>;
+    case "completed":
+    default:
+      return <span className="chat-step-icon chat-step-icon--completed">✓</span>;
+  }
+}
+
+/**
+ * 历史消息没有 segments（DB 落库的旧消息只有 thoughts 数组）时的折叠展示。
+ * 新版 segments 直接内联展开，无需折叠。
+ */
+function ThoughtRecap({ thoughts }: { thoughts: ChatThought[] }) {
+  if (thoughts.length === 0) {
+    return null;
+  }
+  return (
+    <details className="chat-thought-recap">
+      <summary>
+        <span className="chat-thought-mark" aria-hidden="true">
+          ∴
+        </span>
+        <span className="chat-thought-recap__label">查看思考过程</span>
+        <small>{thoughts.length} 个步骤</small>
+      </summary>
+      <ol className="chat-timeline">
+        {thoughts.map((thought, index) => {
+          const status = normalizeStatus(thought.status);
+          return (
+            <li
+              className={`chat-timeline__step chat-timeline__step--${status}`}
+              key={`${thought.id}-${index}`}
+            >
+              <span className="chat-timeline__node" aria-hidden="true">
+                {statusGlyph(status)}
+              </span>
+              <div className="chat-timeline__body">
+                <div className="chat-timeline__title">{thought.title}</div>
+                <p className="chat-timeline__summary">{thought.summary}</p>
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+    </details>
   );
 }

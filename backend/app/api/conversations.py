@@ -12,6 +12,7 @@ from app.schemas.conversation import (
 from app.services.conversation_service import (
     append_message,
     create_conversation,
+    delete_conversation,
     get_conversation,
     list_conversations,
     list_messages,
@@ -63,4 +64,13 @@ def append_message_api(
 ) -> ChatMessageRead:
     # MVP 阶段该接口只保存消息，不生成 AI 回复。后续 memory_chat_graph 会复用 service。
     return append_message(session, conversation_id, payload)
+
+
+@router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_conversation_api(
+    conversation_id: int,
+    session: Session = Depends(get_session),
+) -> None:
+    # 级联删除：消息 / 摘要任务 / 后台命令 / 长时记忆 / LangGraph checkpoint 等都会一起释放。
+    delete_conversation(session, conversation_id)
 

@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 from app.schemas.conversation import ChatMessageRead
@@ -78,3 +80,26 @@ class ChatTurnStateHistoryRead(BaseModel):
     thread_id: str
     checkpoint_id: str | None
     states: list[ChatCheckpointStateRead]
+
+
+class ChatActiveTurnRead(BaseModel):
+    """当前会话里正在跑的一轮对话。
+
+    用户切走、刷新、关掉再回来时，前端拿这个列表来恢复 "刚才那条 assistant
+    消息还在生成" 的 UI 状态，然后订阅 /turns/{turn_id}/events/stream 接着拿增量。
+    """
+
+    turn_id: int
+    conversation_id: int
+    status: str
+    node_statuses: dict[str, str]
+    user_message: ChatMessageRead | None
+    assistant_message: ChatMessageRead | None
+    started_at: datetime
+    updated_at: datetime
+
+
+class ChatActiveTurnListRead(BaseModel):
+    """会话的活跃 turn 列表响应。"""
+
+    items: list[ChatActiveTurnRead]

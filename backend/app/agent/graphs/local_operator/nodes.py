@@ -10,13 +10,16 @@ from langchain_core.messages import HumanMessage
 from sqlmodel import Session
 
 from app.ai.json_utils import parse_json_object
+from app.core.config import settings
 from app.agent.model import get_planner_chat_model
+from app.agent.project_rules import RUNTIME_AGENT_RULES
 from app.agent.graphs.local_operator.state import (
     LocalOperatorAction,
     LocalOperatorObservation,
     LocalOperatorState,
 )
 from app.local_operator.policy import LocalOperatorPolicy
+from app.local_operator.filesystem import KnownReadFile
 from app.local_operator.tools import create_read_tools
 
 
@@ -35,6 +38,10 @@ WRITE_TOOL_NAMES = {
 }
 EXEC_TOOL_NAMES = {
     "exec_command",
+    "exec_command_background",
+    "read_background_output",
+    "kill_background_task",
+    "list_background_tasks",
 }
 ALLOWED_LOCAL_OPERATOR_TOOLS = READ_TOOL_NAMES | WRITE_TOOL_NAMES | EXEC_TOOL_NAMES
 
@@ -250,6 +257,7 @@ def _run_tool_action(
         conversation_id=state.get("conversation_id"),
         turn_id=state.get("turn_id"),
         known_existing_paths=_known_existing_paths_from_observations(state.get("observations", [])),
+        known_read_files=_known_read_files_from_observations(state.get("observations", [])),
     )
     tool_name = str(action.get("tool_name") or "")
     arguments = dict(action.get("arguments") or {})
@@ -304,7 +312,7 @@ def _rule_plan_action(user_input: str, *, workspace_roots: list[str]) -> LocalOp
                 "arguments": {
                     "command": command,
                     "cwd": _extract_exec_cwd(normalized) or ".",
-                    "timeout_ms": 30000,
+                    "timeout_ms": settings.local_operator_exec_default_timeout_ms,
                     "max_output_bytes": 65536,
                 },
                 "reason": "用户明确要求执行短时终端命令。",
@@ -507,7 +515,7 @@ def _llm_plan_tool_action(user_input: str) -> LocalOperatorAction | None:
 def _expand_planned_actions(action: LocalOperatorAction) -> list[LocalOperatorAction]:
     """把单个高层动作展开为 graph 可顺序执行的工具队列。
 
-    覆盖已有文件时，`write_file` 必须先观察目标路径。这样既保留 Claude Code
+    覆盖已有文件时，`write_file` 必须先完整读取目标路径。这样既保留 Claude Code
     read-before-write 的保护思想，也避免模型直接用整文件覆盖误伤用户刚改的内容。
     """
 
@@ -519,9 +527,9 @@ def _expand_planned_actions(action: LocalOperatorAction) -> list[LocalOperatorAc
     path = str(arguments.get("path") or ".")
     return [
         {
-            "tool_name": "get_file_info",
-            "arguments": {"path": path},
-            "reason": "覆盖写入前先查看目标文件，满足 read-before-write 保护。",
+            "tool_name": "read_file",
+            "arguments": {"path": path, "start_line": None, "end_line": None, "max_bytes": 65536},
+            "reason": "覆盖写入前先完整读取目标文件，满足 read-before-write 保护。",
         },
         action,
     ]
@@ -529,12 +537,12 @@ def _expand_planned_actions(action: LocalOperatorAction) -> list[LocalOperatorAc
 
 def _build_local_operator_planner_prompt(user_input: str) -> str:
     return (
-        "你是 Ai 记的 Local Operator 本地文件工具规划器。判断用户这句话是否需要读取或写入授权 workspace 内的本地文件。\n"
+        "你是 AiMemo 的 Local Operator 本地文件工具规划器。判断用户这句话是否需要读取或写入授权 workspace 内的本地文件。\n"
         "只能规划白名单文件工具，不能执行命令，不能访问网络。\n"
         "规划 write_file 必须非常保守：只有用户明确要求创建/写入/覆盖本地文件，并给出目标路径和内容时才允许。\n\n"
         "能力说明：\n"
         "- 你可以规划读取本机文件系统中的文件或目录，包括用户给出的绝对路径。\n"
-        "- 你可以规划写入授权 workspace 内的普通文本文件；写入已有文件时必须设置 overwrite=true，工具会要求先读取或查看该文件。\n"
+        "- 你可以规划写入授权 workspace 内的普通文本文件；写入已有文件时必须设置 overwrite=true，工具会要求先 read_file 完整读取该文件。\n"
         "- write_file 的 content 必须是用户明确给出的正文，或用户明确要求你生成且你已经能在本节点中完整生成的正文。\n"
         "- exec_command 只用于短时终端操作，例如查看版本、运行测试、git status；不要用它读写文件。\n"
         "- 不要把“用于写...”“准备写...”“创建一个...文件”理解成可以写入模板；禁止写入“此处填写”“待补充”“TODO”等占位内容。\n"
@@ -561,7 +569,10 @@ def _build_local_operator_planner_prompt(user_input: str) -> str:
         "- 如果用户问的是当前电脑/本机/Home/用户目录里有没有某个项目或文件，优先用 search_files，root = \"~\"。\n"
         "- 如果只是确认当前项目是否存在，优先用 get_file_info，path = \".\"。\n"
         "- 如果用户给出明确文件路径，优先用 read_file；如果给出明确目录路径，优先用 list_dir 或 get_file_info。\n"
-        "- 不要自己编造未出现的绝对路径；但用户明确给出的绝对路径可以原样传给工具。\n\n"
+        "- 不要自己编造未出现的绝对路径；但用户明确给出的绝对路径可以原样传给工具。\n"
+        "- 用户要求创建项目、新建文件或写一组代码但**没有明确指定目标目录**时，"
+        "不要默认在当前工作区下规划写入；应设置 needs_tool=false，让最终回答先反问用户应该用哪个目录。\n\n"
+        f"{RUNTIME_AGENT_RULES}\n\n"
         "只返回 JSON，不要输出其他文本。格式：\n"
         "{"
         "\"needs_tool\":true,"
@@ -627,9 +638,33 @@ def _normalize_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> dict
         return {
             "command": str(arguments.get("command") or ""),
             "cwd": _clean_tool_path(str(arguments.get("cwd") or ".")),
-            "timeout_ms": int(arguments.get("timeout_ms") or 30000),
-            "max_output_bytes": int(arguments.get("max_output_bytes") or 65536),
+            "timeout_ms": int(arguments.get("timeout_ms") or settings.local_operator_exec_default_timeout_ms),
+            "max_output_bytes": int(
+                arguments.get("max_output_bytes") or settings.local_operator_exec_default_max_output_bytes
+            ),
         }
+    if tool_name == "exec_command_background":
+        return {
+            "command": str(arguments.get("command") or ""),
+            "cwd": _clean_tool_path(str(arguments.get("cwd") or ".")),
+        }
+    if tool_name == "read_background_output":
+        return {
+            "task_id": str(arguments.get("task_id") or ""),
+            "since_line": int(arguments.get("since_line") or 0),
+            "max_lines": int(arguments.get("max_lines") or 50),
+        }
+    if tool_name == "kill_background_task":
+        return {"task_id": str(arguments.get("task_id") or "")}
+    if tool_name == "list_background_tasks":
+        raw = arguments.get("include_finished")
+        if raw is None:
+            include_finished = True
+        elif isinstance(raw, bool):
+            include_finished = raw
+        else:
+            include_finished = str(raw).lower() not in {"false", "0", "no", "off"}
+        return {"include_finished": include_finished}
     return {}
 
 
@@ -810,6 +845,30 @@ def _known_existing_paths_from_observations(observations: list[LocalOperatorObse
             if value:
                 known_paths.add(str(value))
     return known_paths
+
+
+def _known_read_files_from_observations(observations: list[LocalOperatorObservation]) -> dict[str, KnownReadFile]:
+    """从 read_file observation 恢复覆盖保护需要的完整读取快照。"""
+
+    known: dict[str, KnownReadFile] = {}
+    for observation in observations:
+        if not observation.get("ok") or observation.get("tool_name") != "read_file":
+            continue
+        data = dict(observation.get("data") or {})
+        path = str(data.get("path") or "")
+        relative_path = str(data.get("relative_path") or "")
+        if not path:
+            continue
+        entry = KnownReadFile(
+            path=path,
+            relative_path=relative_path,
+            mtime=float(data.get("mtime") or 0.0),
+            full_view=bool(data.get("full_view", False)),
+        )
+        known[path] = entry
+        if relative_path:
+            known[relative_path] = entry
+    return known
 
 
 def _format_entries(entries: list[dict[str, Any]]) -> list[str]:

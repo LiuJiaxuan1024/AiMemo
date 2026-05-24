@@ -14,6 +14,7 @@ class JobType(StrEnum):
     NOTE_EMBEDDING = "note_embedding"
     CONVERSATION_SUMMARY = "conversation_summary"
     CONVERSATION_MEMORY = "conversation_memory"
+    CONVERSATION_TITLE = "conversation_title"
 
 
 class GraphName(StrEnum):
@@ -21,3 +22,4 @@ class GraphName(StrEnum):
     NOTE_EMBEDDING = "note_embedding_graph"
     CONVERSATION_SUMMARY = "conversation_summary_graph"
     CONVERSATION_MEMORY = "conversation_memory_graph"
+    CONVERSATION_TITLE = "conversation_title_graph"

@@ -37,6 +37,8 @@ export interface ChatMessage {
 
 export interface ChatMessageWithTurn extends ChatMessage {
   isStreaming?: boolean;
+  thoughts?: ChatThought[];
+  segments?: MessageSegment[];
 }
 
 export type DraftAssistantMessage = ChatMessageWithTurn;
@@ -48,6 +50,32 @@ export interface ChatThought {
   status: string;
   related_node: string;
   related_tool_call_id?: string | null;
+  step_index?: number;
+}
+
+export interface ToolInvocation {
+  step_index: number;
+  tool_call_id: string;
+  tool_name: string;
+  arguments: Record<string, unknown>;
+  ok: boolean;
+  blocked: boolean;
+  error_code: string;
+  message: string;
+  result_summary: string;
+  running: boolean;
+}
+
+/**
+ * 一个 ReAct 步内的可见片段。MessageList 按 step_index 顺序渲染：
+ *   thought（可选） → text（pre-tool 叙述或最终答复） → tools（本步触发的工具调用卡片）。
+ *
+ * step_index = 0 表示后端还没有标注 step（兼容旧 SSE 或重连时丢失 step 的事件）。
+ */
+export interface MessageSegment {
+  step_index: number;
+  text: string;
+  tools: ToolInvocation[];
 }
 
 export interface ChatResponse {
@@ -83,6 +111,7 @@ export interface ChatTurnGraph {
     budget_tokens: number | null;
     used_tokens: number;
     note: string;
+    kind?: "layer" | "fused";
   }>;
   retrieved_chunks: NoteSearchResult[];
   debug_payload: {
@@ -97,6 +126,15 @@ export interface ChatTurnGraph {
         duration_ms?: number;
         retrieval_debug?: Record<string, string | number | boolean>;
         state?: unknown;
+        invocation_count?: number;
+        invocations?: Array<{
+          index: number;
+          status?: string;
+          started_ms?: number;
+          completed_ms?: number;
+          duration_ms?: number;
+          state?: unknown;
+        }>;
       }
     >;
     summary?: {
@@ -151,10 +189,26 @@ export type ChatStreamEvent =
           status: string;
           related_node: string;
           related_tool_call_id?: string | null;
+          step_index?: number;
         }>;
       };
     }
-  | { event: "answer_delta"; data: { content: string } }
+  | { event: "answer_delta"; data: { content: string; step_index?: number } }
+  | {
+      event: "tool_invocation";
+      data: {
+        step_index: number;
+        tool_call_id: string;
+        tool_name: string;
+        arguments: Record<string, unknown>;
+        ok: boolean;
+        blocked: boolean;
+        error_code: string;
+        message: string;
+        result_summary: string;
+        running?: boolean;
+      };
+    }
   | {
       event: "done";
       data: {
@@ -163,4 +217,20 @@ export type ChatStreamEvent =
         bubbles?: Array<{ text: string; emoji: string }>;
       };
     }
-  | { event: "error"; data: { turn_id?: number; message: string; node_statuses?: Record<string, string> } };
+  | { event: "error"; data: { turn_id?: number; message: string; node_statuses?: Record<string, string> } }
+  | { event: "turn_unavailable"; data: { turn_id: number; reason: string } };
+
+export interface ChatActiveTurn {
+  turn_id: number;
+  conversation_id: number;
+  status: string;
+  node_statuses: Record<string, string>;
+  user_message: ChatMessage | null;
+  assistant_message: ChatMessage | null;
+  started_at: string;
+  updated_at: string;
+}
+
+export interface ChatActiveTurnList {
+  items: ChatActiveTurn[];
+}

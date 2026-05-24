@@ -2,6 +2,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.core.config import settings
+
 
 class ToolError(BaseModel):
     """统一工具错误结构，便于 graph 和前端按 error_code 处理。"""
@@ -37,22 +39,22 @@ class ToolResult(BaseModel):
 
 
 class ListDirInput(BaseModel):
-    path: str = Field(description="要列出的目录路径，必须位于授权 workspace 内。")
+    path: str = Field(description="要列出的目录路径，必须位于授权 workspace 内。必须是绝对路径，例如 E:\\demo 或 /home/user/demo。")
     max_entries: int = Field(default=100, description="最大返回条目数，上限 500。")
     include_hidden: bool = Field(default=False, description="是否包含隐藏文件。")
 
 
 class ReadFileInput(BaseModel):
-    path: str = Field(description="要读取的文本文件路径，必须位于授权 workspace 内。")
+    path: str = Field(description="要读取的文本文件路径，必须位于授权 workspace 内。必须是绝对路径，例如 E:\\demo\\config.json 或 /home/user/demo/config.json。")
     start_line: int | None = Field(default=None, description="起始行号，1-based。")
     end_line: int | None = Field(default=None, description="结束行号，包含该行。")
     max_bytes: int = Field(default=65536, description="最大返回字节数，上限由系统策略限制。")
 
 
 class WriteFileInput(BaseModel):
-    path: str = Field(description="要写入的文件路径，必须位于授权 workspace 内。")
+    path: str = Field(description="要写入的文件路径，必须位于授权 workspace 内。必须是绝对路径，例如 E:\\demo\\main.py 或 /home/user/demo/main.py。")
     content: str = Field(description="要写入文件的完整内容。该工具会整文件写入。")
-    overwrite: bool = Field(default=False, description="是否允许覆盖已存在文件。覆盖前必须先读取或查看该文件。")
+    overwrite: bool = Field(default=False, description="是否允许覆盖已存在文件。覆盖前必须先用 read_file 完整读取该文件。")
 
 
 class ExecCommandInput(BaseModel):
@@ -62,21 +64,61 @@ class ExecCommandInput(BaseModel):
     不支持后台任务、不支持交互输入，也不把它作为读写文件的替代品。
     """
 
-    command: str = Field(description="要执行的终端命令。不要用它读写文件，读写文件应使用专用工具。")
-    cwd: str = Field(default=".", description="命令工作目录，必须位于授权 workspace 内。")
-    timeout_ms: int = Field(default=30000, description="超时时间，单位毫秒，上限由系统策略限制。")
-    max_output_bytes: int = Field(default=65536, description="stdout/stderr 合计最多返回字节数。")
+    command: str = Field(description="要执行的终端命令。不要用它读写文件，读写文件应使用专用工具。stdout/stderr 会按 UTF-8 返回。")
+    cwd: str = Field(default=".", description="命令工作目录，必须位于授权 workspace 内。必须是绝对路径，例如 E:\\demo 或 /home/user/demo。")
+    timeout_ms: int = Field(
+        default=settings.local_operator_exec_default_timeout_ms,
+        description="超时时间，单位毫秒，上限由系统策略限制。pip install、构建等耗时命令可以使用更长超时。",
+    )
+    max_output_bytes: int = Field(
+        default=settings.local_operator_exec_default_max_output_bytes,
+        description="stdout/stderr 合计最多返回字节数。",
+    )
+
+
+class ExecCommandBackgroundInput(BaseModel):
+    """后台启动命令的输入。
+
+    用于启动长期运行的服务（如 flask run/uvicorn/npm start），不会阻塞 agent 循环。
+    返回 task_id 后，用 read_background_output 轮询输出，用 kill_background_task 停止。
+    """
+
+    command: str = Field(description="要在后台启动的命令。例如 'python app.py' 或 'npm run dev'。不要用它读写文件，也不要写带 & 的 shell 后台符。")
+    cwd: str = Field(default=".", description="命令工作目录，必须位于授权 workspace 内绝对路径。")
+
+
+class ReadBackgroundOutputInput(BaseModel):
+    """读取后台任务输出与状态。"""
+
+    task_id: str = Field(description="exec_command_background 返回的 task_id，例如 'bg-1234abcd'.")
+    since_line: int = Field(default=0, description="从该行号之后开始返回（0 表示从最早一行）。轮询时应记录上次返回的 last_line 并把它当作 since_line。")
+    max_lines: int = Field(default=50, description="最多返回多少行，上限 200。")
+
+
+class KillBackgroundTaskInput(BaseModel):
+    """停止指定后台任务。"""
+
+    task_id: str = Field(description="要停止的后台任务 ID。会整树 kill 子进程及孙子进程。")
+
+
+class ListBackgroundTasksInput(BaseModel):
+    """列出当前会话的所有后台任务（含历史/orphaned）。"""
+
+    include_finished: bool = Field(
+        default=True,
+        description="是否包含已结束（exited/failed/killed/orphaned）的任务；默认 True。",
+    )
 
 
 class SearchFilesInput(BaseModel):
-    root: str = Field(default=".", description="搜索根目录，必须位于授权 workspace 内。")
+    root: str = Field(default=".", description="搜索根目录，必须位于授权 workspace 内。必须是绝对路径，例如 E:\\demo 或 /home/user/demo。")
     pattern: str = Field(description="文件名关键词或 glob，例如 memory 或 *.py。")
     max_results: int = Field(default=50, description="最大返回结果数，上限 200。")
     include_hidden: bool = Field(default=False, description="是否包含隐藏文件。")
 
 
 class SearchTextInput(BaseModel):
-    root: str = Field(default=".", description="搜索根目录，必须位于授权 workspace 内。")
+    root: str = Field(default=".", description="搜索根目录，必须位于授权 workspace 内。必须是绝对路径，例如 E:\\demo 或 /home/user/demo。")
     query: str = Field(description="要搜索的文本。第一阶段按普通字符串匹配。")
     include_glob: str | None = Field(default=None, description="限制文件 glob，例如 *.py、*.tsx。")
     max_results: int = Field(default=50, description="最大匹配条数，上限 200。")
@@ -84,4 +126,4 @@ class SearchTextInput(BaseModel):
 
 
 class GetFileInfoInput(BaseModel):
-    path: str = Field(description="要查看信息的文件或目录路径，必须位于授权 workspace 内。")
+    path: str = Field(description="要查看信息的文件或目录路径，必须位于授权 workspace 内。必须是绝对路径，例如 E:\\demo 或 /home/user/demo。")

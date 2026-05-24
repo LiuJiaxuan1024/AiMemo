@@ -1,6 +1,8 @@
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 import json
+import logging
+import threading
 from time import perf_counter
 
 from sqlmodel import Session, desc, select
@@ -16,6 +18,7 @@ from app.schemas.chat import ChatResponse
 from app.schemas.elf import ElfEventCreate
 from app.schemas.conversation import ChatMessageRead
 from app.schemas.search import NoteSearchResult
+from app.services import chat_turn_buffer
 from app.services.chat_turn_service import (
     attach_chat_turn_messages,
     complete_chat_turn,
@@ -25,9 +28,13 @@ from app.services.chat_turn_service import (
     update_chat_turn_progress,
 )
 from app.services.conversation_summary_service import enqueue_conversation_summary_job_if_needed
+from app.services.conversation_title_service import enqueue_conversation_title_job_if_needed
 from app.services.conversation_service import _to_chat_message_read
 from app.services.elf_event_service import emit_elf_event
 from app.services.long_term_memory_service import enqueue_conversation_memory_job_if_needed
+
+
+logger = logging.getLogger(__name__)
 
 
 SessionFactory = Callable[[], AbstractContextManager[Session]]
@@ -80,6 +87,8 @@ def run_conversation_chat(
             user_message_id=user_message_id,
             assistant_message_id=assistant_message_id,
         )
+        # 自动给新会话起标题：title 还是默认值时入队一个一次性 LLM job。
+        enqueue_conversation_title_job_if_needed(session, conversation_id)
         session.commit()
         return ChatResponse(
             conversation_id=conversation_id,
@@ -128,12 +137,12 @@ def stream_conversation_chat_events(
       checkpoint_path: LangGraph checkpoint 数据库路径。
       emit_status_events: 是否向精灵事件中心播报“开始思考/开始回答/完成”等状态。
         桌面精灵外置聊天会关闭它，因为用户正在直接和精灵对话，不需要额外工作播报。
-      answer_mode: 回答生成模式。text 走普通 generate_answer；elf_bubble 走气泡回答分支。
+      answer_mode: 回答生成模式。text 走 ReAct agent；elf_bubble 走气泡回答分支。
 
     事件：
       - turn: 创建 graph_run_id，前端可立即建立调试入口。
       - node: 某个 LangGraph 节点完成，更新流程图状态。
-      - answer_delta: generate_answer 节点产生的 LLM token。
+      - answer_delta: agent 节点产生的最终回答 token。
       - done: 返回完整 ChatResponse 与 turn_id。
       - error: graph 失败。
     """
@@ -189,7 +198,9 @@ def stream_conversation_chat_events(
                 metadata={"conversation_id": conversation_id, "turn_id": turn_id},
             )
         )
-    yield _sse(
+    # 把首包 turn 事件先推进 buffer，再把图执行交给后台线程；HTTP 生成器只是 subscriber。
+    # 这样浏览器断开/切会话/刷新都不会终止 graph，再次 GET /events/stream 还能从头重放。
+    initial_turn_event = _sse(
         "turn",
         {
             "turn_id": turn_id,
@@ -198,15 +209,92 @@ def stream_conversation_chat_events(
             "node_statuses": node_statuses,
         },
     )
+    buffer = chat_turn_buffer.get_or_create(turn_id)
+    buffer.append(initial_turn_event)
+    chat_turn_buffer.cleanup_expired()
 
+    worker = threading.Thread(
+        target=_run_turn_to_buffer,
+        kwargs={
+            "buffer": buffer,
+            "conversation_id": conversation_id,
+            "turn_id": turn_id,
+            "message": message,
+            "session_factory": session_factory,
+            "checkpoint_path": checkpoint_path or settings.langgraph_checkpoint_path,
+            "emit_status_events": emit_status_events,
+            "answer_mode": answer_mode,
+            "user_message_id": user_message_id,
+            "assistant_message_id": assistant_message_id,
+            "node_statuses": node_statuses,
+            "debug_payload": debug_payload,
+            "started_at": started_at,
+        },
+        daemon=True,
+        name=f"chat-turn-{turn_id}",
+    )
+    worker.start()
+
+    yield from buffer.subscribe(from_index=0)
+
+
+def stream_existing_turn_events(turn_id: int):
+    """SSE 重连入口：让前端在切回会话/刷新后重新拿到正在跑或刚跑完的事件流。
+
+    - 如果 buffer 还在（turn 在跑、或完成但未过 retention），从头重放完整事件流。
+    - 如果 buffer 已经被回收，立刻 yield 一个 `turn_unavailable` 通知并关闭 SSE；
+      前端可以靠普通的 listMessages 拿到落库的最终 assistant 消息。
+    """
+
+    buffer = chat_turn_buffer.get(turn_id)
+    if buffer is None:
+        yield _sse(
+            "turn_unavailable",
+            {
+                "turn_id": turn_id,
+                "reason": "buffer_expired_or_unknown",
+            },
+        )
+        return
+    yield from buffer.subscribe(from_index=0)
+
+
+def _run_turn_to_buffer(
+    *,
+    buffer: "chat_turn_buffer.TurnBuffer",
+    conversation_id: int,
+    turn_id: int,
+    message: str,
+    session_factory: SessionFactory,
+    checkpoint_path: str,
+    emit_status_events: bool,
+    answer_mode: str,
+    user_message_id: int,
+    assistant_message_id: int,
+    node_statuses: dict[str, str],
+    debug_payload: dict,
+    started_at: float,
+) -> None:
+    """Graph worker：在后台线程里跑完一轮 memory_chat_graph，事件全部推进 buffer。
+
+    成功路径写 done 事件；任何异常写 error 事件；无论哪条退出路径都必须
+    `buffer.mark_done()`，否则 subscriber 会被永远阻塞在 cond.wait。
+    """
+
+    final_state = None
+    assistant_content = ""
+    # 这一轮里"当前 ReAct 步号"——agent 节点把 step_index 写到自己的 state_update 里，
+    # 我们用它给随后的 answer_delta 打标，让前端把同一段思考-工具-文本聚到一段 segment。
+    current_step_index = 0
+    # tool_invocation 用 tool_call_id 去重：custom event 先到，state_update 兜底时
+    # 不应再次派发同一条卡片；同时也覆盖 stream_writer 失败时只能从 state 派发的情形。
+    emitted_tool_call_ids: set[str] = set()
     try:
-        final_state = None
-        assistant_content = ""
         for event in stream_memory_chat_graph(
             conversation_id=conversation_id,
             user_message=message,
             session_factory=session_factory,
-            checkpoint_path=checkpoint_path or settings.langgraph_checkpoint_path,
+            checkpoint_path=checkpoint_path,
             user_message_id=user_message_id,
             assistant_message_id=assistant_message_id,
             answer_mode=answer_mode,
@@ -214,6 +302,10 @@ def stream_conversation_chat_events(
             if event["event"] == "node":
                 node_name = str(event["node"])
                 state = event.get("state") if isinstance(event.get("state"), dict) else {}
+                # agent 节点会回写 agent_step_index——同步给本作用域以便给随后的 answer_delta 打标。
+                state_step_index = state.get("agent_step_index")
+                if isinstance(state_step_index, int) and state_step_index > current_step_index:
+                    current_step_index = state_step_index
                 _mark_node_succeeded(node_statuses, node_name)
                 _mark_node_timing(
                     debug_payload,
@@ -229,12 +321,66 @@ def stream_conversation_chat_events(
                         node_statuses=node_statuses,
                         debug_payload=debug_payload,
                     )
-                yield _sse("node", {"node": node_name, "node_statuses": node_statuses})
+                buffer.append(_sse("node", {"node": node_name, "node_statuses": node_statuses}))
+                # tools 节点状态更新到达时，对 custom event 还没覆盖过的 observation 兜底派发。
+                # 正常路径下每条 observation 在 _invoke_one 之后立刻通过 custom event 派发了；
+                # 这一段只是为了不让 stream_writer 异常的极端情况丢卡片。
+                if node_name == "tools":
+                    observations = state.get("tool_observations")
+                    if isinstance(observations, list):
+                        for observation in observations:
+                            if not isinstance(observation, dict):
+                                continue
+                            tool_call_id = str(observation.get("tool_call_id") or "")
+                            if tool_call_id and tool_call_id in emitted_tool_call_ids:
+                                continue
+                            buffer.append(
+                                _sse(
+                                    "tool_invocation",
+                                    _build_tool_invocation_payload(
+                                        observation,
+                                        step_index=current_step_index,
+                                    ),
+                                )
+                            )
+                            if tool_call_id:
+                                emitted_tool_call_ids.add(tool_call_id)
+            elif event["event"] == "tool_invocation":
+                # tools 节点 _invoke_one 在工具执行前/后各 push 一次：
+                #   - running=True：让前端立刻以 running 态 mount 卡片，产生 pending 动画。
+                #   - running=False：覆盖同一个 tool_call_id 的卡片为完成/失败态。
+                # 同一 tool_call_id 在 running=False 之前不进 dedupe，确保完成事件能照常派发。
+                tool_call_id = str(event.get("tool_call_id") or "")
+                running = bool(event.get("running"))
+                if tool_call_id and not running and tool_call_id in emitted_tool_call_ids:
+                    continue
+                step_index_value = event.get("step_index")
+                step_index = step_index_value if isinstance(step_index_value, int) else current_step_index
+                observation = {
+                    "tool_call_id": tool_call_id,
+                    "tool_name": event.get("tool_name"),
+                    "arguments": event.get("arguments") if isinstance(event.get("arguments"), dict) else {},
+                    "ok": event.get("ok"),
+                    "blocked": event.get("blocked"),
+                    "error_code": event.get("error_code"),
+                    "message": event.get("message"),
+                    "running": running,
+                }
+                buffer.append(
+                    _sse(
+                        "tool_invocation",
+                        _build_tool_invocation_payload(observation, step_index=int(step_index)),
+                    )
+                )
+                # 只在完成态进 dedupe；这样如果 stream writer 漏发了 running 事件，
+                # state_update 兜底仍能把完成态卡片补上。
+                if tool_call_id and not running:
+                    emitted_tool_call_ids.add(tool_call_id)
             elif event["event"] == "answer_delta":
-                # token 到达时，generate_answer 已经在执行中。updates 事件要等节点完成后
+                # token 到达时，agent 已经在执行中。updates 事件要等节点完成后
                 # 才会出现，所以这里主动把节点标记为 running，避免前端看到回答在流动、
                 # 但 graph 图还停在上一个节点。
-                node_name = str(event.get("node") or "generate_answer")
+                node_name = str(event.get("node") or "agent")
                 should_emit_node = node_statuses.get(node_name) != "running"
                 _mark_node_running(node_statuses, node_name)
                 _mark_answer_token_timing(debug_payload, started_at)
@@ -265,7 +411,7 @@ def stream_conversation_chat_events(
                             node_statuses=node_statuses,
                             debug_payload=debug_payload,
                         )
-                    yield _sse("node", {"node": node_name, "node_statuses": node_statuses})
+                    buffer.append(_sse("node", {"node": node_name, "node_statuses": node_statuses}))
                 delta = str(event.get("content") or "")
                 assistant_content += delta
                 with session_factory() as session:
@@ -275,7 +421,12 @@ def stream_conversation_chat_events(
                         content=assistant_content,
                         status="streaming",
                     )
-                yield _sse("answer_delta", {"content": delta})
+                buffer.append(
+                    _sse(
+                        "answer_delta",
+                        {"content": delta, "step_index": current_step_index},
+                    )
+                )
             elif event["event"] == "internal_token":
                 # 内部 LLM token 例如 planner JSON，默认不暴露给前端。
                 # 后续如果做“调试模式”，可以在这里转成 internal_token SSE。
@@ -290,12 +441,14 @@ def stream_conversation_chat_events(
                         node_statuses=node_statuses,
                         debug_payload=debug_payload,
                     )
-                yield _sse(
-                    "thought_snapshot",
-                    {
-                        "node": event.get("node", ""),
-                        "thoughts": thoughts,
-                    },
+                buffer.append(
+                    _sse(
+                        "thought_snapshot",
+                        {
+                            "node": event.get("node", ""),
+                            "thoughts": thoughts,
+                        },
+                    )
                 )
             elif event["event"] == "bubble_delta":
                 # 外置精灵气泡 JSON token 不直接发给普通 Web 聊天。
@@ -364,6 +517,7 @@ def stream_conversation_chat_events(
                 user_message_id=user_message_id,
                 assistant_message_id=assistant_message_id,
             )
+            enqueue_conversation_title_job_if_needed(session, conversation_id)
             session.commit()
             response = ChatResponse(
                 conversation_id=conversation_id,
@@ -395,8 +549,9 @@ def stream_conversation_chat_events(
         done_payload = {"turn_id": turn_id, "response": response.model_dump(mode="json")}
         if answer_mode == "elf_bubble":
             done_payload["bubbles"] = elf_bubbles
-        yield _sse("done", done_payload)
+        buffer.append(_sse("done", done_payload))
     except Exception as exc:
+        logger.exception("chat turn %s worker crashed", turn_id)
         for node_name, node_status in list(node_statuses.items()):
             if node_status == "running":
                 node_statuses[node_name] = "failed"
@@ -420,21 +575,26 @@ def stream_conversation_chat_events(
                     metadata={"conversation_id": conversation_id, "turn_id": turn_id, "error": str(exc)},
                 )
             )
-        with session_factory() as session:
-            _update_streaming_assistant_message(
-                session,
-                assistant_message_id=assistant_message_id,
-                content=assistant_content,
-                status="failed",
-            )
-            fail_chat_turn(
-                session,
-                turn_id,
-                node_statuses=node_statuses,
-                error=str(exc),
-                debug_payload=debug_payload,
-            )
-        yield _sse("error", {"turn_id": turn_id, "message": str(exc), "node_statuses": node_statuses})
+        try:
+            with session_factory() as session:
+                _update_streaming_assistant_message(
+                    session,
+                    assistant_message_id=assistant_message_id,
+                    content=assistant_content,
+                    status="failed",
+                )
+                fail_chat_turn(
+                    session,
+                    turn_id,
+                    node_statuses=node_statuses,
+                    error=str(exc),
+                    debug_payload=debug_payload,
+                )
+        except Exception:
+            logger.exception("failed to persist failure state for chat turn %s", turn_id)
+        buffer.append(_sse("error", {"turn_id": turn_id, "message": str(exc), "node_statuses": node_statuses}))
+    finally:
+        buffer.mark_done()
 
 
 def _get_message_or_error(session: Session, message_id: int) -> ChatMessage:
@@ -448,6 +608,35 @@ def _sse(event: str, data: dict) -> str:
     """把事件编码为浏览器 EventSource/fetch 可读取的 SSE 文本。"""
 
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _build_tool_invocation_payload(observation: dict, *, step_index: int) -> dict:
+    """把 graph 内部的 AgentToolObservationPayload 整理成前端时间线用的 SSE 负载。
+
+    只保留前端展示需要的字段（工具名、参数摘要、是否成功、结果摘要），避免把整段
+    工具原始数据（可能很大）通过 SSE 推给浏览器。result_summary 复用 graph 节点
+    里给 thought 用的同一份摘要函数，保持两边描述一致。
+    """
+
+    from app.agent.graphs.memory_chat.nodes import _summarize_tool_observation
+
+    arguments = observation.get("arguments")
+    if not isinstance(arguments, dict):
+        arguments = {}
+    running = bool(observation.get("running"))
+    return {
+        "step_index": int(step_index),
+        "tool_call_id": str(observation.get("tool_call_id") or ""),
+        "tool_name": str(observation.get("tool_name") or ""),
+        "arguments": arguments,
+        "ok": bool(observation.get("ok")),
+        "blocked": bool(observation.get("blocked")),
+        "error_code": str(observation.get("error_code") or ""),
+        "message": str(observation.get("message") or ""),
+        # running 卡片此时还没有摘要可言；让前端用 args 占位避免显示 "→ undefined"。
+        "result_summary": "" if running else _summarize_tool_observation(observation),
+        "running": running,
+    }
 
 
 def _mark_node_running(node_statuses: dict[str, str], node_name: str) -> None:
@@ -528,19 +717,60 @@ def _mark_node_timing(
 ) -> None:
     """记录节点状态和完成时间。
 
-    LangGraph updates 是节点完成事件；answer_delta 到达时 generate_answer 处于 running。
+    LangGraph updates 是节点完成事件；answer_delta 到达时 agent 处于 running。
     L3 的内部耗时来自 graph state.retrieval_debug，会在这里并入节点记录。
+
+    ReAct 循环里同一节点（agent / tools）会被调用多次。为了让前端能分别查看
+    每次调用后的 state 快照，这里在 invocations 列表里追加每次调用记录，
+    顶层 status/started_ms/completed_ms 仍维持“最新一次”，保持向后兼容。
     """
 
-    node_payload = debug_payload.setdefault("nodes", {}).setdefault(node_name, {})
-    node_payload["status"] = status
-    if status == "running" and "started_ms" not in node_payload:
-        node_payload["started_ms"] = _elapsed_ms_since(started_at)
-    if status in {"succeeded", "failed"}:
-        node_payload["completed_ms"] = _elapsed_ms_since(started_at)
+    nodes = debug_payload.setdefault("nodes", {})
+    node_payload = nodes.setdefault(node_name, {})
+    invocations = node_payload.setdefault("invocations", [])
+    now_ms = _elapsed_ms_since(started_at)
+
+    if status == "running":
+        # 找到一个尚未结束的 running 记录；如果没有就开一条新的。
+        # ReAct 多轮调用时，每次新一轮 running 都应该开新条目。
+        pending = next((entry for entry in invocations if entry.get("completed_ms") is None), None)
+        if pending is None:
+            pending = {
+                "index": len(invocations),
+                "status": "running",
+                "started_ms": now_ms,
+            }
+            invocations.append(pending)
+        else:
+            pending.setdefault("started_ms", now_ms)
+            pending["status"] = "running"
+        current_entry = pending
+        if "started_ms" not in node_payload:
+            node_payload["started_ms"] = now_ms
+    else:
+        current_entry = next(
+            (entry for entry in reversed(invocations) if entry.get("completed_ms") is None),
+            None,
+        )
+        if current_entry is None:
+            current_entry = {
+                "index": len(invocations),
+                "started_ms": now_ms,
+            }
+            invocations.append(current_entry)
+        current_entry["status"] = status
+        current_entry["completed_ms"] = now_ms
+        started_ms_entry = current_entry.get("started_ms")
+        if isinstance(started_ms_entry, int):
+            current_entry["duration_ms"] = now_ms - started_ms_entry
+        node_payload["completed_ms"] = now_ms
         started_ms = node_payload.get("started_ms")
         if isinstance(started_ms, int):
-            node_payload["duration_ms"] = node_payload["completed_ms"] - started_ms
+            node_payload["duration_ms"] = now_ms - started_ms
+
+    node_payload["status"] = status
+    node_payload["invocation_count"] = len(invocations)
+
     if state and node_name == "build_l3_retrieved_memory":
         retrieval_debug = state.get("retrieval_debug")
         if isinstance(retrieval_debug, dict):
@@ -549,7 +779,9 @@ def _mark_node_timing(
         # 保存“节点完成后的累计 state 快照”，前端点击节点时可以直接查看。
         # 这里不直接暴露原始对象：一方面 state 可能包含较长文本，另一方面部分值
         # 不是 JSON 原生类型。调试快照会做长度裁剪，但保留关键字段结构。
-        node_payload["state"] = _compact_debug_state(state)
+        snapshot = _compact_debug_state(state)
+        current_entry["state"] = snapshot
+        node_payload["state"] = snapshot  # 兼容旧前端：保留最近一次
 
 
 def _compact_debug_state(value, *, depth: int = 0):

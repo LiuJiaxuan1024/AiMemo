@@ -97,6 +97,9 @@ backend/app/schemas/conversation.py
 
 backend/app/services/conversation_service.py
   创建对话、追加消息、读取对话和消息列表。
+  delete_conversation 负责级联释放：BackgroundTask（含 OS 进程）、
+  LongTermMemory、AgentOperation、Job、ChatTurn、ChatMessage、
+  LangGraph checkpoint 和 Conversation 本体。
 
 backend/app/services/chat_turn_service.py
   创建、更新、完成 ChatTurn，并生成消息 graph 调试视图。

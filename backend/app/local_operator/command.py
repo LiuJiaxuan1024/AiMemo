@@ -4,18 +4,24 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
+import sys
 import time
 from typing import Any
 
+from app.core.config import settings
 from app.local_operator.policy import LocalOperatorPolicy
 from app.local_operator.schemas import ToolResult
 
 
-DEFAULT_EXEC_TIMEOUT_MS = 30_000
-MAX_EXEC_TIMEOUT_MS = 120_000
-DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024
-MAX_OUTPUT_BYTES = 256 * 1024
+_IS_WINDOWS = sys.platform.startswith("win")
+
+
+DEFAULT_EXEC_TIMEOUT_MS = settings.local_operator_exec_default_timeout_ms
+MAX_EXEC_TIMEOUT_MS = settings.local_operator_exec_max_timeout_ms
+DEFAULT_MAX_OUTPUT_BYTES = settings.local_operator_exec_default_max_output_bytes
+MAX_OUTPUT_BYTES = settings.local_operator_exec_max_output_bytes
 
 
 @dataclass(frozen=True)
@@ -76,28 +82,33 @@ class LocalCommandExecutor:
         started_at = time.perf_counter()
         timed_out = False
         try:
-            completed = subprocess.run(
-                normalized_command,
-                cwd=resolved_cwd,
-                shell=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                capture_output=True,
-                timeout=timeout_ms / 1000,
-                env=_safe_subprocess_env(),
-            )
-            exit_code = int(completed.returncode)
-            stdout = completed.stdout or ""
-            stderr = completed.stderr or ""
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            exit_code = -1
-            stdout = _decode_timeout_output(exc.stdout)
-            stderr = _decode_timeout_output(exc.stderr) or f"命令执行超过 {timeout_ms}ms，已终止。"
+            proc = _spawn_subprocess(normalized_command, cwd=resolved_cwd)
         except OSError as exc:
             return _error("EXEC_FAILED", f"命令启动失败：{exc}")
 
+        try:
+            try:
+                stdout_raw, stderr_raw = proc.communicate(timeout=timeout_ms / 1000)
+                exit_code = int(proc.returncode)
+                stdout = stdout_raw or ""
+                stderr = stderr_raw or ""
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                _terminate_process_tree(proc)
+                try:
+                    stdout_raw, stderr_raw = proc.communicate(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    stdout_raw, stderr_raw = "", ""
+                exit_code = -1
+                stdout = stdout_raw or ""
+                stderr = stderr_raw or f"命令执行超过 {timeout_ms}ms，已终止。"
+        finally:
+            # 防御性兜底：若上面任意分支异常，确保子进程及其孙子进程不残留。
+            if proc.poll() is None:
+                _terminate_process_tree(proc)
+
+        stdout = _strip_ansi(stdout)
+        stderr = _strip_ansi(stderr)
         stdout, stderr, truncated = _truncate_outputs(stdout, stderr, max_output_bytes=max_output_bytes)
         # 子进程成功启动不等于命令成功。agent 的重规划依赖 ok=false 来识别失败，
         # 因此非 0 退出码必须作为工具失败回传，同时保留 stdout/stderr 供后续判断。
@@ -146,6 +157,13 @@ def evaluate_command_policy(command: str) -> CommandPolicyDecision:
         return CommandPolicyDecision(False, "exec 暂不允许 shell 重定向写文件；写文件请使用 write_file。", "high")
     if _looks_like_file_write_command(lowered):
         return CommandPolicyDecision(False, "exec 不用于文件写入；请使用 write_file 工具。", "high")
+    if _looks_like_long_running_server(lowered):
+        return CommandPolicyDecision(
+            False,
+            "命令疑似启动长跑本地服务（如 flask/uvicorn/npm start/manage.py runserver 等）。"
+            "exec_command 只用于短时命令；请改用 exec_command_background 后台运行，或让用户手动启动。",
+            "medium",
+        )
     if _looks_like_file_read_command(lowered):
         return CommandPolicyDecision(True, "命令像只读终端查询；允许短时执行。", "low")
     return CommandPolicyDecision(True, "命令未命中高风险规则；允许短时执行。", "medium")
@@ -173,7 +191,83 @@ def _safe_subprocess_env() -> dict[str, str]:
         upper = key.upper()
         if any(marker in upper for marker in blocked_markers):
             env.pop(key, None)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    env.setdefault("LANG", "C.UTF-8")
+    env.setdefault("LC_ALL", "C.UTF-8")
     return env
+
+
+def _spawn_subprocess(command: str, *, cwd: Path) -> subprocess.Popen:
+    """启动子进程并把它放到独立的进程组，便于超时后整树清理。
+
+    Windows: CREATE_NEW_PROCESS_GROUP 让我们能向整组发 CTRL_BREAK；CREATE_NO_WINDOW
+    避免短命令弹出黑框。
+    POSIX: start_new_session=True 让 os.killpg 能命中孙子进程。
+    """
+
+    kwargs: dict[str, Any] = dict(
+        cwd=cwd,
+        shell=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=_safe_subprocess_env(),
+    )
+    if _IS_WINDOWS:
+        creationflags = 0
+        # 这些常量在 subprocess 模块中已定义，但仍按位 OR 以兼容旧 Python 版本。
+        creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        kwargs["creationflags"] = creationflags
+    else:
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(command, **kwargs)
+
+
+def _terminate_process_tree(proc: subprocess.Popen) -> None:
+    """超时/异常时清理子进程及其孙子进程。
+
+    Windows 上 Flask reloader、npm 等会派生 grandchild。`proc.kill()` 只杀直接子进程，
+    会留下 zombie 占住端口。这里改用 `taskkill /F /T` 整树清理；POSIX 走 killpg。
+    出错时静默兜底——清理失败不应阻塞主流程。
+    """
+
+    if proc.poll() is not None:
+        return
+    pid = proc.pid
+    try:
+        if _IS_WINDOWS:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        else:
+            try:
+                pgid = os.getpgid(pid)
+                os.killpg(pgid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                proc.wait(timeout=1.5)
+            except subprocess.TimeoutExpired:
+                try:
+                    pgid = os.getpgid(pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+    except Exception:
+        pass
+    finally:
+        # 最后一道保险，避免 Popen 句柄泄漏。
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
 
 def _has_background_operator(command: str) -> bool:
@@ -268,6 +362,42 @@ def _looks_like_file_read_command(command: str) -> bool:
     return any(command == item or command.startswith(f"{item} ") for item in read_commands)
 
 
+def _looks_like_long_running_server(command: str) -> bool:
+    """识别会占住前台不返回的本地服务启动命令。
+
+    这种命令必须走 exec_command_background 才不会卡死 agent 循环。
+    用相对宽松的正则——宁可误伤，也不要让模型反复触发长跑命令。
+    """
+
+    patterns = [
+        r"\bflask\s+run\b",
+        r"\buvicorn\b",
+        r"\bgunicorn\b",
+        r"\bhypercorn\b",
+        r"\bdaphne\b",
+        r"\bwaitress-serve\b",
+        r"\bcelery\s+(?:worker|beat|--?\w*)\b",
+        r"\bmanage\.py\s+runserver\b",
+        r"\bpython\s+-m\s+http\.server\b",
+        r"\bpython\s+-m\s+flask\b",
+        r"\bpython\s+-m\s+uvicorn\b",
+        r"\bpython\s+(?:[^|&;]*?[/\\])?(?:app|server|main|manage|wsgi|asgi|run|api)\.py\b",
+        r"\bnode\s+(?:[^|&;]*?[/\\])?(?:server|app|index|main)\.(?:js|mjs|cjs|ts)\b",
+        r"\b(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:start|dev|serve|preview|watch)\b",
+        r"\bnpx\s+(?:next|vite|nuxt|astro|remix|webpack|webpack-dev-server)\b",
+        r"\b(?:next|vite|nuxt|astro|remix)\s+(?:dev|start|preview|serve)\b",
+        r"\bdocker\s+compose\s+up\b(?!.*(?:\s|^)(?:-d|--detach)(?:\s|$))",
+        r"\bdocker-compose\s+up\b(?!.*(?:\s|^)(?:-d|--detach)(?:\s|$))",
+        r"\bdocker\s+run\b(?!.*(?:\s|^)(?:-d|--detach)(?:\s|$))",
+        r"\bcargo\s+(?:run|watch)\b",
+        r"\bdotnet\s+run\b",
+        r"\bgo\s+run\b",
+        r"\brails\s+s(?:erver)?\b",
+        r"\bphp\s+-s(?:\s|$)",
+    ]
+    return any(re.search(pattern, command) for pattern in patterns)
+
+
 def _truncate_outputs(stdout: str, stderr: str, *, max_output_bytes: int) -> tuple[str, str, bool]:
     combined = f"{stdout}\n{stderr}".encode("utf-8", errors="replace")
     if len(combined) <= max_output_bytes:
@@ -279,6 +409,13 @@ def _truncate_outputs(stdout: str, stderr: str, *, max_output_bytes: int) -> tup
         _truncate_text_bytes(stderr, stderr_budget),
         True,
     )
+
+
+def _strip_ansi(text: str) -> str:
+    """清理终端颜色/光标控制码，避免模型把 ANSI escape 当成真实输出。"""
+
+    ansi_pattern = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+    return ansi_pattern.sub("", text or "")
 
 
 def _truncate_text_bytes(text: str, max_bytes: int) -> str:

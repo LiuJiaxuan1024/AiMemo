@@ -19,7 +19,7 @@ backend/app/
 ## 关键文件
 
 - `app/main.py`: 创建 FastAPI 应用、注册 CORS 和路由、启动时创建数据库表。
-- `app/core/config.py`: 读取 `.env` 和默认配置。
+- `app/core/config.py`: 读取 `config.json5`、`.env` 和默认配置。
 - `app/core/database.py`: 创建 SQLModel engine，提供 session 依赖。
 - `app/models/note.py`: 定义 `Note` 数据模型。
 - `app/models/note_chunk.py`: 定义笔记 chunk 数据模型。
@@ -39,6 +39,16 @@ backend/data/ai_note.db
 ```
 
 该文件属于本地运行时数据，不进入版本管理。
+
+## 配置
+
+仓库根目录的 `config.json5` 保存适合提交的项目级默认配置，例如 Local Operator
+命令超时、输出截断上限和 job worker 轮询间隔。`.env` 和系统环境变量仍然拥有更高优先级，
+适合放 API Key、本机路径和临时覆盖项。
+
+当前 `exec_command` 默认超时已从 30 秒提高到 180 秒，上限 600 秒。`pip install`、
+首次构建依赖等前台短命令可以直接使用这个默认值；长期运行的服务仍应走
+`exec_command_background`，避免阻塞 agent 主循环。
 
 ## 当前 Note 模型
 

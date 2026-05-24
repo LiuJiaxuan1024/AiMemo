@@ -55,7 +55,8 @@ def test_current_conversation_window_merges_recent_messages_and_current_input():
     )
 
     assert layer.level == 1
-    assert layer.name == "当前对话窗口"
+    assert layer.name == "当前对话窗口（L0+L1 合并）"
+    assert layer.kind == "fused"
     assert "assistant: 我建议保存到 E:\\test\\message.txt" in layer.content
     assert "user(current): 直接保存到这个文件" in layer.content
 

@@ -179,12 +179,32 @@ backend/app/services/chat_turn_service.py
 聊天窗口保持工具型布局：
 
 ```text
-左侧：conversation 列表
+左侧：conversation 列表（卡片：图标 + 标题 + 滚动摘要 + 相对时间 + 悬浮删除按钮）
 中间：消息流和输入框
 右侧浮层：Graph 调试面板
 ```
 
 右侧 Graph 面板使用固定定位，避免挤压主聊天区域。
+
+消息流的「首响应等待」体验：
+
+- 用户消息发出后，对应的 assistant 气泡立刻以乐观更新出现；如果此时还没有任何
+  thought / 内容（首个 chunk 通常需要几秒），气泡内会渲染 `TypingIndicator`：
+  6 帧字符脉冲 + `VerbRotator` 动词轮播 + 3 颗弹跳光点。
+- 收到第一条 thought 或 `answer_delta` 之后，`TypingIndicator` 会被
+  `ThoughtTimeline` / 流式 markdown 自然替换。
+- `prefers-reduced-motion` 用户的弹跳动画会被减速到 2s 一周期。
+
+侧栏卡片：
+
+- 标题来自后端 `conversation.title`。新会话默认显示「新对话」，用户首次发送消息后
+  `conversation_title_graph` 会在后台异步生成 ≤ 16 字的中文短标题，前端通过 1.5s / 4.5s
+  两次 `listConversations` 轮询自然刷新；详见
+  [Conversation Title Graph](../agent/conversation-title-graph.md)。
+- 当前选中的对话会显示左侧渐变色强调条；hover 显示右侧垃圾桶按钮。
+- 点击删除按钮会弹出 `window.confirm`，确认后调用
+  [`DELETE /api/conversations/{id}`](../api/conversations.md#删除对话)。
+  删除当前对话会自动切换到列表中下一个对话；若列表为空则自动创建一个新会话。
 
 ## 后续目标
 

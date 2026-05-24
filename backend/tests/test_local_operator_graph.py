@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+import time
 
 import pytest
 from sqlmodel import select
@@ -200,19 +202,53 @@ def test_write_file_requires_read_before_overwrite(tmp_path: Path):
     service = LocalFilesystemService(LocalOperatorPolicy.from_roots([str(workspace)]))
 
     blocked = service.write_file("hello.txt", content="new", overwrite=True)
-    allowed = service.write_file(
-        "hello.txt",
-        content="new",
-        overwrite=True,
-        known_existing_paths={"hello.txt"},
-    )
+    read_result = service.read_file("hello.txt")
+    allowed = service.write_file("hello.txt", content="new", overwrite=True)
 
     assert blocked.ok is False
     assert blocked.error_code == "READ_BEFORE_WRITE_REQUIRED"
     assert blocked.blocked is True
+    assert read_result.ok is True
     assert allowed.ok is True
     assert allowed.data["type"] == "update"
     assert (workspace / "hello.txt").read_text(encoding="utf-8") == "new"
+
+
+def test_write_file_requires_full_read_before_overwrite(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "hello.txt"
+    target.write_text("old\ncontent", encoding="utf-8")
+    service = LocalFilesystemService(LocalOperatorPolicy.from_roots([str(workspace)]))
+
+    partial_read = service.read_file("hello.txt", start_line=1, end_line=1)
+    result = service.write_file("hello.txt", content="new", overwrite=True)
+
+    assert partial_read.ok is True
+    assert partial_read.data["full_view"] is False
+    assert result.ok is False
+    assert result.error_code == "WRITE_WITH_PARTIAL_READ"
+    assert target.read_text(encoding="utf-8") == "old\ncontent"
+
+
+def test_write_file_rejects_changed_file_after_read(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "hello.txt"
+    target.write_text("old", encoding="utf-8")
+    service = LocalFilesystemService(LocalOperatorPolicy.from_roots([str(workspace)]))
+
+    read_result = service.read_file("hello.txt")
+    target.write_text("changed outside", encoding="utf-8")
+    future = time.time() + 5
+    os.utime(target, (future, future))
+    result = service.write_file("hello.txt", content="new", overwrite=True)
+
+    assert read_result.ok is True
+    assert read_result.data["full_view"] is True
+    assert result.ok is False
+    assert result.error_code == "FILE_MTIME_CHANGED"
+    assert target.read_text(encoding="utf-8") == "changed outside"
 
 
 def test_write_file_rejects_placeholder_content(tmp_path: Path):
@@ -239,6 +275,11 @@ def test_exec_command_runs_short_readonly_command(tmp_path: Path):
     assert result.tool_name == "exec_command"
     assert result.data["exit_code"] == 0
     assert "Python" in (result.data["stdout"] + result.data["stderr"])
+
+
+def test_exec_command_timeout_defaults_come_from_project_config():
+    assert settings.local_operator_exec_default_timeout_ms >= 180_000
+    assert settings.local_operator_exec_max_timeout_ms >= settings.local_operator_exec_default_timeout_ms
 
 
 def test_exec_command_reports_non_zero_exit_as_failure(tmp_path: Path):
@@ -393,7 +434,7 @@ def test_local_operator_graph_overwrites_existing_file_after_info_check(
     operations = session.exec(select(AgentOperation).where(AgentOperation.conversation_id == 20).order_by(AgentOperation.id)).all()
     assert result["needs_tool"] is True
     assert (workspace / "hello.txt").read_text(encoding="utf-8") == "new-content"
-    assert [operation.tool_name for operation in operations] == ["get_file_info", "write_file"]
+    assert [operation.tool_name for operation in operations] == ["read_file", "write_file"]
     assert [operation.operation_type for operation in operations] == ["read", "write"]
 
 

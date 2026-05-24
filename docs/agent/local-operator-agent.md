@@ -2,6 +2,18 @@
 
 本文档描述 Ai 记下一阶段的本地操作智能体设计。目标是让用户在和 AI 对话时，可以授权 AI 读取本地文件、后续写入文件、执行命令，从“记忆型个人知识库”逐步升级为“本地个人智能体”。
 
+## 项目规则注入（AGENTS.md → planner system prompt）
+
+`backend/app/agent/graphs/local_operator/nodes.py::_build_local_operator_planner_prompt`
+在 prompt 尾部会拼接 `RUNTIME_AGENT_RULES`（定义在
+`backend/app/agent/project_rules.py`），从而把仓库根 `AGENTS.md` 的核心条款带
+进 planner 的每次推理。最关键的一条：用户要求创建项目 / 新建文件 / 写一组代码，
+但**没有明确指定目标目录**时，planner 必须设置 `needs_tool=false`，让最终回答
+节点先反问用户应该用哪个目录，而不是默认选择当前工作区。
+
+修改条款时同时改 `AGENTS.md` 与 `project_rules.py` 保持一致，然后跑
+`backend/tests/test_runtime_agent_rules.py` 验证注入仍然生效。
+
 ## 目标
 
 Local Operator Agent 负责三类本地能力：
@@ -715,6 +727,39 @@ cwd 授权
   当前第一版 medium exec 仍会直接执行；high exec 直接 blocked。
   后续接 LangGraph interrupt 后，medium/high exec 应进入人工审批。
 ```
+
+### 后台命令工具
+
+`exec_command` 只适合短期阻塞型命令。对 dev server、`python app.py`、`npm run dev`
+这种长跑型命令，使用专门的后台命令工具，进程独立于后端生命周期存活：
+
+```text
+run_command_background(command, cwd?)
+  - 在 LocalOperatorPolicy.workspace_roots 内启动 detached 子进程
+  - stdout / stderr 重定向到 data/background_logs/<task_id>.{stdout,stderr}.log
+  - 同一会话最多 5 个并发后台任务
+  - 返回 task_id；后端关闭时不会杀掉该进程
+
+read_command_output(task_id, since_line?, max_lines?)
+  - 增量读取日志（按全局行号），默认 50 行，上限 200 行
+
+kill_background_command(task_id)
+  - 触发跨平台进程树终止；DB 记录置为 killed
+
+list_background_tasks(include_finished=true)
+  - 列出当前会话的全部后台任务（含历史 / orphaned）
+  - 用户问“现在跑着哪些服务”或要求停掉某个但没给 task_id 时，agent 必须先调它再决定
+```
+
+Memory Chat Graph 的系统提示词里包含一条硬性约束：
+
+> 用户问"现在跑着哪些服务/后台任务"或者想停掉一个但没给 task_id 时，
+> 先调用 `list_background_tasks` 看本会话的任务列表（含历史/orphaned），
+> 再根据 task_id 操作；不要凭空猜 task_id，也不要直接 kill。
+
+实现细节、状态机、平台差异（Windows 不能用 `DETACHED_PROCESS` 等踩坑）见
+[Background Tasks 后端](../backend/background-tasks.md) 和
+[Background Tasks API](../api/background-tasks.md)。
 
 ### 条件边设计
 

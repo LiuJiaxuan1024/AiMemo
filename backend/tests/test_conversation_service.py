@@ -1,11 +1,21 @@
 import pytest
 from fastapi import HTTPException
+from sqlmodel import select
 
+from app.jobs.models import GraphName, JobType
+from app.jobs.queue import enqueue_job
+from app.models.agent_operation import AgentOperation
+from app.models.background_task import BackgroundTask
+from app.models.chat_message import ChatMessage
 from app.models.chat_turn import ChatTurn
+from app.models.conversation import Conversation
+from app.models.job import Job
+from app.models.long_term_memory import LongTermMemory
 from app.schemas.conversation import ChatMessageCreate, ConversationCreate
 from app.services.conversation_service import (
     append_message,
     create_conversation,
+    delete_conversation,
     get_conversation,
     list_messages,
 )
@@ -91,4 +101,193 @@ def test_get_conversation_raises_404_for_missing_id(session):
     with pytest.raises(HTTPException) as exc_info:
         get_conversation(session, 404)
 
+    assert exc_info.value.status_code == 404
+
+
+def test_delete_conversation_cascades_related_resources(session, monkeypatch):
+    target = create_conversation(session, ConversationCreate(title="待删除"))
+    keeper = create_conversation(session, ConversationCreate(title="保留"))
+
+    user = append_message(
+        session,
+        target.id,
+        ChatMessageCreate(role="user", content="问题"),
+    )
+    assistant = append_message(
+        session,
+        target.id,
+        ChatMessageCreate(role="assistant", content="回答"),
+    )
+    keeper_msg = append_message(
+        session,
+        keeper.id,
+        ChatMessageCreate(role="user", content="另一段对话的问题"),
+    )
+
+    turn = ChatTurn(
+        conversation_id=target.id,
+        thread_id=f"conversation:{target.id}",
+        user_message_id=user.id,
+        assistant_message_id=assistant.id,
+    )
+    session.add(turn)
+
+    target_memory = LongTermMemory(
+        level=4,
+        category="fact",
+        content="待删除的长期记忆",
+        source_type="chat_message",
+        source_id=user.id,
+        content_hash="hash-target",
+    )
+    keeper_memory = LongTermMemory(
+        level=4,
+        category="fact",
+        content="保留对话的记忆",
+        source_type="chat_message",
+        source_id=keeper_msg.id,
+        content_hash="hash-keeper",
+    )
+    session.add(target_memory)
+    session.add(keeper_memory)
+
+    target_op = AgentOperation(
+        conversation_id=target.id,
+        operation_type="read",
+        tool_name="read_note",
+    )
+    keeper_op = AgentOperation(
+        conversation_id=keeper.id,
+        operation_type="read",
+        tool_name="read_note",
+    )
+    session.add(target_op)
+    session.add(keeper_op)
+
+    target_bg = BackgroundTask(
+        task_id=f"bg-target-{target.id}",
+        conversation_id=target.id,
+        command="echo hi",
+        cwd=".",
+        status="exited",
+    )
+    keeper_bg = BackgroundTask(
+        task_id=f"bg-keeper-{keeper.id}",
+        conversation_id=keeper.id,
+        command="echo hi",
+        cwd=".",
+        status="exited",
+    )
+    session.add(target_bg)
+    session.add(keeper_bg)
+
+    session.commit()
+
+    enqueue_job(
+        session,
+        job_type=JobType.CONVERSATION_TITLE.value,
+        graph_name=GraphName.CONVERSATION_TITLE.value,
+        payload={"conversation_id": target.id},
+        dedupe_key=f"conversation_title:conversation:{target.id}",
+    )
+    enqueue_job(
+        session,
+        job_type=JobType.CONVERSATION_SUMMARY.value,
+        graph_name=GraphName.CONVERSATION_SUMMARY.value,
+        payload={"conversation_id": target.id},
+        dedupe_key=f"conversation_summary:conversation:{target.id}",
+    )
+    enqueue_job(
+        session,
+        job_type=JobType.CONVERSATION_TITLE.value,
+        graph_name=GraphName.CONVERSATION_TITLE.value,
+        payload={"conversation_id": keeper.id},
+        dedupe_key=f"conversation_title:conversation:{keeper.id}",
+    )
+    session.commit()
+
+    kill_calls: list[str] = []
+    prune_calls: list[str] = []
+
+    class FakePool:
+        def kill(self, task_id, *, reason=""):
+            kill_calls.append(task_id)
+
+        def prune(self, task_id):
+            prune_calls.append(task_id)
+
+    import app.local_operator.background_command as bg_module
+    monkeypatch.setattr(bg_module, "pool", FakePool())
+
+    delete_conversation(session, target.id)
+    session.expire_all()
+
+    assert session.get(Conversation, target.id) is None
+    assert session.get(Conversation, keeper.id) is not None
+
+    remaining_messages = session.exec(
+        select(ChatMessage).where(ChatMessage.conversation_id == target.id)
+    ).all()
+    assert remaining_messages == []
+    assert (
+        session.exec(
+            select(ChatMessage).where(ChatMessage.conversation_id == keeper.id)
+        ).first()
+        is not None
+    )
+
+    remaining_turns = session.exec(
+        select(ChatTurn).where(ChatTurn.conversation_id == target.id)
+    ).all()
+    assert remaining_turns == []
+
+    remaining_memories = session.exec(
+        select(LongTermMemory).where(LongTermMemory.source_id == user.id)
+    ).all()
+    assert remaining_memories == []
+    assert (
+        session.exec(
+            select(LongTermMemory).where(LongTermMemory.source_id == keeper_msg.id)
+        ).first()
+        is not None
+    )
+
+    remaining_ops = session.exec(
+        select(AgentOperation).where(AgentOperation.conversation_id == target.id)
+    ).all()
+    assert remaining_ops == []
+    assert (
+        session.exec(
+            select(AgentOperation).where(AgentOperation.conversation_id == keeper.id)
+        ).first()
+        is not None
+    )
+
+    remaining_jobs = session.exec(
+        select(Job).where(Job.dedupe_key.like(f"conversation_%:conversation:{target.id}"))
+    ).all()
+    assert remaining_jobs == []
+    keeper_jobs = session.exec(
+        select(Job).where(Job.dedupe_key == f"conversation_title:conversation:{keeper.id}")
+    ).all()
+    assert len(keeper_jobs) == 1
+
+    assert kill_calls == [target_bg.task_id]
+    assert prune_calls == [target_bg.task_id]
+
+    remaining_bg = session.exec(
+        select(BackgroundTask).where(BackgroundTask.conversation_id == target.id)
+    ).all()
+    assert remaining_bg == []
+    assert (
+        session.exec(
+            select(BackgroundTask).where(BackgroundTask.conversation_id == keeper.id)
+        ).first()
+        is not None
+    )
+
+
+def test_delete_conversation_raises_404_for_missing_id(session):
+    with pytest.raises(HTTPException) as exc_info:
+        delete_conversation(session, 404)
     assert exc_info.value.status_code == 404

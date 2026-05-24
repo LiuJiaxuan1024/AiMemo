@@ -1,0 +1,19 @@
+{
+  // AiMemo 项目级可调配置。
+  // 环境变量和 .env 仍然拥有更高优先级；密钥不要写在这里。
+  "local_operator": {
+    "exec_command": {
+      // pip install、首次构建依赖、cargo/npm 安装等命令容易超过 30s。
+      // 这里给前台短命令更宽松的默认超时；长期服务仍应使用 exec_command_background。
+      "default_timeout_ms": 180000,
+      "max_timeout_ms": 600000,
+      "default_max_output_bytes": 65536,
+      "max_output_bytes": 262144,
+    },
+  },
+  "jobs": {
+    "worker_poll_interval_seconds": 2.0,
+    "running_timeout_seconds": 600,
+    "reconciler_interval_seconds": 30.0,
+  },
+}

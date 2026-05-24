@@ -31,21 +31,21 @@ def test_maps_updates_to_node_events() -> None:
     ]
 
 
-def test_maps_generate_answer_token_to_answer_delta() -> None:
+def test_maps_agent_token_to_answer_delta() -> None:
     events = map_langgraph_stream_chunk(
         "messages",
         (
             FakeTokenChunk(content="你好"),
-            {"langgraph_node": "generate_answer"},
+            {"langgraph_node": "agent"},
         ),
     )
 
     assert events == [
         {
             "event": "answer_delta",
-            "node": "generate_answer",
+            "node": "agent",
             "content": "你好",
-            "metadata": {"langgraph_node": "generate_answer"},
+            "metadata": {"langgraph_node": "agent"},
         }
     ]
 
@@ -87,7 +87,7 @@ def test_extracts_text_from_list_content() -> None:
         "messages",
         (
             FakeTokenChunk(content=[{"type": "text", "text": "你"}, {"type": "text", "text": "好"}]),
-            {"langgraph_node": "generate_answer"},
+            {"langgraph_node": "agent"},
         ),
     )
 

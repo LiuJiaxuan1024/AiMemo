@@ -17,24 +17,14 @@ from app.agent.graphs.memory_chat.nodes import (
     build_l2_summary_node,
     build_l3_retrieved_memory_node,
     build_l4_core_memory_node,
+    build_agent_node,
     build_generate_elf_bubble_answer_node,
-    build_generate_answer_node,
-    build_agent_think_node,
-    build_check_tool_policy_node,
     build_load_turn_state_node,
     build_merge_prompt_context_node,
-    build_plan_task_node,
     build_persist_messages_node,
-    build_observe_tool_result_node,
-    build_run_read_tool_node,
-    build_run_exec_tool_node,
-    build_run_write_tool_node,
-    build_select_tool_node,
-    build_verify_goal_node,
+    build_tools_node,
     dispatch_context_workers,
-    route_after_agent_think,
-    route_after_tool_policy,
-    route_after_verify_goal,
+    route_after_agent,
 )
 from app.agent.graphs.memory_chat.state import MemoryChatGraphState
 from app.agent.streaming import map_langgraph_stream_chunk
@@ -87,16 +77,8 @@ def build_memory_chat_graph(
     graph.add_node("build_l0_current_input", build_l0_current_input_node())
     graph.add_node("build_current_conversation_window", build_current_conversation_window_node())
     graph.add_node("merge_prompt_context", build_merge_prompt_context_node())
-    graph.add_node("plan_task", build_plan_task_node())
-    graph.add_node("agent_think", build_agent_think_node())
-    graph.add_node("select_tool", build_select_tool_node())
-    graph.add_node("check_tool_policy", build_check_tool_policy_node())
-    graph.add_node("run_read_tool", build_run_read_tool_node(session_factory))
-    graph.add_node("run_write_tool", build_run_write_tool_node(session_factory))
-    graph.add_node("run_exec_tool", build_run_exec_tool_node(session_factory))
-    graph.add_node("observe_tool_result", build_observe_tool_result_node())
-    graph.add_node("verify_goal", build_verify_goal_node())
-    graph.add_node("generate_answer", build_generate_answer_node(answer_generator))
+    graph.add_node("agent", build_agent_node(session_factory, answer_generator=answer_generator))
+    graph.add_node("tools", build_tools_node(session_factory))
     graph.add_node(
         "generate_elf_bubble_answer",
         build_generate_elf_bubble_answer_node(bubble_answer_generator),
@@ -118,29 +100,13 @@ def build_memory_chat_graph(
     graph.add_edge("build_l1_recent_messages", "merge_prompt_context")
     graph.add_edge("build_l0_current_input", "merge_prompt_context")
     graph.add_edge("build_current_conversation_window", "merge_prompt_context")
-    graph.add_edge("merge_prompt_context", "plan_task")
-    graph.add_edge("plan_task", "agent_think")
+    graph.add_edge("merge_prompt_context", "agent")
     graph.add_conditional_edges(
-        "agent_think",
-        route_after_agent_think,
-        ["select_tool", "verify_goal", "generate_answer", "generate_elf_bubble_answer"],
+        "agent",
+        route_after_agent,
+        ["tools", "persist_messages", "generate_elf_bubble_answer"],
     )
-    graph.add_edge("select_tool", "check_tool_policy")
-    graph.add_conditional_edges(
-        "check_tool_policy",
-        route_after_tool_policy,
-        ["run_read_tool", "run_write_tool", "run_exec_tool", "observe_tool_result"],
-    )
-    graph.add_edge("run_read_tool", "observe_tool_result")
-    graph.add_edge("run_write_tool", "observe_tool_result")
-    graph.add_edge("run_exec_tool", "observe_tool_result")
-    graph.add_edge("observe_tool_result", "agent_think")
-    graph.add_conditional_edges(
-        "verify_goal",
-        route_after_verify_goal,
-        ["agent_think", "generate_answer", "generate_elf_bubble_answer"],
-    )
-    graph.add_edge("generate_answer", "persist_messages")
+    graph.add_edge("tools", "agent")
     graph.add_edge("generate_elf_bubble_answer", "persist_messages")
     graph.add_edge("persist_messages", END)
     return graph
@@ -260,7 +226,7 @@ def stream_memory_chat_graph(
         for stream_item in app.stream(
             graph_input,
             config,
-            stream_mode=["updates", "messages"],
+            stream_mode=["updates", "messages", "custom"],
         ):
             if not isinstance(stream_item, tuple) or len(stream_item) != 2:
                 continue
@@ -299,6 +265,20 @@ def stream_memory_chat_graph(
                         "event": "thought_snapshot",
                         "node": event["node"],
                         "thoughts": event["thoughts"],
+                    }
+                elif event["event"] == "tool_invocation":
+                    yield {
+                        "event": "tool_invocation",
+                        "step_index": event["step_index"],
+                        "tool_call_id": event["tool_call_id"],
+                        "tool_name": event["tool_name"],
+                        "arguments": event["arguments"],
+                        "ok": event["ok"],
+                        "blocked": event["blocked"],
+                        "error_code": event["error_code"],
+                        "message": event["message"],
+                        "result_summary": event["result_summary"],
+                        "running": event.get("running", False),
                     }
 
         snapshot = app.get_state(config)
@@ -400,31 +380,15 @@ def _expire_stale_checkpoint(
     """把旧中断现场标记为过期，并关闭 `snapshot.next`。
 
     `as_node="persist_messages"` 会让 LangGraph 把该 checkpoint 视作已到达终点。
-    我们同时清空工具队列和 pending action，后续新输入从 START 进入时不会继承旧动作。
+    我们同时清空本轮 ReAct 工具观察，后续新输入从 START 进入时不会继承旧工具结果。
     """
 
-    old_task = dict((snapshot.values or {}).get("task") or {})
-    expired_task = _mark_task_superseded(old_task) if old_task else {}
     app.update_state(
         config,
         {
-            "planned_tool_actions": [],
-            "pending_tool_action": None,
-            "tool_policy_result": {},
             "tool_observations": [],
             "tool_observation_context": "",
             "agent_decision": {"type": "final_answer", "reason": "旧 checkpoint 被新用户输入过期。"},
-            "task": {},
-            "expired_task": expired_task,
-            "world_state": {},
-            "world_status": {},
-            "task_boundary": {
-                "type": "expired_stale_checkpoint",
-                "reason": "检测到新用户输入到达时旧 checkpoint 仍停在中间节点，已关闭旧现场并开启新一轮。",
-                "previous_task_id": old_task.get("id"),
-                "active_task_id": None,
-                "expired_task_id": old_task.get("id"),
-            },
             "conversation_id": next_input.get("conversation_id"),
             "user_message": next_input.get("user_message"),
             "answer_mode": next_input.get("answer_mode"),
@@ -433,25 +397,6 @@ def _expire_stale_checkpoint(
         },
         as_node="persist_messages",
     )
-
-
-def _mark_task_superseded(task: dict) -> dict:
-    """返回一个标记为 SUPERSEDED 的旧 task 副本，供 checkpoint/debug 查看。"""
-
-    if not task:
-        return {}
-    updated = dict(task)
-    updated["status"] = "SUPERSEDED"
-    history = list(updated.get("execution_history") or [])
-    history.append(
-        {
-            "type": "superseded",
-            "summary": "旧 task 被新的用户输入取代。",
-            "payload": {},
-        }
-    )
-    updated["execution_history"] = history
-    return updated
 
 
 def _write_checkpoint_id_to_messages(

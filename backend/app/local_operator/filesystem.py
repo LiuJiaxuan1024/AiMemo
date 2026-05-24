@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from difflib import get_close_matches
 from fnmatch import fnmatch
 import hashlib
@@ -40,8 +41,16 @@ class LocalFilesystemService:
     所有入口都先走 LocalOperatorPolicy，防止模型通过相对路径、软链接等方式逃逸。
     """
 
-    def __init__(self, policy: LocalOperatorPolicy):
+    def __init__(
+        self,
+        policy: LocalOperatorPolicy,
+        *,
+        known_read_files: dict[str, "KnownReadFile"] | None = None,
+    ):
         self.policy = policy
+        # read-before-write 需要跨一次 ReAct tools 节点生效：模型通常先 read_file，
+        # 下一轮 agent 再 write_file。调用方会把历史 observation 还原成 known_read_files。
+        self.known_read_files = known_read_files or {}
 
     def list_dir(self, path: str, *, max_entries: int = 100, include_hidden: bool = False) -> ToolResult:
         try:
@@ -110,6 +119,9 @@ class LocalFilesystemService:
             line_end=requested_end,
             max_bytes=max_bytes,
         )
+        stat = resolved.stat()
+        full_view = _is_full_file_read(read_result)
+        self._record_full_read(resolved, stat.st_mtime, full_view)
 
         return _ok(
             "read_file",
@@ -119,10 +131,12 @@ class LocalFilesystemService:
                 "line_start": read_result["line_start"],
                 "line_end": read_result["line_end"],
                 "total_lines": read_result["total_lines"],
-                "total_bytes": resolved.stat().st_size,
+                "total_bytes": stat.st_size,
                 "read_bytes": read_result["read_bytes"],
                 "bytes_returned": read_result["bytes_returned"],
                 "modified_at": _iso_mtime(resolved),
+                "mtime": stat.st_mtime,
+                "full_view": full_view,
                 "truncated": read_result["truncated"],
                 "truncated_by_bytes": read_result["truncated_by_bytes"],
                 "content": read_result["content"],
@@ -259,8 +273,8 @@ class LocalFilesystemService:
           path: 目标文件路径，必须位于授权 workspace 内。
           content: 要写入的完整文本内容。
           overwrite: 是否允许覆盖已有文件。
-          known_existing_paths: 本轮 graph 已经读取或查看过的路径集合。覆盖已有文件时
-            必须命中该集合，借鉴 Claude Code 的 read-before-write 防覆盖策略。
+          known_existing_paths: 兼容旧调用方的“已观察路径”集合。新保护优先使用
+            known_read_files，要求覆盖前完整 read_file，并校验 mtime 没有变化。
         """
 
         try:
@@ -284,11 +298,15 @@ class LocalFilesystemService:
 
         existed_before = resolved.exists()
         known_existing_paths = known_existing_paths or set()
-        if existed_before and not _is_known_existing_path(resolved, known_existing_paths):
+        if existed_before:
+            read_guard = self._validate_read_before_write(resolved)
+            if read_guard:
+                return read_guard
+        if existed_before and not self.known_read_files and not _is_known_existing_path(resolved, known_existing_paths):
             return _error(
                 "write_file",
                 "READ_BEFORE_WRITE_REQUIRED",
-                "覆盖已有文件前必须先读取或查看该文件，避免覆盖用户刚修改的内容。",
+                "覆盖已有文件前必须先用 read_file 完整读取该文件，避免覆盖用户刚修改的内容。",
                 blocked=True,
             )
 
@@ -316,6 +334,46 @@ class LocalFilesystemService:
                 "modified_at": _iso_mtime(resolved),
             },
         )
+
+    def _record_full_read(self, path: Path, mtime: float, full_view: bool) -> None:
+        """记录一次 read_file 结果，供后续 write_file 判断是否允许覆盖。"""
+
+        known = KnownReadFile(
+            path=path.resolve().as_posix(),
+            relative_path=self.policy.relative_path(path),
+            mtime=mtime,
+            full_view=full_view,
+        )
+        self.known_read_files[known.path] = known
+        self.known_read_files[known.relative_path] = known
+
+    def _validate_read_before_write(self, path: Path) -> ToolResult | None:
+        """覆盖已有文件前必须完整读过，且文件没有在读取后被外部改动。"""
+
+        known = _lookup_known_read_file(path, self.known_read_files)
+        if known is None:
+            return _error(
+                "write_file",
+                "READ_BEFORE_WRITE_REQUIRED",
+                "覆盖已有文件前必须先用 read_file 完整读取该文件；get_file_info/list_dir 不足以证明你理解文件内容。",
+                blocked=True,
+            )
+        if not known.full_view:
+            return _error(
+                "write_file",
+                "WRITE_WITH_PARTIAL_READ",
+                "你之前只读取了文件的一部分或读取结果被截断。覆盖前必须重新 read_file 完整读取该文件。",
+                blocked=True,
+            )
+        current_mtime = path.stat().st_mtime
+        if current_mtime > known.mtime + 1e-6:
+            return _error(
+                "write_file",
+                "FILE_MTIME_CHANGED",
+                "文件在你读取后被外部修改过。请重新 read_file 后再覆盖。",
+                blocked=True,
+            )
+        return None
 
     def _resolve_writable_path(self, raw_path: str) -> Path:
         try:
@@ -415,6 +473,16 @@ class LocalFilesystemError(Exception):
         self.message = message
 
 
+@dataclass(frozen=True)
+class KnownReadFile:
+    """已完整读取过的文件快照，用于覆盖写入前的运行时保护。"""
+
+    path: str
+    relative_path: str
+    mtime: float
+    full_view: bool
+
+
 def _ok(tool_name: str, data: dict[str, Any]) -> ToolResult:
     return ToolResult(ok=True, tool_name=tool_name, data=data)
 
@@ -461,6 +529,32 @@ def _is_known_existing_path(path: Path, known_paths: set[str]) -> bool:
         or path.name in known_paths
         or any(str(item).endswith(path.name) for item in normalized_known_paths)
     )
+
+
+def _lookup_known_read_file(path: Path, known_reads: dict[str, KnownReadFile]) -> KnownReadFile | None:
+    resolved = path.resolve()
+    candidates = {resolved.as_posix(), str(resolved), path.name}
+    for key, value in known_reads.items():
+        if key in candidates:
+            return value
+        if value.path in candidates or value.relative_path in candidates:
+            return value
+        if Path(key).as_posix().endswith(path.name):
+            return value
+    return None
+
+
+def _is_full_file_read(read_result: dict[str, Any]) -> bool:
+    """判断 read_file 是否返回了完整文件内容，而不是范围或截断视图。"""
+
+    if read_result.get("truncated") or read_result.get("truncated_by_bytes"):
+        return False
+    total_lines = int(read_result.get("total_lines") or 0)
+    line_start = int(read_result.get("line_start") or 1)
+    line_end = int(read_result.get("line_end") or 0)
+    if total_lines == 0:
+        return True
+    return line_start <= 1 and line_end >= total_lines
 
 
 def _placeholder_write_reason(content: str) -> str:

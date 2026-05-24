@@ -6,14 +6,20 @@ from typing import Any
 from langchain_core.tools import BaseTool, tool
 from sqlmodel import Session
 
+from app.core.config import settings
 from app.local_operator.audit import AgentOperationAudit
+from app.local_operator.background_command import pool as background_pool, evaluate_background_command_policy
 from app.local_operator.command import LocalCommandExecutor, evaluate_command_policy
-from app.local_operator.filesystem import LocalFilesystemError, LocalFilesystemService, tool_result_to_json
+from app.local_operator.filesystem import KnownReadFile, LocalFilesystemError, LocalFilesystemService, tool_result_to_json
 from app.local_operator.policy import LocalOperatorPolicy
 from app.local_operator.schemas import (
+    ExecCommandBackgroundInput,
     ExecCommandInput,
     GetFileInfoInput,
+    KillBackgroundTaskInput,
+    ListBackgroundTasksInput,
     ListDirInput,
+    ReadBackgroundOutputInput,
     ReadFileInput,
     SearchFilesInput,
     SearchTextInput,
@@ -32,6 +38,7 @@ def create_read_tools(
     conversation_id: int | None,
     turn_id: int | None,
     known_existing_paths: set[str] | None = None,
+    known_read_files: dict[str, KnownReadFile] | None = None,
 ) -> dict[str, BaseTool]:
     """创建 Local Operator LangChain 工具集合。
 
@@ -39,7 +46,7 @@ def create_read_tools(
     这样第一版可以通过 `tool.invoke()` 受控执行，后续也能直接交给 ToolNode。
     """
 
-    filesystem = LocalFilesystemService(policy)
+    filesystem = LocalFilesystemService(policy, known_read_files=known_read_files)
     command_executor = LocalCommandExecutor(policy)
     known_existing_paths = known_existing_paths or set()
 
@@ -210,8 +217,8 @@ def create_read_tools(
     def exec_command(
         command: str,
         cwd: str = ".",
-        timeout_ms: int = 30000,
-        max_output_bytes: int = 65536,
+        timeout_ms: int = settings.local_operator_exec_default_timeout_ms,
+        max_output_bytes: int = settings.local_operator_exec_default_max_output_bytes,
     ) -> str:
         """执行短时、非交互的本地终端命令。
 
@@ -240,6 +247,105 @@ def create_read_tools(
             approval_required=decision.risk_level != "low",
         )
 
+    @tool(args_schema=ExecCommandBackgroundInput)
+    def exec_command_background(command: str, cwd: str = ".") -> str:
+        """在后台启动一条长跑命令（如 flask/uvicorn/npm start），不阻塞 agent。
+
+        立刻返回 task_id；用 read_background_output(task_id) 轮询输出与状态，
+        用 kill_background_task(task_id) 停止。
+        不要重复 spawn 同一服务；先用 read_background_output 检查现有任务。
+        """
+
+        args = {"command": command, "cwd": cwd}
+        decision = evaluate_background_command_policy(command)
+        return run_with_audit(
+            "exec_command_background",
+            args,
+            lambda: background_pool.spawn(
+                policy=policy,
+                command=command,
+                cwd=cwd,
+                conversation_id=conversation_id,
+            ),
+            operation_type="exec",
+            risk_level=decision.risk_level,
+            approval_required=False,
+        )
+
+    @tool(args_schema=ReadBackgroundOutputInput)
+    def read_background_output(task_id: str, since_line: int = 0, max_lines: int = 50) -> str:
+        """读取后台任务的输出与当前状态。
+
+        典型用法：spawn 之后等 1-2 秒，调用此工具；返回里有 status（running/exited/killed/failed）、
+        exit_code、lines（最新若干行）、last_line（用于下次 since_line）。
+        """
+
+        args = {"task_id": task_id, "since_line": since_line, "max_lines": max_lines}
+        return run_with_audit(
+            "read_background_output",
+            args,
+            lambda: background_pool.read_output(task_id, since_line=since_line, max_lines=max_lines),
+            operation_type="read",
+            risk_level="low",
+            approval_required=False,
+        )
+
+    @tool(args_schema=KillBackgroundTaskInput)
+    def kill_background_task(task_id: str) -> str:
+        """停止指定的后台任务，会整树 kill 子进程及孙子进程。"""
+
+        args = {"task_id": task_id}
+        return run_with_audit(
+            "kill_background_task",
+            args,
+            lambda: background_pool.kill(task_id, reason="killed by agent tool call"),
+            operation_type="exec",
+            risk_level="medium",
+            approval_required=False,
+        )
+
+    @tool(args_schema=ListBackgroundTasksInput)
+    def list_background_tasks(include_finished: bool = True) -> str:
+        """列出当前会话已知的后台任务（含历史 / orphaned）。
+
+        典型用法：用户问"现在有哪些后台任务/服务"，或者想 kill 某个但忘了 task_id 时调用。
+        返回里有每个任务的 task_id、command、status、pid、started_at、exit_code。
+        """
+
+        args = {"include_finished": include_finished}
+
+        def _do_list() -> ToolResult:
+            records = background_pool.list_persisted(conversation_id=conversation_id)
+            items = []
+            for r in records:
+                if not include_finished and r.status != "running":
+                    continue
+                items.append({
+                    "task_id": r.task_id,
+                    "command": r.command,
+                    "cwd": r.cwd,
+                    "status": r.status,
+                    "pid": r.pid,
+                    "exit_code": r.exit_code,
+                    "kill_reason": r.kill_reason or "",
+                    "started_at": r.started_at.isoformat() if r.started_at else None,
+                    "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+                })
+            return ToolResult(
+                ok=True,
+                tool_name="list_background_tasks",
+                data={"tasks": items, "count": len(items)},
+            )
+
+        return run_with_audit(
+            "list_background_tasks",
+            args,
+            _do_list,
+            operation_type="read",
+            risk_level="low",
+            approval_required=False,
+        )
+
     return {
         "list_dir": list_dir,
         "read_file": read_file,
@@ -248,4 +354,8 @@ def create_read_tools(
         "get_file_info": get_file_info,
         "write_file": write_file,
         "exec_command": exec_command,
+        "exec_command_background": exec_command_background,
+        "read_background_output": read_background_output,
+        "kill_background_task": kill_background_task,
+        "list_background_tasks": list_background_tasks,
     }

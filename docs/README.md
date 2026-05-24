@@ -28,6 +28,7 @@
 - [后端说明](./backend/README.md)
 - [笔记智能处理](./backend/note-processing.md)
 - [本地任务系统](./backend/jobs.md)
+- [后台进程任务](./backend/background-tasks.md)
 - [对话持久化](./backend/conversations.md)
 - [长期记忆管理](./backend/memories.md)
 - [精灵事件中心](./backend/elf-events.md)
@@ -43,6 +44,7 @@
 - [Context Pyramid](./agent/context-pyramid.md)
 - [Conversation Summary Graph](./agent/conversation-summary-graph.md)
 - [Conversation Memory Graph](./agent/conversation-memory-graph.md)
+- [Conversation Title Graph](./agent/conversation-title-graph.md)
 - [Memory Consolidation](./agent/memory-consolidation.md)
 - [Local Operator Agent](./agent/local-operator-agent.md)
 
@@ -52,6 +54,7 @@
 - [前端模块路由](./frontend/module-decoupling.md)
 - [Chat Window](./frontend/chat-window.md)
 - [Workshop / Job Graph](./frontend/job-drawer.md)
+- [后台任务抽屉](./frontend/background-tasks-drawer.md)
 - [精灵助手](./frontend/elf-assistant.md)
 - [精灵事件总线](./frontend/elf-event-bus.md)
 - [原创精灵设计](./frontend/elf-character-design.md)
@@ -66,6 +69,7 @@
 
 - [Notes API](./api/notes.md)
 - [Jobs API](./api/jobs.md)
+- [Background Tasks API](./api/background-tasks.md)
 - [Search API](./api/search.md)
 - [Conversations API](./api/conversations.md)
 - [Chat API](./api/chat.md)

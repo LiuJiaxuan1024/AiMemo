@@ -1,9 +1,17 @@
+from __future__ import annotations
+
+import logging
+
 from fastapi import HTTPException, status
 from sqlmodel import Session, desc, select
 
+from app.models.agent_operation import AgentOperation
+from app.models.background_task import BackgroundTask
 from app.models.chat_message import ChatMessage
 from app.models.chat_turn import ChatTurn
 from app.models.conversation import Conversation
+from app.models.job import Job
+from app.models.long_term_memory import LongTermMemory
 from app.models.note import utc_now
 from app.rag.chunking.tokenizer import count_tokens
 from app.schemas.conversation import (
@@ -13,6 +21,8 @@ from app.schemas.conversation import (
     ConversationListItem,
     ConversationRead,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def create_conversation(session: Session, payload: ConversationCreate) -> ConversationRead:
@@ -117,6 +127,138 @@ def append_message(
     session.commit()
     session.refresh(message)
     return _to_chat_message_read(message)
+
+
+def delete_conversation(session: Session, conversation_id: int) -> None:
+    """级联删除一个对话及其所有相关资源。
+
+    清理顺序（外到内，先停活动资源、再删数据库行、最后删 checkpoint）：
+      1. 杀掉 / 移除该对话的所有后台命令任务（含 OS 进程探活清理）。
+      2. 删除挂在该对话消息上的 LongTermMemory（source_type=chat_message）。
+      3. 删除 AgentOperation 审计记录。
+      4. 删除与该对话相关的 Job（按 dedupe_key 前缀匹配）。
+      5. 删除 ChatTurn / ChatMessage。
+      6. 删除 LangGraph SqliteSaver checkpoint（thread_id=conversation:{id}）。
+      7. 删除 Conversation 本体。
+
+    所有 best-effort 清理（pool kill、checkpoint 删除）都用 try/except 包裹，
+    单个步骤失败不会阻塞主流程；保证至少把数据库主表删干净。
+    """
+
+    conversation = _get_conversation_or_404(session, conversation_id)
+
+    _cleanup_background_tasks(session, conversation_id)
+
+    chat_message_ids = [
+        message.id
+        for message in session.exec(
+            select(ChatMessage).where(ChatMessage.conversation_id == conversation_id)
+        ).all()
+        if message.id is not None
+    ]
+    if chat_message_ids:
+        memories = session.exec(
+            select(LongTermMemory).where(
+                LongTermMemory.source_type == "chat_message",
+                LongTermMemory.source_id.in_(chat_message_ids),
+            )
+        ).all()
+        for memory in memories:
+            session.delete(memory)
+
+    operations = session.exec(
+        select(AgentOperation).where(AgentOperation.conversation_id == conversation_id)
+    ).all()
+    for op in operations:
+        session.delete(op)
+
+    job_prefix = f"conversation_%:conversation:{conversation_id}"
+    jobs = session.exec(
+        select(Job).where(Job.dedupe_key.like(job_prefix))
+    ).all()
+    for job in jobs:
+        session.delete(job)
+
+    turns = session.exec(
+        select(ChatTurn).where(ChatTurn.conversation_id == conversation_id)
+    ).all()
+    for turn in turns:
+        session.delete(turn)
+
+    messages = session.exec(
+        select(ChatMessage).where(ChatMessage.conversation_id == conversation_id)
+    ).all()
+    for message in messages:
+        session.delete(message)
+
+    _delete_langgraph_checkpoint(conversation_id)
+
+    session.delete(conversation)
+    session.commit()
+
+
+def _cleanup_background_tasks(session: Session, conversation_id: int) -> None:
+    """杀掉并移除某个对话的所有后台命令任务。
+
+    先调用 pool.kill 终止 OS 进程并把内存池中的任务下线，再调用 pool.prune
+    清掉日志文件与生产 DB 行；最后无条件 session.delete 本会话 session 中的
+    BackgroundTask 行，确保即便 pool 操作失败也不留孤儿记录。
+    """
+
+    records = session.exec(
+        select(BackgroundTask).where(BackgroundTask.conversation_id == conversation_id)
+    ).all()
+    if not records:
+        return
+
+    try:
+        from app.local_operator.background_command import pool
+    except Exception:
+        logger.exception("无法加载 BackgroundShellPool，仅删除数据库行")
+        pool = None  # type: ignore[assignment]
+
+    for record in records:
+        task_id = record.task_id
+        if pool is not None:
+            try:
+                pool.kill(task_id, reason=f"conversation {conversation_id} deleted")
+            except Exception:
+                logger.exception("kill background task %s 失败", task_id)
+            try:
+                pool.prune(task_id)
+            except Exception:
+                logger.exception("prune background task %s 失败", task_id)
+        session.delete(record)
+
+
+def _delete_langgraph_checkpoint(conversation_id: int) -> None:
+    """尽力删除该对话在 LangGraph SqliteSaver 中的 checkpoint。"""
+
+    thread_id = f"conversation:{conversation_id}"
+    try:
+        from app.agent.checkpoints import get_sqlite_checkpointer
+
+        with get_sqlite_checkpointer() as checkpointer:
+            delete_method = getattr(checkpointer, "delete_thread", None)
+            if callable(delete_method):
+                delete_method(thread_id)
+                return
+    except Exception:
+        logger.exception("通过 SqliteSaver 删除 checkpoint 失败，回退到原始 SQL")
+
+    try:
+        import sqlite3
+        from app.core.config import settings
+
+        with sqlite3.connect(settings.langgraph_checkpoint_path) as conn:
+            for table in ("checkpoints", "writes", "checkpoint_blobs", "checkpoint_writes"):
+                try:
+                    conn.execute(f"DELETE FROM {table} WHERE thread_id = ?", (thread_id,))
+                except sqlite3.OperationalError:
+                    continue
+            conn.commit()
+    except Exception:
+        logger.exception("原始 SQL 删除 checkpoint 也失败，已跳过（不影响主流程）")
 
 
 def _get_conversation_or_404(session: Session, conversation_id: int) -> Conversation:

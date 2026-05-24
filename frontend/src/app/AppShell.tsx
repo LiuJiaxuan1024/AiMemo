@@ -3,6 +3,7 @@ import { Bot, MessageSquareText, NotebookText, Wrench } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 import { APP_ROUTES, isActiveRoute, type AppRoute } from "./routes";
+import { BackgroundTasksDrawer } from "../features/background_tasks/BackgroundTasksDrawer";
 
 const ROUTE_ICONS: Record<AppRoute, ReactNode> = {
   memo: <NotebookText aria-hidden="true" size={17} />,
@@ -44,6 +45,8 @@ export function AppShell() {
       <div className="module-content">
         <Outlet />
       </div>
+
+      <BackgroundTasksDrawer />
     </main>
   );
 }

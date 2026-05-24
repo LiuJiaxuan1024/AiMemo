@@ -8,5 +8,19 @@ def test_app_registers_search_routes():
     assert "/api/conversations" in paths
     assert "/api/conversations/{conversation_id}/messages" in paths
     assert "/api/conversations/{conversation_id}/chat" in paths
+    delete_route = next(
+        (
+            route
+            for route in app.routes
+            if getattr(route, "path", "") == "/api/conversations/{conversation_id}"
+            and "DELETE" in getattr(route, "methods", set())
+        ),
+        None,
+    )
+    assert delete_route is not None
     assert "/api/memories" in paths
     assert "/api/memories/{memory_id}" in paths
+    assert "/api/background_tasks" in paths
+    assert "/api/background_tasks/{task_id}" in paths
+    assert "/api/background_tasks/{task_id}/output" in paths
+    assert "/api/background_tasks/{task_id}/kill" in paths

@@ -6,7 +6,17 @@ from sqlalchemy import inspect, text
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.core.config import settings
-from app.models import AgentOperation, ChatMessage, ChatTurn, Conversation, Job, LongTermMemory, Note, NoteChunk
+from app.models import (
+    AgentOperation,
+    BackgroundTask,
+    ChatMessage,
+    ChatTurn,
+    Conversation,
+    Job,
+    LongTermMemory,
+    Note,
+    NoteChunk,
+)
 from app.rag.hashing import content_hash
 
 

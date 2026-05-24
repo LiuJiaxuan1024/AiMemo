@@ -1,4 +1,11 @@
-import type { ChatMessage, ChatStreamEvent, ChatTurnGraph, ChatTurnStateHistory, Conversation } from "./types";
+import type {
+  ChatActiveTurnList,
+  ChatMessage,
+  ChatStreamEvent,
+  ChatTurnGraph,
+  ChatTurnStateHistory,
+  Conversation,
+} from "./types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -30,6 +37,16 @@ export function listConversations(): Promise<Conversation[]> {
   return request<Conversation[]>("/api/conversations");
 }
 
+export async function deleteConversation(conversationId: number): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/conversations/${conversationId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok && response.status !== 204) {
+    const message = await response.text();
+    throw new Error(message || `Request failed with status ${response.status}`);
+  }
+}
+
 export function listMessages(conversationId: number): Promise<ChatMessage[]> {
   return request<ChatMessage[]>(`/api/conversations/${conversationId}/messages`);
 }
@@ -59,6 +76,7 @@ export async function streamChat(
   conversationId: number,
   message: string,
   onEvent: (event: ChatStreamEvent) => void,
+  options: { signal?: AbortSignal } = {},
 ): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/api/conversations/${conversationId}/chat/stream`, {
     body: JSON.stringify({ message }),
@@ -66,6 +84,7 @@ export async function streamChat(
       "Content-Type": "application/json",
     },
     method: "POST",
+    signal: options.signal,
   });
 
   if (!response.ok || !response.body) {
@@ -73,30 +92,71 @@ export async function streamChat(
     throw new Error(errorText || `Request failed with status ${response.status}`);
   }
 
-  const reader = response.body.getReader();
+  await consumeSseStream(response, onEvent);
+}
+
+export function listActiveTurns(conversationId: number): Promise<ChatActiveTurnList> {
+  return request<ChatActiveTurnList>(`/api/conversations/${conversationId}/active-turns`);
+}
+
+export async function streamTurnResume(
+  conversationId: number,
+  turnId: number,
+  onEvent: (event: ChatStreamEvent) => void,
+  options: { signal?: AbortSignal } = {},
+): Promise<void> {
+  // 重连入口：拿到 buffer 从 index 0 起的全部事件 + 后续 live 增量，直到 mark_done。
+  // 后端的 SSE 在 buffer 终态后会自然 close，前端的 await 也随之 resolve。
+  const response = await fetch(
+    `${API_BASE_URL}/api/conversations/${conversationId}/turns/${turnId}/events/stream`,
+    {
+      method: "GET",
+      signal: options.signal,
+    },
+  );
+  if (!response.ok || !response.body) {
+    const errorText = await response.text();
+    throw new Error(errorText || `Request failed with status ${response.status}`);
+  }
+  await consumeSseStream(response, onEvent);
+}
+
+async function consumeSseStream(
+  response: Response,
+  onEvent: (event: ChatStreamEvent) => void,
+): Promise<void> {
+  const reader = response.body!.getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split("\n\n");
+      buffer = events.pop() ?? "";
+      for (const rawEvent of events) {
+        const parsed = parseSseEvent(rawEvent);
+        if (parsed) {
+          onEvent(parsed);
+        }
+      }
     }
-    buffer += decoder.decode(value, { stream: true });
-    const events = buffer.split("\n\n");
-    buffer = events.pop() ?? "";
-    for (const rawEvent of events) {
-      const parsed = parseSseEvent(rawEvent);
+
+    if (buffer.trim()) {
+      const parsed = parseSseEvent(buffer);
       if (parsed) {
         onEvent(parsed);
       }
     }
-  }
-
-  if (buffer.trim()) {
-    const parsed = parseSseEvent(buffer);
-    if (parsed) {
-      onEvent(parsed);
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // 忽略 reader 已经被释放/关闭的情况，避免 finally 吞掉外层错误。
     }
   }
 }

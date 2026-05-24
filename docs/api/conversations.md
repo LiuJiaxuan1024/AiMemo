@@ -91,6 +91,33 @@ Content-Type: application/json
 }
 ```
 
+## 删除对话
+
+```http
+DELETE /api/conversations/{conversation_id}
+```
+
+返回 `204 No Content`。会同步级联清理：
+
+```text
+1. 后台命令任务（BackgroundShellPool.kill + prune；OS 进程、日志、DB 行一并释放）
+2. 长期记忆（LongTermMemory 中 source_type=chat_message 且 source_id 属于本对话）
+3. 智能体操作审计（AgentOperation.conversation_id == id）
+4. 排队中的 job（dedupe_key LIKE 'conversation_%:conversation:{id}'，覆盖 summary / memory / title）
+5. ChatTurn / ChatMessage
+6. LangGraph SqliteSaver checkpoint（thread_id=conversation:{id}）
+7. Conversation 主表
+```
+
+对 pool / checkpoint 的清理为 best-effort，单步失败不会阻塞主流程；
+数据库主表删除失败会回滚整笔事务。
+
+## 自动命名
+
+会话首次完成 user 消息后，后端会异步触发 [Conversation Title Graph](../agent/conversation-title-graph.md)，
+让 `title` 从默认的「新对话」更新为 ≤ 16 字的中文短标题。前端在发送完一条消息后会以
+1.5s / 4.5s 两次轮询 `GET /api/conversations`，让侧栏卡片自然刷新。
+
 ## 当前限制
 
 - 不生成 AI 回复。

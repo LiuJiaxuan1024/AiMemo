@@ -8,9 +8,17 @@ from app.agent.graphs.memory_chat.graph import build_memory_chat_graph
 from app.agent.graphs.memory_chat.graph import get_memory_chat_graph_mermaid
 from app.core.config import settings
 from app.core.database import session_scope
+from app.models.chat_message import ChatMessage
 from app.models.chat_turn import ChatTurn
 from app.models.note import utc_now
-from app.schemas.chat import ChatCheckpointStateRead, ChatTurnGraphRead, ChatTurnStateHistoryRead
+from app.schemas.chat import (
+    ChatActiveTurnListRead,
+    ChatActiveTurnRead,
+    ChatCheckpointStateRead,
+    ChatTurnGraphRead,
+    ChatTurnStateHistoryRead,
+)
+from app.schemas.conversation import ChatMessageRead
 from app.schemas.search import NoteSearchResult
 
 
@@ -24,16 +32,8 @@ MEMORY_CHAT_NODE_ORDER = [
     "build_l0_current_input",
     "build_current_conversation_window",
     "merge_prompt_context",
-    "plan_task",
-    "agent_think",
-    "select_tool",
-    "check_tool_policy",
-    "run_read_tool",
-    "run_write_tool",
-    "run_exec_tool",
-    "observe_tool_result",
-    "verify_goal",
-    "generate_answer",
+    "agent",
+    "tools",
     "generate_elf_bubble_answer",
     "persist_messages",
 ]
@@ -176,6 +176,73 @@ def fail_chat_turn(
     turn.updated_at = utc_now()
     session.add(turn)
     session.commit()
+
+
+def list_active_chat_turns(
+    session: Session,
+    *,
+    conversation_id: int,
+) -> ChatActiveTurnListRead:
+    """列出指定会话里所有 status=running 的 turn。
+
+    用户在 assistant 还在生成时切走另一个会话、再点回来时，前端需要知道
+    "这条会话现在有一个正在跑的 turn"。chat_turn_buffer 还保留着事件流，
+    前端拿到 turn_id 后就能订阅 /turns/{turn_id}/events/stream 把后续增量接回来。
+
+    DB 里 running 状态是事实来源；buffer 是事件流缓存（可能已经过 retention 回收）。
+    返回 running turns 时附带 user/assistant 消息和最近一份 node_statuses，
+    便于前端先恢复消息列表 + 状态条，再决定要不要订阅 SSE。
+    """
+
+    turns = session.exec(
+        select(ChatTurn)
+        .where(
+            ChatTurn.conversation_id == conversation_id,
+            ChatTurn.status == "running",
+        )
+        .order_by(ChatTurn.created_at, ChatTurn.id)
+    ).all()
+    items: list[ChatActiveTurnRead] = []
+    for turn in turns:
+        items.append(_to_chat_active_turn_read(session, turn))
+    return ChatActiveTurnListRead(items=items)
+
+
+def _to_chat_active_turn_read(session: Session, turn: ChatTurn) -> ChatActiveTurnRead:
+    user = _load_message(session, turn.user_message_id)
+    assistant = _load_message(session, turn.assistant_message_id)
+    return ChatActiveTurnRead(
+        turn_id=turn.id or 0,
+        conversation_id=turn.conversation_id,
+        status=turn.status,
+        node_statuses=_decode_json_object(turn.node_statuses),
+        user_message=_message_to_read(user, turn.id) if user else None,
+        assistant_message=_message_to_read(assistant, turn.id) if assistant else None,
+        started_at=turn.created_at,
+        updated_at=turn.updated_at,
+    )
+
+
+def _load_message(session: Session, message_id: int | None) -> ChatMessage | None:
+    if message_id is None:
+        return None
+    return session.get(ChatMessage, message_id)
+
+
+def _message_to_read(message: ChatMessage, turn_id: int | None) -> ChatMessageRead:
+    return ChatMessageRead(
+        id=message.id or 0,
+        conversation_id=message.conversation_id,
+        role=message.role,
+        content=message.content,
+        parent_id=message.parent_id,
+        checkpoint_id=message.checkpoint_id,
+        status=message.status,
+        token_count=message.token_count,
+        turn_id=turn_id,
+        created_at=message.created_at,
+        updated_at=message.updated_at,
+    )
 
 
 def get_chat_turn_graph_by_message(
@@ -374,7 +441,7 @@ def _highlight_memory_chat_mermaid(mermaid: str, node_statuses: dict[str, str]) 
     lines.extend(
         [
             "classDef subgraphNode fill:#eef2ff,stroke:#7c3aed,stroke-width:3px,color:#4c1d95;",
-            "class plan_task,run_read_tool,run_write_tool,run_exec_tool,verify_goal subgraphNode;",
+            "class agent,tools subgraphNode;",
         ]
     )
     return "\n".join(lines)

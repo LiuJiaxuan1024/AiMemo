@@ -3,7 +3,7 @@ from typing import Any
 from app.agent.streaming.events import AiJiStreamEvent
 
 
-VISIBLE_ANSWER_NODE = "generate_answer"
+VISIBLE_ANSWER_NODE = "agent"
 VISIBLE_BUBBLE_NODE = "generate_elf_bubble_answer"
 
 
@@ -39,7 +39,45 @@ def map_langgraph_stream_chunk(
             visible_bubble_node=visible_bubble_node,
         )
         return [event] if event else []
+    if mode == "custom":
+        return _map_custom_chunk(chunk)
     return []
+
+
+def _map_custom_chunk(chunk: Any) -> list[AiJiStreamEvent]:
+    """节点内部通过 get_stream_writer 推送的实时事件。
+
+    目前只用一种载荷：tools 节点每跑完一条工具后立即派发 observation，
+    避免必须等整个 tools 节点 update 才能渲染卡片，让前端看到逐条出现的串行效果。
+    result_summary 留给上游 chat_service 用 _summarize_tool_observation 统一生成，
+    避免 mapper 反向依赖 nodes.py。
+    """
+
+    if not isinstance(chunk, dict):
+        return []
+    if chunk.get("kind") != "tool_observation":
+        return []
+    observation = chunk.get("observation")
+    if not isinstance(observation, dict):
+        return []
+    step_index_value = chunk.get("step_index")
+    step_index = step_index_value if isinstance(step_index_value, int) else 0
+    arguments = observation.get("arguments")
+    return [
+        {
+            "event": "tool_invocation",
+            "step_index": int(step_index),
+            "tool_call_id": str(observation.get("tool_call_id") or ""),
+            "tool_name": str(observation.get("tool_name") or ""),
+            "arguments": arguments if isinstance(arguments, dict) else {},
+            "ok": bool(observation.get("ok")),
+            "blocked": bool(observation.get("blocked")),
+            "error_code": str(observation.get("error_code") or ""),
+            "message": str(observation.get("message") or ""),
+            "result_summary": "",
+            "running": bool(observation.get("running")),
+        }
+    ]
 
 
 def _map_updates_chunk(chunk: Any) -> list[AiJiStreamEvent]:
@@ -59,7 +97,7 @@ def _map_updates_chunk(chunk: Any) -> list[AiJiStreamEvent]:
             }
         )
         thoughts = state_payload.get("thought_events")
-        if isinstance(thoughts, list) and node_name in {"agent_think", "check_tool_policy", "run_read_tool", "run_write_tool", "observe_tool_result"}:
+        if isinstance(thoughts, list) and node_name in {"agent", "tools"}:
             events.append(
                 {
                     "event": "thought_snapshot",
@@ -83,6 +121,8 @@ def _map_messages_chunk(
     if not isinstance(metadata, dict):
         metadata = {}
     node_name = str(metadata.get("langgraph_node") or "")
+    if node_name == visible_answer_node and _has_tool_call_chunk(token_chunk):
+        return None
     content = _extract_token_content(token_chunk)
     if not content:
         return None
@@ -130,3 +170,18 @@ def _extract_token_content(token_chunk: Any) -> str:
                     parts.append(text)
         return "".join(parts)
     return ""
+
+
+def _has_tool_call_chunk(token_chunk: Any) -> bool:
+    """判断当前 message chunk 是否主要承载 tool_calls。
+
+    ReAct agent 节点既会流式输出最终回答，也可能流式输出工具调用参数。
+    工具调用参数不应该作为 answer_delta 展示给用户。
+    """
+
+    if getattr(token_chunk, "tool_calls", None):
+        return True
+    if getattr(token_chunk, "tool_call_chunks", None):
+        return True
+    additional_kwargs = getattr(token_chunk, "additional_kwargs", {}) or {}
+    return bool(additional_kwargs.get("tool_calls"))

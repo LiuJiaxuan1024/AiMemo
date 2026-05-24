@@ -20,11 +20,11 @@ class ContextBudget:
       weak_retrieval_max_chunks: weak 检索结果最多放入多少条，避免弱相关内容污染回答。
     """
 
-    core_memory_tokens: int = 300
-    retrieved_memory_tokens: int = 1200
-    summary_tokens: int = 500
-    conversation_window_tokens: int = 1200
-    recent_message_tokens: int = 1000
+    core_memory_tokens: int = 1200
+    retrieved_memory_tokens: int = 6000
+    summary_tokens: int = 2000
+    conversation_window_tokens: int = 6000
+    recent_message_tokens: int = 4000
     weak_retrieval_max_chunks: int = 3
 
 
@@ -47,6 +47,9 @@ class ContextLayer:
     budget_tokens: int | None
     used_tokens: int
     note: str = ""
+    # "layer": 金字塔的一个独立层级；"fused": 由若干 layer 合并出的工作窗口
+    # （例如 L0+L1 合并的“当前对话窗口”），不属于层级体系本身，前端要分开渲染。
+    kind: Literal["layer", "fused"] = "layer"
 
     def to_prompt_section(self) -> str:
         """把单层上下文渲染成稳定的 prompt 片段。"""
@@ -65,6 +68,7 @@ class ContextLayer:
             "budget_tokens": self.budget_tokens,
             "used_tokens": self.used_tokens,
             "note": self.note,
+            "kind": self.kind,
         }
 
 
@@ -296,11 +300,12 @@ def build_current_conversation_window_layer(
     content = "\n".join(line for line in lines if line.strip())
     return ContextLayer(
         level=1,
-        name="当前对话窗口",
+        name="当前对话窗口（L0+L1 合并）",
         content=content,
         budget_tokens=budget.conversation_window_tokens,
         used_tokens=count_tokens(content),
         note="L1 近期消息和 L0 当前输入合并后的连续对话；工具规划和最终回答都应优先理解这一层。",
+        kind="fused",
     )
 
 
@@ -321,6 +326,7 @@ def build_current_input_layer(user_message: str) -> ContextLayer:
 def context_layer_from_payload(payload: dict[str, Any]) -> ContextLayer:
     """从 checkpoint payload 还原 ContextLayer。"""
 
+    kind = payload.get("kind") or "layer"
     return ContextLayer(
         level=int(payload["level"]),
         name=str(payload["name"]),
@@ -328,6 +334,7 @@ def context_layer_from_payload(payload: dict[str, Any]) -> ContextLayer:
         budget_tokens=payload.get("budget_tokens"),
         used_tokens=int(payload["used_tokens"]),
         note=str(payload.get("note") or ""),
+        kind="fused" if kind == "fused" else "layer",
     )
 
 

@@ -1,4 +1,5 @@
 from langchain_openai import ChatOpenAI
+from langchain_core.tools import BaseTool
 
 from app.core.config import settings
 from app.core.timing import elapsed_ms, emit_timing, now_counter
@@ -27,6 +28,17 @@ def get_agent_chat_model() -> ChatOpenAI:
             cache_name="agent_chat",
         )
     return _agent_chat_model
+
+
+def get_agent_chat_model_with_tools(tools: list[BaseTool]):
+    """返回绑定本地工具 schema 的主回答模型。
+
+    ReAct 版 memory_chat_graph 不再用规则 classifier 预判是否调用工具，
+    而是把工具 schema 交给模型，由模型通过 OpenAI-compatible tool_calls
+    自行决定下一步。
+    """
+
+    return get_agent_chat_model().bind_tools(tools, tool_choice="auto")
 
 
 def get_planner_chat_model() -> ChatOpenAI:

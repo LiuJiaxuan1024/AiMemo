@@ -1,11 +1,14 @@
-import { FormEvent, Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   createConversation,
+  deleteConversation,
   getTurnGraph,
+  listActiveTurns,
   listConversations,
   listMessages,
   streamChat,
+  streamTurnResume,
 } from "./chatApi";
 import { ChatComposer } from "./ChatComposer";
 import { ConversationList } from "./ConversationList";
@@ -17,7 +20,8 @@ import {
   emitChatGraphOpenElfEvent,
   emitChatNodeElfEvent,
 } from "./chatElfEvents";
-import type { ChatThought, DraftAssistantMessage, ChatTurnGraph, Conversation } from "./types";
+import { applyChatStreamEvent, streamingStore, useConversationView } from "./streamingStore";
+import type { ChatStreamEvent, ChatTurnGraph, Conversation, DraftAssistantMessage } from "./types";
 
 const ChatGraphPanel = lazy(() =>
   import("./ChatGraphPanel").then((module) => ({ default: module.ChatGraphPanel })),
@@ -26,19 +30,20 @@ const ChatGraphPanel = lazy(() =>
 export function ChatWindow() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversation, setActiveConversation] = useState<Conversation | null>(null);
-  const [messages, setMessages] = useState<DraftAssistantMessage[]>([]);
   const [input, setInput] = useState("");
-  const [nodeStatuses, setNodeStatuses] = useState<Record<string, string>>({});
-  const [thoughts, setThoughts] = useState<ChatThought[]>([]);
-  const [isSending, setIsSending] = useState(false);
-  const [error, setError] = useState("");
   const [selectedGraph, setSelectedGraph] = useState<ChatTurnGraph | null>(null);
   const [isGraphLoading, setIsGraphLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const selectedGraphRef = useRef<ChatTurnGraph | null>(null);
-  const hasEmittedAnswerStartedRef = useRef(false);
 
   const activeConversationId = activeConversation?.id;
+  const view = useConversationView(activeConversationId);
+  const messages = view?.messages ?? [];
+  const nodeStatuses = view?.nodeStatuses ?? {};
+  const thoughts = view?.thoughts ?? [];
+  const isStreaming = view?.isStreaming ?? false;
+  const error = view?.error ?? "";
+
   const runningNodes = useMemo(
     () =>
       Object.entries(nodeStatuses)
@@ -47,16 +52,49 @@ export function ChatWindow() {
         .map(([node]) => node),
     [nodeStatuses],
   );
+  const scrollAnchor = useMemo(() => {
+    const lastMessage = messages[messages.length - 1];
+    return `${messages.length}:${lastMessage?.id ?? ""}:${lastMessage?.content.length ?? 0}`;
+  }, [messages]);
+
+  const setError = useCallback((conversationId: number, value: string) => {
+    streamingStore.patch(conversationId, { error: value });
+  }, []);
+
+  const dispatchStreamEvent = useCallback(
+    (conversationId: number, event: ChatStreamEvent) => {
+      applyChatStreamEvent(conversationId, event);
+      if (event.event === "node") {
+        emitChatNodeElfEvent(event.data.node);
+      } else if (event.event === "answer_delta") {
+        const slot = streamingStore.peek(conversationId);
+        if (slot && !slot.hasEmittedAnswerStarted && event.data.content.length > 0) {
+          streamingStore.patch(conversationId, { hasEmittedAnswerStarted: true });
+          emitChatAnswerStartedElfEvent();
+        }
+      } else if (event.event === "done") {
+        emitChatDoneElfEvent(event.data.turn_id);
+      } else if (event.event === "error") {
+        emitChatErrorElfEvent(event.data.message, event.data.turn_id);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     bootstrapConversation().catch((currentError: unknown) => {
-      setError(currentError instanceof Error ? currentError.message : "初始化对话失败");
+      if (activeConversationId) {
+        setError(
+          activeConversationId,
+          currentError instanceof Error ? currentError.message : "初始化对话失败",
+        );
+      }
     });
   }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages]);
+  }, [scrollAnchor]);
 
   useEffect(() => {
     selectedGraphRef.current = selectedGraph;
@@ -84,42 +122,156 @@ export function ChatWindow() {
     };
   }, [activeConversationId, nodeStatuses]);
 
+  async function ensureConversationLoaded(conversation: Conversation): Promise<void> {
+    const existing = streamingStore.peek(conversation.id);
+    if (existing?.loaded) {
+      return;
+    }
+    streamingStore.patch(conversation.id, { loaded: true });
+    const messagesList = await listMessages(conversation.id);
+    streamingStore.update(conversation.id, (current) => ({
+      ...current,
+      messages: messagesList as DraftAssistantMessage[],
+      error: "",
+    }));
+    // 一并探测是否有正在跑的 turn；有就接上 SSE 重放 + 增量。
+    await attachActiveTurns(conversation.id);
+  }
+
+  async function attachActiveTurns(conversationId: number): Promise<void> {
+    try {
+      const { items } = await listActiveTurns(conversationId);
+      for (const item of items) {
+        const slot = streamingStore.peek(conversationId);
+        if (slot?.streamingTurnId === item.turn_id && slot.abortController) {
+          continue;
+        }
+        const controller = new AbortController();
+        streamingStore.patch(conversationId, {
+          isStreaming: true,
+          streamingTurnId: item.turn_id,
+          nodeStatuses: item.node_statuses,
+          abortController: controller,
+        });
+        // 不 await：后台跟随 stream，事件直接写入对应 conversation 的 slot。
+        streamTurnResume(
+          conversationId,
+          item.turn_id,
+          (event) => dispatchStreamEvent(conversationId, event),
+          { signal: controller.signal },
+        )
+          .catch((currentError: unknown) => {
+            if (controller.signal.aborted) {
+              return;
+            }
+            setError(
+              conversationId,
+              currentError instanceof Error ? currentError.message : "重连流失败",
+            );
+          })
+          .finally(() => {
+            const latest = streamingStore.peek(conversationId);
+            if (latest?.abortController === controller) {
+              streamingStore.patch(conversationId, { abortController: null });
+            }
+            void refreshConversations();
+          });
+      }
+    } catch {
+      // active-turns 拉取失败不打断主流程；用户可以正常发新消息。
+    }
+  }
+
+  async function refreshConversations(): Promise<void> {
+    try {
+      setConversations(await listConversations());
+    } catch {
+      // 列表刷新失败时保留旧数据；下次操作会再触发。
+    }
+  }
+
   async function bootstrapConversation() {
     const items = await listConversations();
-    const conversation = items[0] ?? (await createConversation("记忆对话"));
+    const conversation = items[0] ?? (await createConversation());
     setConversations(items[0] ? items : [conversation]);
     setActiveConversation(conversation);
-    setMessages(await listMessages(conversation.id));
+    await ensureConversationLoaded(conversation);
   }
 
   async function handleNewConversation() {
-    setError("");
-    const conversation = await createConversation("记忆对话");
+    const conversation = await createConversation();
     setConversations((current) => [conversation, ...current]);
     setActiveConversation(conversation);
-    setMessages([]);
+    streamingStore.patch(conversation.id, { loaded: true });
     setSelectedGraph(null);
-    setThoughts([]);
   }
 
   async function handleSelectConversation(conversation: Conversation) {
-    setError("");
     setActiveConversation(conversation);
-    setMessages(await listMessages(conversation.id));
     setSelectedGraph(null);
-    setThoughts([]);
+    // 切到正在 streaming 的会话不会重新拉 listMessages，view 已经包含最新 messages；
+    // 第一次切入未加载的会话才会执行 fetch + active-turns 探测。
+    try {
+      await ensureConversationLoaded(conversation);
+    } catch (currentError) {
+      setError(
+        conversation.id,
+        currentError instanceof Error ? currentError.message : "加载消息失败",
+      );
+    }
+  }
+
+  async function handleDeleteConversation(conversation: Conversation) {
+    if (typeof window !== "undefined") {
+      const confirmed = window.confirm(
+        `确认删除对话「${conversation.title}」？\n该操作会同时释放：消息、长期记忆、后台任务、Graph checkpoint 等全部相关资源。`,
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
+    try {
+      await deleteConversation(conversation.id);
+      streamingStore.remove(conversation.id);
+      const remaining = conversations.filter((item) => item.id !== conversation.id);
+      setConversations(remaining);
+      if (activeConversationId !== conversation.id) {
+        return;
+      }
+      if (remaining.length > 0) {
+        const next = remaining[0];
+        setActiveConversation(next);
+        await ensureConversationLoaded(next);
+      } else {
+        const created = await createConversation("新对话");
+        setConversations([created]);
+        setActiveConversation(created);
+        streamingStore.patch(created.id, { loaded: true });
+      }
+      setSelectedGraph(null);
+    } catch (currentError) {
+      if (activeConversationId) {
+        setError(
+          activeConversationId,
+          currentError instanceof Error ? currentError.message : "删除对话失败",
+        );
+      }
+    }
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!activeConversationId || !input.trim() || isSending) {
+    if (!activeConversationId || !input.trim() || isStreaming) {
       return;
     }
 
+    const conversationId = activeConversationId;
     const content = input.trim();
+    const optimisticUserId = -Date.now();
+    const optimisticAssistantId = optimisticUserId - 1;
     const optimisticUser: DraftAssistantMessage = {
-      id: -Date.now(),
-      conversation_id: activeConversationId,
+      id: optimisticUserId,
+      conversation_id: conversationId,
       role: "user",
       content,
       parent_id: messages.length > 0 ? messages[messages.length - 1].id : null,
@@ -131,86 +283,71 @@ export function ChatWindow() {
     };
     const optimisticAssistant: DraftAssistantMessage = {
       ...optimisticUser,
-      id: optimisticUser.id - 1,
+      id: optimisticAssistantId,
       role: "assistant",
       content: "",
-      parent_id: optimisticUser.id,
+      parent_id: optimisticUserId,
       isStreaming: true,
     };
 
-    setMessages((current) => [...current, optimisticUser, optimisticAssistant]);
+    const controller = new AbortController();
+    streamingStore.update(conversationId, (current) => ({
+      ...current,
+      messages: [...current.messages, optimisticUser, optimisticAssistant],
+      nodeStatuses: {},
+      thoughts: [],
+      hasEmittedAnswerStarted: false,
+      error: "",
+      isStreaming: true,
+      streamingTurnId: null,
+      pendingOptimisticIds: {
+        userId: optimisticUserId,
+        assistantId: optimisticAssistantId,
+      },
+      abortController: controller,
+    }));
     setInput("");
-    setError("");
-    setIsSending(true);
-    setNodeStatuses({});
-    setThoughts([]);
-    hasEmittedAnswerStartedRef.current = false;
 
     try {
-      await streamChat(activeConversationId, content, (streamEvent) => {
-        if (streamEvent.event === "turn" || streamEvent.event === "node") {
-          setNodeStatuses(streamEvent.data.node_statuses);
-        }
-        if (streamEvent.event === "node") {
-          emitChatNodeElfEvent(streamEvent.data.node);
-        }
-        if (streamEvent.event === "turn") {
-          const { turn_id, user_message, assistant_message } = streamEvent.data;
-          setMessages((current) =>
-            current
-              .filter(
-                (message) =>
-                  message.id !== optimisticUser.id && message.id !== optimisticAssistant.id,
-              )
-              .concat([
-                user_message,
-                { ...assistant_message, turn_id, isStreaming: true },
-              ]),
-          );
-        }
-        if (streamEvent.event === "answer_delta") {
-          if (streamEvent.data.content.length > 0 && !hasEmittedAnswerStartedRef.current) {
-            hasEmittedAnswerStartedRef.current = true;
-            emitChatAnswerStartedElfEvent();
-          }
-          setMessages((current) =>
-            current.map((message) =>
-              message.id === optimisticAssistant.id || message.isStreaming
-                ? { ...message, content: message.content + streamEvent.data.content }
-                : message,
-            ),
-          );
-        }
-        if (streamEvent.event === "thought_snapshot") {
-          setThoughts(streamEvent.data.thoughts);
-        }
-        if (streamEvent.event === "done") {
-          const { user_message, assistant_message } = streamEvent.data.response;
-          emitChatDoneElfEvent(streamEvent.data.turn_id);
-          setMessages((current) =>
-            current
-              .filter(
-                (message) =>
-                  message.id !== optimisticUser.id &&
-                  message.id !== optimisticAssistant.id &&
-                  message.id !== user_message.id &&
-                  message.id !== assistant_message.id,
-              )
-              .concat([user_message, assistant_message]),
-          );
-        }
-        if (streamEvent.event === "error") {
-          setError(streamEvent.data.message);
-          emitChatErrorElfEvent(streamEvent.data.message, streamEvent.data.turn_id);
-        }
-      });
-      setConversations(await listConversations());
+      await streamChat(
+        conversationId,
+        content,
+        (streamEvent) => dispatchStreamEvent(conversationId, streamEvent),
+        { signal: controller.signal },
+      );
+      await refreshConversations();
     } catch (currentError) {
-      setError(currentError instanceof Error ? currentError.message : "发送失败");
+      if (!controller.signal.aborted) {
+        setError(
+          conversationId,
+          currentError instanceof Error ? currentError.message : "发送失败",
+        );
+      }
     } finally {
-      setIsSending(false);
-      setNodeStatuses({});
+      const latest = streamingStore.peek(conversationId);
+      if (latest?.abortController === controller) {
+        streamingStore.patch(conversationId, { abortController: null });
+      }
+      if (latest?.isStreaming) {
+        streamingStore.patch(conversationId, { isStreaming: false });
+      }
+      scheduleConversationRefresh();
     }
+  }
+
+  function scheduleConversationRefresh() {
+    // 后端自动命名 job 由 worker 每 2 秒拉取，给它 ~6 秒窗口刷新两次列表，
+    // 让侧栏 title 从「新对话」过渡到 LLM 生成的短标题。
+    const delays = [1500, 4500];
+    delays.forEach((delay) => {
+      window.setTimeout(() => {
+        listConversations()
+          .then((items) => setConversations(items))
+          .catch(() => {
+            // 列表刷新失败不打断主流程；下一次发送会再触发一次。
+          });
+      }, delay);
+    });
   }
 
   async function handleOpenGraph(message: DraftAssistantMessage) {
@@ -219,7 +356,7 @@ export function ChatWindow() {
     }
     setIsGraphLoading(true);
     setSelectedGraph(null);
-    setError("");
+    setError(activeConversationId, "");
     try {
       if (!message.turn_id) {
         throw new Error("这条消息没有关联的 ChatTurn Graph。");
@@ -227,7 +364,10 @@ export function ChatWindow() {
       emitChatGraphOpenElfEvent(message.turn_id);
       setSelectedGraph(await getTurnGraph(activeConversationId, message.turn_id));
     } catch (currentError) {
-      setError(currentError instanceof Error ? currentError.message : "读取 graph 失败");
+      setError(
+        activeConversationId,
+        currentError instanceof Error ? currentError.message : "读取 graph 失败",
+      );
     } finally {
       setIsGraphLoading(false);
     }
@@ -238,6 +378,7 @@ export function ChatWindow() {
       <ConversationList
         activeConversationId={activeConversationId}
         conversations={conversations}
+        onDeleteConversation={handleDeleteConversation}
         onNewConversation={handleNewConversation}
         onSelectConversation={handleSelectConversation}
       />
@@ -245,7 +386,7 @@ export function ChatWindow() {
       <section className="chat-main">
         <header className="chat-main-header">
           <div>
-            <h2>{activeConversation?.title ?? "记忆对话"}</h2>
+            <h2>{activeConversation?.title ?? "新对话"}</h2>
             <p>{activeConversation?.langgraph_thread_id ?? "准备连接 Memory Chat Graph"}</p>
           </div>
           {runningNodes.length > 0 ? <span>Graph: {runningNodes.join(", ")}</span> : null}
@@ -262,14 +403,20 @@ export function ChatWindow() {
 
         <ChatComposer
           input={input}
-          isSending={isSending}
+          isSending={isStreaming}
           onInputChange={setInput}
           onSubmit={handleSubmit}
         />
       </section>
 
       {selectedGraph || isGraphLoading ? (
-        <Suspense fallback={<div className="chat-debug-panel">正在加载 Graph 调试面板...</div>}>
+        <Suspense
+          fallback={
+            <div className="chat-debug-workspace chat-debug-workspace--loading">
+              正在加载 Graph 调试面板...
+            </div>
+          }
+        >
           <ChatGraphPanel
             graph={selectedGraph}
             isLoading={isGraphLoading}
