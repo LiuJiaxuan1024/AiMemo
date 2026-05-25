@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Server, Trash2, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Server, Trash2, X } from "lucide-react";
 
 import { Button, PanelHeader } from "../../shared/ui";
 import {
@@ -9,7 +9,7 @@ import {
   listBackgroundTasks,
   pruneBackgroundTask,
 } from "./backgroundTasksApi";
-import type { BackgroundTask, BackgroundTaskStatus } from "./types";
+import type { BackgroundTask, BackgroundTaskOutputLine, BackgroundTaskStatus } from "./types";
 
 const RUNNING_STATUSES = new Set<BackgroundTaskStatus>(["running"]);
 
@@ -42,6 +42,9 @@ export function BackgroundTasksDrawer() {
   const queryClient = useQueryClient();
   const [isOpen, setIsOpen] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [isOutputExpanded, setIsOutputExpanded] = useState(true);
+  const [outputCursor, setOutputCursor] = useState(0);
+  const [outputLines, setOutputLines] = useState<BackgroundTaskOutputLine[]>([]);
 
   const tasksQuery = useQuery({
     queryKey: ["background_tasks"],
@@ -59,14 +62,15 @@ export function BackgroundTasksDrawer() {
     [tasks],
   );
 
+  const selectedTask = selectedTaskId
+    ? tasks.find((t) => t.task_id === selectedTaskId) ?? null
+    : null;
+
   const outputQuery = useQuery({
-    enabled: isOpen && selectedTaskId !== null,
+    enabled: isOpen && selectedTaskId !== null && isOutputExpanded,
     queryKey: ["background_tasks", selectedTaskId, "output"],
-    queryFn: () => getBackgroundTaskOutput(selectedTaskId as string, 0, 200),
-    refetchInterval: (query) => {
-      const data = query.state.data;
-      return data && data.status === "running" ? 2000 : false;
-    },
+    queryFn: () => getBackgroundTaskOutput(selectedTaskId as string, outputCursor, 200),
+    refetchInterval: () => (selectedTask?.status === "running" ? 2000 : false),
   });
 
   const killMutation = useMutation({
@@ -93,9 +97,28 @@ export function BackgroundTasksDrawer() {
     }
   }, [tasks, selectedTaskId]);
 
-  const selectedTask = selectedTaskId
-    ? tasks.find((t) => t.task_id === selectedTaskId) ?? null
-    : null;
+  useEffect(() => {
+    setOutputCursor(0);
+    setOutputLines([]);
+    setIsOutputExpanded(true);
+  }, [selectedTaskId]);
+
+  useEffect(() => {
+    const data = outputQuery.data;
+    if (!data || data.lines.length === 0) {
+      return;
+    }
+    setOutputLines((prev) => {
+      const merged = [...prev];
+      for (const line of data.lines) {
+        if (!merged.some((existing) => existing.line === line.line)) {
+          merged.push(line);
+        }
+      }
+      return merged;
+    });
+    setOutputCursor(data.last_line);
+  }, [outputQuery.data]);
 
   return (
     <aside className={isOpen ? "bg-task-drawer open" : "bg-task-drawer"}>
@@ -146,8 +169,10 @@ export function BackgroundTasksDrawer() {
           />
           <BackgroundTaskDetail
             task={selectedTask}
-            outputLines={outputQuery.data?.lines ?? []}
+            outputLines={outputLines}
             isLoading={outputQuery.isFetching && !outputQuery.data}
+            isExpanded={isOutputExpanded}
+            onToggleExpanded={() => setIsOutputExpanded((value) => !value)}
             error={
               outputQuery.error instanceof Error ? outputQuery.error.message : null
             }
@@ -250,10 +275,19 @@ interface DetailProps {
   task: BackgroundTask | null;
   outputLines: { line: number; stream: string; text: string }[];
   isLoading: boolean;
+  isExpanded: boolean;
+  onToggleExpanded: () => void;
   error: string | null;
 }
 
-function BackgroundTaskDetail({ task, outputLines, isLoading, error }: DetailProps) {
+function BackgroundTaskDetail({
+  task,
+  outputLines,
+  isLoading,
+  isExpanded,
+  onToggleExpanded,
+  error,
+}: DetailProps) {
   if (!task) {
     return (
       <div className="bg-task-detail bg-task-detail--empty">
@@ -279,24 +313,37 @@ function BackgroundTaskDetail({ task, outputLines, isLoading, error }: DetailPro
           </div>
         ) : null}
       </div>
-      <pre className="bg-task-output">
-        {error ? (
-          <span className="bg-task-output-error">{error}</span>
-        ) : isLoading ? (
-          <span className="bg-task-output-empty">正在读取输出…</span>
-        ) : outputLines.length === 0 ? (
-          <span className="bg-task-output-empty">暂无输出</span>
+      <div className="bg-task-output-shell">
+        <div className="bg-task-output-header">
+          <strong>命令行</strong>
+          <Button onClick={onToggleExpanded} size="sm" variant="ghost">
+            {isExpanded ? <ChevronUp aria-hidden="true" size={14} /> : <ChevronDown aria-hidden="true" size={14} />}
+            {isExpanded ? "收起" : "展开"}
+          </Button>
+        </div>
+        {isExpanded ? (
+          <pre className="bg-task-output">
+            {error ? (
+              <span className="bg-task-output-error">{error}</span>
+            ) : isLoading ? (
+              <span className="bg-task-output-empty">正在读取输出…</span>
+            ) : outputLines.length === 0 ? (
+              <span className="bg-task-output-empty">暂无输出</span>
+            ) : (
+              outputLines.map((l) => (
+                <div
+                  className={`bg-task-output-line bg-task-output-line--${l.stream}`}
+                  key={`${l.stream}-${l.line}`}
+                >
+                  {l.text || " "}
+                </div>
+              ))
+            )}
+          </pre>
         ) : (
-          outputLines.map((l) => (
-            <div
-              className={`bg-task-output-line bg-task-output-line--${l.stream}`}
-              key={`${l.stream}-${l.line}`}
-            >
-              {l.text || " "}
-            </div>
-          ))
+          <div className="bg-task-output-collapsed">命令行已收起。</div>
         )}
-      </pre>
+      </div>
     </div>
   );
 }

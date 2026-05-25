@@ -39,6 +39,7 @@ let bubbleSequenceTimer: number | null = null;
 let isElfChatRunning = false;
 let activeToolCallIds = new Set<string>();
 let toolProgressCount = 0;
+let choiceCloseTimer: number | null = null;
 
 elf?.addEventListener("pointerdown", (event) => {
   if (event.button !== 0) {
@@ -227,10 +228,35 @@ function hideChoicePanel() {
   if (!choicePanel) {
     return;
   }
+  if (choiceCloseTimer !== null) {
+    window.clearTimeout(choiceCloseTimer);
+    choiceCloseTimer = null;
+  }
   choicePanel.classList.remove("open");
+  choicePanel.classList.remove("closing");
   choicePanel.setAttribute("aria-hidden", "true");
   choicePanel.onsubmit = null;
   choicePanel.replaceChildren();
+}
+
+function closeChoicePanelWithAnimation(onClosed: () => void) {
+  if (!choicePanel) {
+    onClosed();
+    return;
+  }
+  if (choiceCloseTimer !== null) {
+    window.clearTimeout(choiceCloseTimer);
+  }
+  choicePanel.classList.remove("open");
+  choicePanel.classList.add("closing");
+  choicePanel.setAttribute("aria-hidden", "true");
+  choicePanel.onsubmit = null;
+  choiceCloseTimer = window.setTimeout(() => {
+    choicePanel.classList.remove("closing");
+    choicePanel.replaceChildren();
+    choiceCloseTimer = null;
+    onClosed();
+  }, 190);
 }
 
 function endPointerInteraction() {
@@ -471,9 +497,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 async function resumeElfChoice(event: ElfInterruptEvent): Promise<ElfChatStreamResult> {
   const request = normalizeUserInputRequest(event.request);
-  showChatBubble({ text: request.question, emoji: "curious" }, 4200);
+  showChatBubble({ text: request.question, emoji: "curious" }, 90000);
   const answer = await showChoicePanel(request);
-  showChatBubble({ text: "收到，我继续处理。", emoji: "working_focus" }, 2200);
+  showChatBubble({ text: choiceAckText(answer), emoji: "working_focus" }, 2400);
   const response = await fetch(ELF_CHAT_RESUME_STREAM_URL(Number(event.turn_id || 0)), {
     body: JSON.stringify(answer),
     headers: {
@@ -485,6 +511,15 @@ async function resumeElfChoice(event: ElfInterruptEvent): Promise<ElfChatStreamR
     throw new Error(`Elf chat resume failed with ${response.status}`);
   }
   return readElfChatStream(response);
+}
+
+function choiceAckText(answer: UserInputAnswer) {
+  const target = answer.other_text?.trim() || answer.answer.trim();
+  if (!target) {
+    return "收到，我继续处理。";
+  }
+  const compact = target.length > 28 ? `${target.slice(0, 28)}...` : target;
+  return `好，就按「${compact}」来。`;
 }
 
 function normalizeUserInputRequest(raw: unknown): UserInputRequest {
@@ -545,6 +580,11 @@ function showChoicePanel(request: UserInputRequest): Promise<UserInputAnswer> {
 
     hideElfMenu();
     hideChatPanel();
+    if (choiceCloseTimer !== null) {
+      window.clearTimeout(choiceCloseTimer);
+      choiceCloseTimer = null;
+    }
+    choicePanel.classList.remove("closing");
     choicePanel.replaceChildren();
     const mode = request.selection_mode === "multiple" ? "multiple" : "single";
     const selectedIds = new Set<string>();
@@ -552,21 +592,12 @@ function showChoicePanel(request: UserInputRequest): Promise<UserInputAnswer> {
       selectedIds.add(request.options[0].id);
     }
 
-    const title = document.createElement("div");
-    title.className = "choice-panel-title";
-    const question = document.createElement("strong");
-    question.textContent = request.question;
-    const hint = document.createElement("span");
-    hint.textContent = mode === "multiple" ? "Multi-select" : "Single choice";
-    title.append(question, hint);
-    choicePanel.append(title);
-
     const list = document.createElement("div");
     list.className = "choice-options";
     choicePanel.append(list);
 
     const syncInputs = () => {
-      list.querySelectorAll<HTMLInputElement>("input").forEach((input) => {
+      list.querySelectorAll<HTMLInputElement>('input[type="radio"], input[type="checkbox"]').forEach((input) => {
         input.checked = selectedIds.has(input.value);
         input.closest("label")?.classList.toggle("selected", input.checked);
       });
@@ -610,7 +641,7 @@ function showChoicePanel(request: UserInputRequest): Promise<UserInputAnswer> {
       list.append(label);
     }
 
-    let otherTextArea: HTMLTextAreaElement | null = null;
+    let otherInput: HTMLInputElement | null = null;
     if (request.allow_other) {
       const other = document.createElement("label");
       other.className = "choice-option choice-option-other";
@@ -621,16 +652,16 @@ function showChoicePanel(request: UserInputRequest): Promise<UserInputAnswer> {
       input.addEventListener("change", () => setSelected("other"));
       const body = document.createElement("span");
       const main = document.createElement("span");
-      main.textContent = request.other_option.label || "Other";
-      otherTextArea = document.createElement("textarea");
-      otherTextArea.placeholder = request.other_option.placeholder || "Type another answer";
-      otherTextArea.rows = 2;
-      otherTextArea.addEventListener("focus", () => {
+      main.textContent = request.other_option.label || "其他";
+      otherInput = document.createElement("input");
+      otherInput.type = "text";
+      otherInput.placeholder = request.other_option.placeholder || "在这里补充你的答案";
+      otherInput.addEventListener("focus", () => {
         if (!selectedIds.has("other")) {
           setSelected("other");
         }
       });
-      body.append(main, otherTextArea);
+      body.append(main, otherInput);
       other.append(input, body);
       list.append(other);
     }
@@ -647,7 +678,7 @@ function showChoicePanel(request: UserInputRequest): Promise<UserInputAnswer> {
     choicePanel.onsubmit = (event) => {
       event.preventDefault();
       const ids = Array.from(selectedIds);
-      const otherText = otherTextArea?.value.trim() ?? "";
+      const otherText = otherInput?.value.trim() ?? "";
       if (otherText && !ids.includes("other")) {
         ids.push("other");
       }
@@ -658,13 +689,15 @@ function showChoicePanel(request: UserInputRequest): Promise<UserInputAnswer> {
       if (otherText) {
         values.push(otherText);
       }
-      hideChoicePanel();
-      resolve({
+      const answer: UserInputAnswer = {
         request_id: request.request_id,
         selected_option_id: ids[0] ?? "",
         selected_option_ids: ids,
         answer: values.join("\n"),
         other_text: otherText,
+      };
+      closeChoicePanelWithAnimation(() => {
+        resolve(answer);
       });
     };
   });

@@ -1,5 +1,5 @@
 import { Check, GitBranch } from "lucide-react";
-import { useMemo, useState, type FormEvent, type RefObject } from "react";
+import { useMemo, useState, type RefObject } from "react";
 
 import { Button, EmptyState } from "../../shared/ui";
 import { MarkdownMessage } from "./MarkdownMessage";
@@ -149,8 +149,7 @@ function UserInputInterruptCard({
     setSelectedIds((current) => (mode === "single" ? ["other"] : [...current, "other"]));
   }
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  function handleSubmit() {
     if (disabled || !canSubmit) {
       return;
     }
@@ -177,26 +176,35 @@ function UserInputInterruptCard({
     });
   }
 
+  function handleOtherClick() {
+    if (!request.allow_other || disabled) {
+      return;
+    }
+    if (!selectedIds.includes("other")) {
+      setSelectedIds((current) => (mode === "single" ? ["other"] : [...current, "other"]));
+    }
+  }
+
   return (
-    <form className="chat-interrupt-card" onSubmit={handleSubmit}>
-      <div className="chat-interrupt-card__header">
-        <span>请先回答这个问题</span>
-        <strong>{mode === "multiple" ? "可多选" : "单选"}</strong>
-      </div>
+    <div className="chat-interrupt-card" role="group" aria-label={request.question}>
       <p className="chat-interrupt-card__question">{request.question}</p>
       <div className="chat-interrupt-options">
         {request.options.map((option, index) => {
           const checked = selectedIds.includes(option.id);
           return (
-            <label
+            <button
               className={`chat-interrupt-option ${checked ? "selected" : ""}`}
               key={option.id}
+              onClick={() => toggleOption(option.id)}
+              type="button"
             >
               <input
+                aria-hidden="true"
                 checked={checked}
                 disabled={disabled}
                 name={`interrupt-${request.request_id}`}
-                onChange={() => toggleOption(option.id)}
+                onChange={() => undefined}
+                tabIndex={-1}
                 type={mode === "multiple" ? "checkbox" : "radio"}
               />
               <span className="chat-interrupt-option__mark" aria-hidden="true" />
@@ -207,38 +215,44 @@ function UserInputInterruptCard({
                 </span>
                 {option.description ? <small>{option.description}</small> : null}
               </span>
-            </label>
+            </button>
           );
         })}
         {request.allow_other ? (
-          <label className={`chat-interrupt-option chat-interrupt-option--other ${includesOther ? "selected" : ""}`}>
+          <button
+            className={`chat-interrupt-option chat-interrupt-option--other ${includesOther ? "selected" : ""}`}
+            onClick={handleOtherClick}
+            type="button"
+          >
             <input
+              aria-hidden="true"
               checked={includesOther}
               disabled={disabled}
               name={`interrupt-${request.request_id}`}
-              onChange={() => toggleOption("other")}
+              onChange={() => undefined}
+              tabIndex={-1}
               type={mode === "multiple" ? "checkbox" : "radio"}
             />
             <span className="chat-interrupt-option__mark" aria-hidden="true" />
-            <span className="chat-interrupt-option__body">
-              <span>{request.other_option?.label || "Other"}</span>
-              <textarea
+            <span className="chat-interrupt-option__body chat-interrupt-option__body--other">
+              <span className="chat-interrupt-option__other-label">其他</span>
+              <input
+                className="chat-interrupt-option__inline-input"
                 disabled={disabled}
                 onChange={(event) => setOtherText(event.target.value)}
                 onFocus={handleOtherFocus}
-                placeholder={request.other_option?.placeholder || "请输入其他答案"}
-                rows={2}
+                placeholder={request.other_option?.placeholder || "在这里补充你的答案"}
                 value={otherText}
               />
             </span>
-          </label>
+          </button>
         ) : null}
       </div>
-      <Button disabled={disabled || !canSubmit} size="sm" type="submit" variant="primary">
+      <Button disabled={disabled || !canSubmit} onClick={handleSubmit} size="sm" type="button" variant="primary">
         <Check aria-hidden="true" size={15} />
         Submit
       </Button>
-    </form>
+    </div>
   );
 }
 

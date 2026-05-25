@@ -25,9 +25,10 @@ html.linux-elf-window body {
   align-items: end;
   box-sizing: border-box;
   display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
   grid-template-rows: auto 1fr;
   height: 100vh;
-  justify-items: end;
+  justify-items: center;
   padding: 10px;
   width: 100vw;
 }
@@ -35,6 +36,7 @@ html.linux-elf-window body {
 html.linux-elf-window #app {
   background: #f8fafc;
   border: 1px solid #dbeafe;
+  grid-template-columns: 260px minmax(0, 1fr);
   grid-template-rows: auto 1fr;
   justify-items: center;
   padding: 8px;
@@ -48,11 +50,14 @@ html.linux-elf-window #app {
   color: #1849a9;
   font-size: 13px;
   line-height: 1.45;
-  margin-right: 8px;
-  max-width: 220px;
+  grid-column: 1;
+  justify-self: center;
+  margin-right: 0;
+  max-width: 238px;
   padding: 9px 11px;
   position: relative;
   opacity: 0;
+  z-index: 5;
   transform: translateY(4px);
   transition:
     opacity 160ms ease,
@@ -97,8 +102,11 @@ html.linux-elf-window .bubble::after {
   height: 300px;
   justify-content: end;
   padding: 0;
+  grid-column: 1;
+  grid-row: 2;
   transform-origin: 52% 92%;
   width: 240px;
+  z-index: 2;
 }
 
 html.linux-elf-window .elf {
@@ -156,12 +164,19 @@ html.linux-elf-window .elf img {
   opacity: 0;
   padding: 7px;
   pointer-events: none;
+  grid-column: 1;
+  grid-row: 2;
+  justify-self: center;
+  align-self: end;
   position: absolute;
-  right: 22px;
+  left: 56px;
+  right: auto;
+  bottom: 18px;
   transform: translateY(8px) scale(0.98);
   transition:
     opacity 140ms ease,
     transform 140ms ease;
+  z-index: 8;
 }
 
 .elf-menu.open {
@@ -201,19 +216,27 @@ html.linux-elf-window .elf img {
   opacity: 0;
   padding: 8px;
   pointer-events: none;
+  grid-column: 1;
+  grid-row: 2;
+  justify-self: center;
+  align-self: end;
   position: absolute;
-  right: 22px;
+  left: 14px;
+  right: auto;
+  bottom: 18px;
   transform: translateY(8px) scale(0.98);
   transition:
     opacity 140ms ease,
     transform 140ms ease;
-  width: 240px;
+  width: 238px;
+  z-index: 8;
 }
 
 html.linux-elf-window .elf-menu,
 html.linux-elf-window .chat-panel {
   box-shadow: none;
-  right: 18px;
+  left: auto;
+  right: auto;
 }
 
 html.linux-elf-window .chat-panel {
@@ -265,30 +288,45 @@ html.linux-elf-window .chat-panel {
 }
 
 .choice-panel {
-  background: rgba(255, 255, 255, 0.98);
-  border: 1px solid rgba(186, 203, 226, 0.95);
-  border-radius: 8px;
-  bottom: 18px;
-  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.17);
+  background: rgba(15, 23, 42, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.34);
+  border-radius: 12px;
+  bottom: auto;
+  box-shadow: 0 16px 34px rgba(15, 23, 42, 0.18);
   box-sizing: border-box;
   display: grid;
-  gap: 9px;
+  gap: 5px;
   opacity: 0;
-  padding: 10px;
+  padding: 6px;
   pointer-events: none;
-  position: absolute;
-  right: 22px;
-  transform: translateY(8px) scale(0.98);
+  grid-column: 2;
+  grid-row: 2;
+  align-self: center;
+  justify-self: start;
+  position: relative;
+  right: auto;
+  transform: translateX(16px) scale(0.965);
+  transform-origin: left center;
   transition:
-    opacity 140ms ease,
-    transform 140ms ease;
-  width: 282px;
+    opacity 180ms ease,
+    transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  width: min(270px, calc(100vw - 286px));
+  z-index: 9;
 }
 
 .choice-panel.open {
   opacity: 1;
   pointer-events: auto;
-  transform: translateY(0) scale(1);
+  transform: translateX(0) scale(1);
+}
+
+.choice-panel.closing {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(16px) scale(0.965);
+  transition:
+    opacity 150ms ease,
+    transform 170ms cubic-bezier(0.7, 0, 0.84, 0);
 }
 
 .choice-panel-title {
@@ -311,39 +349,46 @@ html.linux-elf-window .chat-panel {
 
 .choice-options {
   display: grid;
-  gap: 7px;
-  max-height: 250px;
-  overflow-y: auto;
-  padding-right: 2px;
+  gap: 5px;
+  max-height: 188px;
+  overflow: hidden;
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.choice-options::-webkit-scrollbar {
+  display: none;
 }
 
 .choice-option {
-  align-items: flex-start;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(219, 234, 254, 0.9);
   border-radius: 8px;
   box-sizing: border-box;
   color: #243045;
   cursor: pointer;
   display: grid;
-  gap: 8px;
-  grid-template-columns: auto minmax(0, 1fr);
-  padding: 8px 9px;
+  gap: 7px;
+  grid-template-columns: 16px minmax(0, 1fr);
+  min-height: 0;
+  padding: 6px 8px;
 }
 
 .choice-option:hover,
 .choice-option.selected {
-  background: #f0f7ff;
-  border-color: #93c5fd;
+  background: #ffffff;
+  border-color: #7cb3ff;
+  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.13);
 }
 
 .choice-option input {
-  margin-top: 3px;
+  margin: 0;
 }
 
 .choice-option > span {
   display: grid;
-  gap: 4px;
+  gap: 1px;
   min-width: 0;
 }
 
@@ -352,64 +397,71 @@ html.linux-elf-window .chat-panel {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 650;
-  line-height: 1.35;
+  line-height: 1.28;
 }
 
 .choice-option em {
   background: #e0f2fe;
   border-radius: 999px;
   color: #0369a1;
-  font-size: 10px;
+  font-size: 9.5px;
   font-style: normal;
   padding: 1px 6px;
 }
 
 .choice-option small {
   color: #64748b;
-  font-size: 11px;
-  line-height: 1.4;
+  font-size: 10px;
+  line-height: 1.25;
   overflow-wrap: anywhere;
 }
 
-.choice-option textarea {
-  background: #ffffff;
-  border: 1px solid #cbd5e1;
-  border-radius: 7px;
+.choice-option-other {
+  min-height: 0;
+}
+
+.choice-option input[type="text"] {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid #cbd5e1;
+  border-radius: 0;
   box-sizing: border-box;
   color: #1d2433;
   font: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
   line-height: 1.4;
-  min-height: 48px;
   outline: none;
-  padding: 7px 8px;
-  resize: vertical;
+  padding: 0 0 2px;
   width: 100%;
 }
 
-.choice-option textarea:focus {
+.choice-option input[type="text"]:focus {
   border-color: #60a5fa;
-  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.18);
+  box-shadow: none;
 }
 
 .choice-submit {
   background: #2563eb;
   border: 1px solid #1d4ed8;
-  border-radius: 7px;
+  border-radius: 8px;
   color: #ffffff;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 650;
-  justify-self: end;
-  min-width: 92px;
-  padding: 8px 12px;
+  justify-self: stretch;
+  min-height: 32px;
+  min-width: 0;
+  padding: 6px 12px;
 }
 
 html.linux-elf-window .choice-panel {
   box-shadow: none;
-  right: 18px;
-  width: 250px;
+  bottom: auto;
+  right: auto;
+  width: min(260px, calc(100vw - 286px));
 }
 
 @keyframes memo-breathe {

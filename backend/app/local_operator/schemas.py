@@ -68,7 +68,7 @@ class ExecCommandInput(BaseModel):
     不支持后台任务、不支持交互输入，也不把它作为读写文件的替代品。
     """
 
-    command: str = Field(description="要执行的终端命令。不要用它读写文件，读写文件应使用专用工具。stdout/stderr 会按 UTF-8 返回。")
+    command: str = Field(description="要前台执行的终端命令。用于本轮需要拿到 stdout/stderr/exit_code 的任务；不要用它读写文件，读写文件应使用专用工具。")
     cwd: str = Field(default=".", description="命令工作目录，必须位于授权 workspace 内。必须是绝对路径，例如 E:\\demo 或 /home/user/demo。")
     timeout_ms: int = Field(
         default=settings.local_operator_exec_default_timeout_ms,
@@ -83,11 +83,12 @@ class ExecCommandInput(BaseModel):
 class ExecCommandBackgroundInput(BaseModel):
     """后台启动命令的输入。
 
-    用于启动长期运行的服务（如 flask run/uvicorn/npm start），不会阻塞 agent 循环。
+    仅用于启动长期运行的服务（如 flask run/uvicorn/npm run dev），不会阻塞 agent 循环。
+    构建、安装、测试、一次性脚本等需要本轮结果的命令应使用 exec_command，而不是后台化。
     返回 task_id 后，用 read_background_output 轮询输出，用 kill_background_task 停止。
     """
 
-    command: str = Field(description="要在后台启动的命令。例如 'python app.py' 或 'npm run dev'。不要用它读写文件，也不要写带 & 的 shell 后台符。")
+    command: str = Field(description="要在后台启动的服务型命令，例如 'uvicorn app:app'、'flask run' 或 'npm run dev'。不要用于 pip install、构建、测试或一次性脚本。不要用它读写文件，也不要写带 & 的 shell 后台符。")
     cwd: str = Field(default=".", description="命令工作目录，必须位于授权 workspace 内绝对路径。")
 
 

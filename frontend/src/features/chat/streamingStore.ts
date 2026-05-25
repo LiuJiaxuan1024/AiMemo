@@ -402,7 +402,12 @@ export function groupThoughtsByStep(thoughts: ChatThought[] | undefined): Map<nu
   for (const thought of thoughts) {
     const step = typeof thought.step_index === "number" ? thought.step_index : 0;
     const list = groups.get(step) ?? [];
-    list.push(thought);
+    const existingIndex = list.findIndex((item) => item.id === thought.id);
+    if (existingIndex >= 0) {
+      list[existingIndex] = thought;
+    } else {
+      list.push(thought);
+    }
     groups.set(step, list);
   }
   return groups;

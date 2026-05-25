@@ -729,10 +729,12 @@ def build_tools_node(session_factory: SessionFactory):
                 "thought_events": [
                     *working_state.get("thought_events", []),
                     _thought(
-                        "user-input-resolved",
+                        f"request-user-input-{action.get('tool_call_id') or step_index or 'choice'}",
                         "用户已补充选择",
                         "已收到用户的选择，继续执行当前任务。",
                         related_node="tools",
+                        related_tool_call_id=str(action.get("tool_call_id") or "") or None,
+                        status="completed",
                         step_index=step_index,
                     ),
                 ],
@@ -963,13 +965,16 @@ def _build_react_agent_system_prompt() -> str:
         "调用 request_user_input 询问是否允许“未完整读取旧内容就直接整文件覆盖”。"
         "用户明确选择确认后，才可调用 write_file(overwrite=true, confirmed_overwrite_without_read=true)；"
         "未确认时禁止设置该参数。\n"
-        "- exec_command 只用于短时非交互命令；读写文件用 read_file/write_file。\n"
-        "- 启动会一直前台跑的服务（flask run、uvicorn、npm start/dev、manage.py runserver、"
-        "python http.server 等）必须用 exec_command_background，不要用 exec_command；"
-        "后者会被策略层直接拦截。\n"
+        "- exec_command 只用于前台非交互命令；读写文件用 read_file/write_file。"
+        "前台命令的目标是在本轮拿到 stdout/stderr/exit_code，例如 git status、pytest、npm run build、pip install、python 脚本等。"
+        "只要用户要的是本轮结果，就不要擅自后台化。\n"
+        "- exec_command_background 只用于会持续存活的服务型任务（flask run、uvicorn、npm start/dev、manage.py runserver、"
+        "python http.server 等），不要把“慢”当成后台；后台的定义是会长期运行、占端口或持续输出日志，后续需要回来读状态/停止。"
+        "前台命令如果误判为长跑服务会被策略层拦截并提示改用后台。\n"
         "- exec_command_background 立即返回 task_id；之后用 read_background_output(task_id) "
         "等 1-2 秒拿首批日志确认 status='running' 且没有报错；任务结束/不再需要时用 "
-        "kill_background_task(task_id) 停掉，不要重复 spawn 同一服务。\n"
+        "kill_background_task(task_id) 停掉，不要重复 spawn 同一服务。"
+        "如果用户要的是当前轮次的最终运行结果，不要启动后台任务后结束本轮。\n"
         "- 用户问“现在跑着哪些服务/后台任务”或者想停掉一个但没给 task_id 时，"
         "先调用 list_background_tasks 看本会话的任务列表（含历史/orphaned），"
         "再根据 task_id 操作；不要凭空猜 task_id，也不要直接 kill。\n"
@@ -978,6 +983,12 @@ def _build_react_agent_system_prompt() -> str:
         "- 如果缺少必须由用户决定的信息（例如新项目/新文件目标目录、多个可行方案、"
         "风险操作是否继续、无法安全默认的配置选择），必须调用 request_user_input，"
         "把 2-4 个建议选项放在 options 里，并允许 other；不要只用普通文字提问后结束本轮。"
+        "需要用户做决策时，final_answer 不是合法出口；"
+        "禁止在 final_answer 中列出“1. 2. 3.”、“几个解决方案”或“你希望采用哪种方案？”后结束本轮。"
+        "唯一合法动作是调用 request_user_input，让 graph 暂停并等待用户选择后继续。"
+        "如果工具失败后存在多个可执行恢复方案，例如命令不存在、依赖缺失、端口占用、权限不足、"
+        "需要安装工具、配置 PATH、添加 wrapper 或改用另一种启动方式，也必须调用 request_user_input；"
+        "不要把这些恢复方案写成普通最终回答。\n"
         "必须保持项目上下文隔离：历史对话里某个项目的目录、技术栈、依赖、配置、数据源、账号、风险授权或用户偏好，"
         "不等于授权以后所有新项目都继承这些条件；除非用户本轮明确说“继续上个项目/同一个项目/沿用上次目录或配置”，"
         "否则遇到新的项目、应用、文件组或独立功能时，不能复用旧项目条件，必须重新确认会影响落地的关键条件。"
@@ -1005,6 +1016,13 @@ def _build_react_agent_system_prompt() -> str:
         "调用 request_user_input，question=\"`/path/big.json` 太大，无法在单次工具调用中完整读取。你是否确认在未完整读取旧内容的情况下直接整文件覆盖？\"，"
         "options 包含 label=\"取消覆盖，改用新路径或更小范围\" 与 label=\"确认直接覆盖旧文件\"。"
         "只有用户选择确认后才设置 confirmed_overwrite_without_read=true。\n"
+        "- request_user_input 少样本：exec_command_background 启动 Java 项目后，"
+        "read_background_output 返回“系统找不到 mvn 命令”。这不是 final_answer 场景，"
+        "而是恢复方案选择场景。调用 request_user_input，question=\"当前系统找不到 Maven，接下来你希望我采用哪种方式继续启动项目？\"，"
+        "options 可包括 label=\"安装或配置 Maven\", description=\"适合长期使用 Maven 命令\"；"
+        "label=\"为项目添加 Maven Wrapper\", description=\"不依赖全局 Maven，更适合项目自包含\"；"
+        "label=\"改用已有 jar 或其他启动方式\", description=\"如果项目已经打包或有替代启动脚本\"。"
+        "不要在最终回答里列三条方案让用户回复编号。\n"
         "- 多个互不依赖的读取、搜索或信息查询可以在同一轮 tool_calls 中并行发出；"
         "有依赖关系的步骤必须等上一步 ToolMessage 返回后再继续。\n"
         "- 不要把删除、清理、覆盖配置、重建项目作为开局动作；只有定位到具体原因后才做针对性修改。\n"

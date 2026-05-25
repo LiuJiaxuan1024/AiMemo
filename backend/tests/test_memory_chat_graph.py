@@ -2,6 +2,7 @@ from pathlib import Path
 
 from langchain_core.messages import AIMessage
 from langchain_core.messages import ToolMessage
+from langgraph.types import Interrupt
 from sqlmodel import select
 
 from app.agent.graphs.memory_chat.graph import build_memory_chat_graph, run_memory_chat_graph
@@ -120,6 +121,49 @@ def test_chat_turn_state_history_reads_langgraph_checkpoints(
     assert len(history.states) > 0
     assert history.states[0].checkpoint_id
     assert any("user_message" in snapshot.values for snapshot in history.states)
+
+
+def test_chat_turn_state_history_serializes_langgraph_interrupts(
+    session,
+    tmp_path: Path,
+):
+    """Checkpoint history 中的 LangGraph Interrupt 应结构化返回，不能触发 500。"""
+
+    conversation = create_conversation(session, ConversationCreate(title="interrupt history"))
+    checkpoint_path = tmp_path / "interrupts.db"
+
+    from app.models.chat_turn import ChatTurn
+    from app.services.chat_turn_service import _to_checkpoint_state_read
+
+    with get_sqlite_checkpointer(str(checkpoint_path)) as checkpointer:
+        app = build_memory_chat_graph(session_factory=lambda: session).compile(checkpointer=checkpointer)
+        config = {"configurable": {"thread_id": f"conversation:{conversation.id}"}}
+        app.update_state(
+            config,
+            {"user_message": "需要选择目录"},
+            as_node="agent",
+        )
+        snapshot = app.get_state(config)
+
+    snapshot = snapshot._replace(
+        interrupts=(
+            Interrupt(
+                value={
+                    "kind": "user_input",
+                    "request_id": "request-1",
+                    "question": "文件写到哪里？",
+                    "options": [{"id": "a", "label": "E:/demo"}],
+                },
+                id="interrupt-1",
+            ),
+        )
+    )
+    state = _to_checkpoint_state_read(snapshot)
+    payload = state.model_dump(mode="json")
+
+    assert payload["interrupts"][0]["type"] == "Interrupt"
+    assert payload["interrupts"][0]["id"] == "interrupt-1"
+    assert payload["interrupts"][0]["value"]["request_id"] == "request-1"
 
 
 def test_graph_input_resumes_same_turn_checkpoint(session_factory, tmp_path: Path):

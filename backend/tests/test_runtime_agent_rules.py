@@ -13,8 +13,16 @@ def test_runtime_rules_constant_is_nonempty_and_mentions_aimemo():
     assert "目录、技术栈、依赖、配置、数据源、账号、风险授权或用户偏好" in RUNTIME_AGENT_RULES
     assert "不能复用旧项目条件" in RUNTIME_AGENT_RULES
     assert "项目上下文混淆反例" in RUNTIME_AGENT_RULES
+    assert "工作空间判断优先级" in RUNTIME_AGENT_RULES
+    assert "匹配度很低" in RUNTIME_AGENT_RULES
+    assert "过去没有已确认工作空间" in RUNTIME_AGENT_RULES
+    assert "E:\\demo\\rust-random" in RUNTIME_AGENT_RULES
     assert "结构化选择框" in RUNTIME_AGENT_RULES
     assert "普通 assistant 文本输出编号列表" in RUNTIME_AGENT_RULES
+    assert "最终回答不是合法出口" in RUNTIME_AGENT_RULES
+    assert "命令不存在、依赖缺失、端口占用、权限不足" in RUNTIME_AGENT_RULES
+    assert "不要因为命令看起来慢就自动后台化" in RUNTIME_AGENT_RULES
+    assert "持续运行的服务" in RUNTIME_AGENT_RULES
 
 
 def test_react_system_prompt_includes_runtime_rules():
@@ -30,6 +38,14 @@ def test_react_system_prompt_includes_runtime_rules():
     assert "不要一上来就询问是否绕过规则" in prompt
     assert "再做一个记账小程序" in prompt
     assert "不能默认复用 `/home/user/demo1`、React、SQLite 或上一轮授权" in prompt
+    assert "工作空间判断优先级" in prompt
+    assert "做一个 blog.html 博客页面" in prompt
+    assert "必须询问 blog.html 或博客项目应该创建在哪个工作空间" in prompt
+    assert "final_answer 不是合法出口" in prompt
+    assert "系统找不到 mvn 命令" in prompt
+    assert "为项目添加 Maven Wrapper" in prompt
+    assert "只要用户要的是本轮结果，就不要擅自后台化" in prompt
+    assert "不要把“慢”当成后台" in prompt
     assert RUNTIME_AGENT_RULES in prompt
 
 

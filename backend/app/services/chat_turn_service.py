@@ -564,8 +564,8 @@ def _to_checkpoint_state_read(snapshot) -> ChatCheckpointStateRead:
         created_at=snapshot.created_at,
         next=list(snapshot.next or []),
         tasks=[_compact_task(task) for task in snapshot.tasks or []],
-        interrupts=[_compact_debug_value(interrupt) for interrupt in snapshot.interrupts or []],
-        metadata=_compact_debug_value(snapshot.metadata) if snapshot.metadata is not None else None,
+        interrupts=[_compact_interrupt(interrupt) for interrupt in snapshot.interrupts or []],
+        metadata=_compact_debug_object(snapshot.metadata) if snapshot.metadata is not None else None,
         values=_compact_debug_value(snapshot.values) if isinstance(snapshot.values, dict) else {},
     )
 
@@ -581,6 +581,32 @@ def _compact_task(task) -> dict:
         "interrupts": _compact_debug_value(getattr(task, "interrupts", ())),
         "result": _compact_debug_value(getattr(task, "result", None)),
     }
+
+
+def _compact_interrupt(interrupt) -> dict:
+    """把 LangGraph Interrupt 对象压成前端可比较的普通 dict。
+
+    LangGraph 的 `StateSnapshot.interrupts` 保存的是 `Interrupt` 实例，而不是
+    JSON dict。直接走 `_compact_debug_value` 会退化成字符串，导致 response schema
+    校验失败，也会让调试台失去 request_id/options 等关键排查信息。
+    """
+
+    payload = {
+        "type": type(interrupt).__name__,
+        "value": _compact_debug_value(getattr(interrupt, "value", interrupt)),
+    }
+    interrupt_id = getattr(interrupt, "id", None) or getattr(interrupt, "interrupt_id", None)
+    if interrupt_id is not None:
+        payload["id"] = _compact_debug_value(interrupt_id)
+    namespace = getattr(interrupt, "ns", None)
+    if namespace is not None:
+        payload["namespace"] = _compact_debug_value(namespace)
+    return payload
+
+
+def _compact_debug_object(value) -> dict:
+    compacted = _compact_debug_value(value)
+    return compacted if isinstance(compacted, dict) else {"value": compacted}
 
 
 def _compact_debug_value(value, *, depth: int = 0):

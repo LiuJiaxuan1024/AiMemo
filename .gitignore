@@ -46,3 +46,4 @@ submodules/
 Thumbs.db
 .vscode/
 .idea/
+.claude/
