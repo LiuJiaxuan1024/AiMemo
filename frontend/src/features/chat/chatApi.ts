@@ -5,6 +5,7 @@ import type {
   ChatTurnGraph,
   ChatTurnStateHistory,
   Conversation,
+  UserInputAnswer,
 } from "./types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -111,6 +112,31 @@ export async function streamTurnResume(
     `${API_BASE_URL}/api/conversations/${conversationId}/turns/${turnId}/events/stream`,
     {
       method: "GET",
+      signal: options.signal,
+    },
+  );
+  if (!response.ok || !response.body) {
+    const errorText = await response.text();
+    throw new Error(errorText || `Request failed with status ${response.status}`);
+  }
+  await consumeSseStream(response, onEvent);
+}
+
+export async function resumeInterruptedTurn(
+  conversationId: number,
+  turnId: number,
+  answer: UserInputAnswer,
+  onEvent: (event: ChatStreamEvent) => void,
+  options: { signal?: AbortSignal } = {},
+): Promise<void> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/conversations/${conversationId}/turns/${turnId}/resume/stream`,
+    {
+      body: JSON.stringify(answer),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      method: "POST",
       signal: options.signal,
     },
   );

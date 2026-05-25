@@ -64,5 +64,6 @@ class ChatMessageRead(BaseModel):
     status: str
     token_count: int
     turn_id: int | None = None
+    pending_interrupt: dict | None = None
     created_at: datetime
     updated_at: datetime

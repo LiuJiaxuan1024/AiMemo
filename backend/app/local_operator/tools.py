@@ -195,10 +195,20 @@ def create_read_tools(
         return run_with_audit("get_file_info", args, lambda: filesystem.get_file_info(path))
 
     @tool(args_schema=WriteFileInput)
-    def write_file(path: str, content: str, overwrite: bool = False) -> str:
+    def write_file(
+        path: str,
+        content: str,
+        overwrite: bool = False,
+        confirmed_overwrite_without_read: bool = False,
+    ) -> str:
         """创建或整文件覆盖授权 workspace 内的文本文件。"""
 
-        args = {"path": path, "content": content, "overwrite": overwrite}
+        args = {
+            "path": path,
+            "content": content,
+            "overwrite": overwrite,
+            "confirmed_overwrite_without_read": confirmed_overwrite_without_read,
+        }
         return run_with_audit(
             "write_file",
             args,
@@ -206,6 +216,7 @@ def create_read_tools(
                 path,
                 content=content,
                 overwrite=overwrite,
+                confirmed_overwrite_without_read=confirmed_overwrite_without_read,
                 known_existing_paths=known_existing_paths,
             ),
             operation_type="write",

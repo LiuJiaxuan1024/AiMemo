@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import HTTPException, status
@@ -74,14 +75,15 @@ def list_messages(session: Session, conversation_id: int) -> list[ChatMessageRea
         .where(ChatMessage.conversation_id == conversation_id)
         .order_by(ChatMessage.created_at, ChatMessage.id)
     ).all()
-    turn_ids_by_assistant_message_id = _load_turn_ids_by_assistant_message_id(
+    turn_info_by_assistant_message_id = _load_turn_info_by_assistant_message_id(
         session,
         conversation_id=conversation_id,
     )
     return [
         _to_chat_message_read(
             message,
-            turn_id=turn_ids_by_assistant_message_id.get(message.id or 0),
+            turn_id=(turn_info_by_assistant_message_id.get(message.id or {}) or {}).get("turn_id"),
+            pending_interrupt=(turn_info_by_assistant_message_id.get(message.id or {}) or {}).get("pending_interrupt"),
         )
         for message in messages
     ]
@@ -319,11 +321,11 @@ def _to_conversation_list_item(conversation: Conversation) -> ConversationListIt
     )
 
 
-def _load_turn_ids_by_assistant_message_id(
+def _load_turn_info_by_assistant_message_id(
     session: Session,
     *,
     conversation_id: int,
-) -> dict[int, int]:
+) -> dict[int, dict]:
     """读取 assistant message 与 ChatTurn 的映射。
 
     Graph 调试视图是以 `ChatTurn` 为事实来源的。前端只有拿到明确的 turn_id，
@@ -336,14 +338,35 @@ def _load_turn_ids_by_assistant_message_id(
             ChatTurn.assistant_message_id.is_not(None),
         )
     ).all()
-    return {
-        int(turn.assistant_message_id): int(turn.id)
-        for turn in turns
-        if turn.id is not None and turn.assistant_message_id is not None
-    }
+    result: dict[int, dict] = {}
+    for turn in turns:
+        if turn.id is None or turn.assistant_message_id is None:
+            continue
+        pending_interrupt = None
+        if turn.status == "interrupted":
+            pending_interrupt = _pending_interrupt_from_turn(turn)
+        result[int(turn.assistant_message_id)] = {
+            "turn_id": int(turn.id),
+            "pending_interrupt": pending_interrupt,
+        }
+    return result
 
 
-def _to_chat_message_read(message: ChatMessage, *, turn_id: int | None = None) -> ChatMessageRead:
+def _pending_interrupt_from_turn(turn: ChatTurn) -> dict | None:
+    try:
+        payload = json.loads(turn.debug_payload or "{}")
+    except Exception:
+        return None
+    pending = payload.get("pending_interrupt") if isinstance(payload, dict) else None
+    return pending if isinstance(pending, dict) else None
+
+
+def _to_chat_message_read(
+    message: ChatMessage,
+    *,
+    turn_id: int | None = None,
+    pending_interrupt: dict | None = None,
+) -> ChatMessageRead:
     return ChatMessageRead(
         id=message.id or 0,
         conversation_id=message.conversation_id,
@@ -354,6 +377,7 @@ def _to_chat_message_read(message: ChatMessage, *, turn_id: int | None = None) -
         status=message.status,
         token_count=message.token_count,
         turn_id=turn_id,
+        pending_interrupt=pending_interrupt,
         created_at=message.created_at,
         updated_at=message.updated_at,
     )

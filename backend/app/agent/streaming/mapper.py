@@ -86,6 +86,16 @@ def _map_updates_chunk(chunk: Any) -> list[AiJiStreamEvent]:
 
     events: list[AiJiStreamEvent] = []
     for node_name, state_update in chunk.items():
+        if node_name == "__interrupt__":
+            raw_interrupts = state_update if isinstance(state_update, (list, tuple)) else [state_update]
+            for raw_interrupt in raw_interrupts:
+                events.append(
+                    {
+                        "event": "interrupt",
+                        "interrupt": _compact_interrupt(raw_interrupt),
+                    }
+                )
+            continue
         if not isinstance(node_name, str):
             continue
         state_payload = state_update if isinstance(state_update, dict) else {}
@@ -106,6 +116,27 @@ def _map_updates_chunk(chunk: Any) -> list[AiJiStreamEvent]:
                 }
             )
     return events
+
+
+def _compact_interrupt(raw_interrupt: Any) -> dict[str, Any]:
+    value = getattr(raw_interrupt, "value", raw_interrupt)
+    interrupt_id = str(getattr(raw_interrupt, "id", "") or "")
+    return {
+        "id": interrupt_id,
+        "value": _json_safe(value),
+    }
+
+
+def _json_safe(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 6:
+        return str(value)
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item, depth=depth + 1) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item, depth=depth + 1) for item in value]
+    return str(value)
 
 
 def _map_messages_chunk(

@@ -3,6 +3,7 @@ from contextlib import AbstractContextManager
 from pathlib import Path
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command
 from sqlmodel import Session
 
 from app.agent.checkpoints import get_sqlite_checkpointer
@@ -187,6 +188,7 @@ def stream_memory_chat_graph(
     user_message_id: int | None = None,
     assistant_message_id: int | None = None,
     answer_mode: str = "text",
+    resume_payload: dict | None = None,
 ):
     """以 LangGraph 原生流执行一轮记忆对话。
 
@@ -212,16 +214,19 @@ def stream_memory_chat_graph(
         ).compile(checkpointer=checkpointer)
         config = {"configurable": {"thread_id": thread_id}}
         snapshot = app.get_state(config)
-        graph_input = _resolve_graph_input_for_turn(
-            app,
-            config,
-            snapshot=snapshot,
-            conversation_id=conversation_id,
-            user_message=user_message,
-            answer_mode=answer_mode,
-            user_message_id=user_message_id,
-            assistant_message_id=assistant_message_id,
-        )
+        if resume_payload is not None:
+            graph_input = Command(resume=resume_payload)
+        else:
+            graph_input = _resolve_graph_input_for_turn(
+                app,
+                config,
+                snapshot=snapshot,
+                conversation_id=conversation_id,
+                user_message=user_message,
+                answer_mode=answer_mode,
+                user_message_id=user_message_id,
+                assistant_message_id=assistant_message_id,
+            )
         latest_state: MemoryChatGraphState = {}
         for stream_item in app.stream(
             graph_input,
@@ -280,6 +285,24 @@ def stream_memory_chat_graph(
                         "result_summary": event["result_summary"],
                         "running": event.get("running", False),
                     }
+                elif event["event"] == "interrupt":
+                    snapshot = app.get_state(config)
+                    interrupted_state = dict(snapshot.values)
+                    checkpoint_id = snapshot.config["configurable"].get("checkpoint_id")
+                    _write_checkpoint_id_to_messages(
+                        session_factory,
+                        user_message_id=interrupted_state.get("user_message_id"),
+                        assistant_message_id=interrupted_state.get("assistant_message_id"),
+                        checkpoint_id=checkpoint_id,
+                    )
+                    interrupted_state["graph_checkpoint_id"] = checkpoint_id
+                    yield {
+                        "event": "interrupt",
+                        "node": "",
+                        "interrupt": event["interrupt"],
+                        "state": interrupted_state,
+                    }
+                    return
 
         snapshot = app.get_state(config)
         final_state = dict(snapshot.values)

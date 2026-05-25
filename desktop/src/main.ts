@@ -12,9 +12,12 @@ const chatToggleButton = document.querySelector<HTMLButtonElement>("#chat-toggle
 const chatPanel = document.querySelector<HTMLFormElement>("#chat-panel");
 const chatInput = document.querySelector<HTMLTextAreaElement>("#chat-input");
 const chatSendButton = document.querySelector<HTMLButtonElement>("#chat-send");
+const choicePanel = document.querySelector<HTMLFormElement>("#choice-panel");
 const currentWindow = getCurrentWindow();
 const ELF_EVENTS_URL = "http://127.0.0.1:8000/api/elf/events";
 const ELF_CHAT_STREAM_URL = "http://127.0.0.1:8000/api/elf/chat/stream";
+const ELF_CHAT_RESUME_STREAM_URL = (turnId: number) =>
+  `http://127.0.0.1:8000/api/elf/chat/turns/${turnId}/resume/stream`;
 const isLinuxElfWindow = navigator.userAgent.includes("Linux");
 
 if (isLinuxElfWindow) {
@@ -120,6 +123,9 @@ window.addEventListener("pointerdown", (event) => {
     return;
   }
   if (!elfMenu?.contains(event.target) && !elf?.contains(event.target) && !chatPanel?.contains(event.target)) {
+    if (choicePanel?.contains(event.target)) {
+      return;
+    }
     hideElfMenu();
   }
 });
@@ -215,6 +221,16 @@ function hideChatPanel() {
   chatPanel.setAttribute("aria-hidden", "true");
 }
 
+function hideChoicePanel() {
+  if (!choicePanel) {
+    return;
+  }
+  choicePanel.classList.remove("open");
+  choicePanel.setAttribute("aria-hidden", "true");
+  choicePanel.onsubmit = null;
+  choicePanel.replaceChildren();
+}
+
 function endPointerInteraction() {
   dragStart = null;
   isDragging = false;
@@ -284,8 +300,6 @@ async function streamElfChat(message: string) {
   clearBubbleSequence();
   showChatBubble({ text: "嗯，我听着。", emoji: "thinking" }, 2600);
 
-  let answer = "";
-  let graphBubbles: ChatBubblePart[] = [];
   try {
     const response = await fetch(ELF_CHAT_STREAM_URL, {
       body: JSON.stringify({ message }),
@@ -299,56 +313,279 @@ async function streamElfChat(message: string) {
       throw new Error(`Elf chat failed with ${response.status}`);
     }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder("utf-8");
-    let buffer = "";
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-      buffer += decoder.decode(value, { stream: true });
-      const rawEvents = buffer.split("\n\n");
-      buffer = rawEvents.pop() ?? "";
-      for (const rawEvent of rawEvents) {
-        const event = parseSseEvent(rawEvent);
-        if (!event) {
-          continue;
-        }
-        if (event.event === "answer_delta") {
-          answer += String(event.data.content ?? "");
-        }
-        if (event.event === "done" && Array.isArray(event.data.bubbles)) {
-          graphBubbles = normalizeGraphBubbles(event.data.bubbles);
-        }
-        if (event.event === "error") {
-          throw new Error(String(event.data.message ?? "Elf chat error"));
-        }
-      }
-    }
-
-    if (buffer.trim()) {
-      const event = parseSseEvent(buffer);
-      if (event?.event === "answer_delta") {
-        answer += String(event.data.content ?? "");
-      }
-      if (event?.event === "done" && Array.isArray(event.data.bubbles)) {
-        graphBubbles = normalizeGraphBubbles(event.data.bubbles);
-      }
-    }
+    const result = await readElfChatStream(response);
 
     // 回答流结束后稍等片刻再切气泡，避免用户看到气泡在 token 级别闪烁。
     window.setTimeout(() => {
-      playBubbleSequence(graphBubbles.length > 0 ? graphBubbles : splitAnswerIntoBubbleParts(answer));
+      playBubbleSequence(result.bubbles.length > 0 ? result.bubbles : splitAnswerIntoBubbleParts(result.answer));
       isElfChatRunning = false;
       setChatInputEnabled(true);
+      hideChoicePanel();
     }, 650);
   } catch (error) {
     isElfChatRunning = false;
     setChatInputEnabled(true);
     throw error;
   }
+}
+
+async function readElfChatStream(response: Response): Promise<ElfChatStreamResult> {
+  let answer = "";
+  let bubbles: ChatBubblePart[] = [];
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error("Elf chat stream is empty");
+  }
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+
+  async function handleEvent(event: SseEvent) {
+    if (event.event === "answer_delta") {
+      answer += String(event.data.content ?? "");
+    }
+    if (event.event === "done" && Array.isArray(event.data.bubbles)) {
+      bubbles = normalizeGraphBubbles(event.data.bubbles);
+    }
+    if (event.event === "interrupt") {
+      return resumeElfChoice(event.data as unknown as ElfInterruptEvent);
+    }
+    if (event.event === "error") {
+      throw new Error(String(event.data.message ?? "Elf chat error"));
+    }
+    return null;
+  }
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const rawEvents = buffer.split("\n\n");
+    buffer = rawEvents.pop() ?? "";
+    for (const rawEvent of rawEvents) {
+      const event = parseSseEvent(rawEvent);
+      if (!event) {
+        continue;
+      }
+      const resumed = await handleEvent(event);
+      if (resumed) {
+        return resumed;
+      }
+    }
+  }
+
+  if (buffer.trim()) {
+    const event = parseSseEvent(buffer);
+    if (event) {
+      const resumed = await handleEvent(event);
+      if (resumed) {
+        return resumed;
+      }
+    }
+  }
+  return { answer, bubbles };
+}
+
+async function resumeElfChoice(event: ElfInterruptEvent): Promise<ElfChatStreamResult> {
+  const request = normalizeUserInputRequest(event.request);
+  showChatBubble({ text: request.question, emoji: "curious" }, 4200);
+  const answer = await showChoicePanel(request);
+  showChatBubble({ text: "收到，我继续处理。", emoji: "working_focus" }, 2200);
+  const response = await fetch(ELF_CHAT_RESUME_STREAM_URL(Number(event.turn_id || 0)), {
+    body: JSON.stringify(answer),
+    headers: {
+      "Content-Type": "application/json",
+    },
+    method: "POST",
+  });
+  if (!response.ok || !response.body) {
+    throw new Error(`Elf chat resume failed with ${response.status}`);
+  }
+  return readElfChatStream(response);
+}
+
+function normalizeUserInputRequest(raw: unknown): UserInputRequest {
+  const payload = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const options = Array.isArray(payload.options)
+    ? payload.options
+        .map((option, index): UserInputOption | null => {
+          if (!option || typeof option !== "object") {
+            return null;
+          }
+          const item = option as Record<string, unknown>;
+          const label = String(item.label ?? item.value ?? "").trim();
+          const value = String(item.value ?? label).trim();
+          if (!label && !value) {
+            return null;
+          }
+          return {
+            id: String(item.id ?? `option-${index + 1}`),
+            label: label || value,
+            value: value || label,
+            description: String(item.description ?? ""),
+            recommended: Boolean(item.recommended ?? index === 0),
+          };
+        })
+        .filter((option): option is UserInputOption => option !== null)
+    : [];
+  return {
+    kind: "user_input",
+    request_id: String(payload.request_id ?? ""),
+    question: String(payload.question ?? "请补充一个具体选择。"),
+    selection_mode: payload.selection_mode === "multiple" ? "multiple" : "single",
+    options,
+    allow_other: payload.allow_other !== false,
+    other_option: {
+      id: "other",
+      label: "Other",
+      value: "",
+      description: "Custom answer",
+      placeholder:
+        typeof payload.other_option === "object" && payload.other_option !== null
+          ? String((payload.other_option as Record<string, unknown>).placeholder ?? "Type another answer")
+          : "Type another answer",
+    },
+  };
+}
+
+function showChoicePanel(request: UserInputRequest): Promise<UserInputAnswer> {
+  return new Promise((resolve) => {
+    if (!choicePanel) {
+      resolve({
+        request_id: request.request_id,
+        selected_option_id: "",
+        selected_option_ids: [],
+        answer: "",
+      });
+      return;
+    }
+
+    hideElfMenu();
+    hideChatPanel();
+    choicePanel.replaceChildren();
+    const mode = request.selection_mode === "multiple" ? "multiple" : "single";
+    const selectedIds = new Set<string>();
+    if (request.options[0]?.id) {
+      selectedIds.add(request.options[0].id);
+    }
+
+    const title = document.createElement("div");
+    title.className = "choice-panel-title";
+    const question = document.createElement("strong");
+    question.textContent = request.question;
+    const hint = document.createElement("span");
+    hint.textContent = mode === "multiple" ? "Multi-select" : "Single choice";
+    title.append(question, hint);
+    choicePanel.append(title);
+
+    const list = document.createElement("div");
+    list.className = "choice-options";
+    choicePanel.append(list);
+
+    const syncInputs = () => {
+      list.querySelectorAll<HTMLInputElement>("input").forEach((input) => {
+        input.checked = selectedIds.has(input.value);
+        input.closest("label")?.classList.toggle("selected", input.checked);
+      });
+    };
+
+    function setSelected(id: string) {
+      if (mode === "single") {
+        selectedIds.clear();
+        selectedIds.add(id);
+      } else if (selectedIds.has(id)) {
+        selectedIds.delete(id);
+      } else {
+        selectedIds.add(id);
+      }
+      syncInputs();
+    }
+
+    for (const option of request.options) {
+      const label = document.createElement("label");
+      label.className = "choice-option";
+      const input = document.createElement("input");
+      input.type = mode === "multiple" ? "checkbox" : "radio";
+      input.name = `choice-${request.request_id}`;
+      input.value = option.id;
+      input.addEventListener("change", () => setSelected(option.id));
+      const body = document.createElement("span");
+      const main = document.createElement("span");
+      main.textContent = option.label;
+      if (option.recommended) {
+        const badge = document.createElement("em");
+        badge.textContent = "Recommended";
+        main.append(badge);
+      }
+      body.append(main);
+      if (option.description) {
+        const description = document.createElement("small");
+        description.textContent = option.description;
+        body.append(description);
+      }
+      label.append(input, body);
+      list.append(label);
+    }
+
+    let otherTextArea: HTMLTextAreaElement | null = null;
+    if (request.allow_other) {
+      const other = document.createElement("label");
+      other.className = "choice-option choice-option-other";
+      const input = document.createElement("input");
+      input.type = mode === "multiple" ? "checkbox" : "radio";
+      input.name = `choice-${request.request_id}`;
+      input.value = "other";
+      input.addEventListener("change", () => setSelected("other"));
+      const body = document.createElement("span");
+      const main = document.createElement("span");
+      main.textContent = request.other_option.label || "Other";
+      otherTextArea = document.createElement("textarea");
+      otherTextArea.placeholder = request.other_option.placeholder || "Type another answer";
+      otherTextArea.rows = 2;
+      otherTextArea.addEventListener("focus", () => {
+        if (!selectedIds.has("other")) {
+          setSelected("other");
+        }
+      });
+      body.append(main, otherTextArea);
+      other.append(input, body);
+      list.append(other);
+    }
+
+    const submit = document.createElement("button");
+    submit.type = "submit";
+    submit.className = "choice-submit";
+    submit.textContent = "Submit";
+    choicePanel.append(submit);
+    choicePanel.classList.add("open");
+    choicePanel.setAttribute("aria-hidden", "false");
+    syncInputs();
+
+    choicePanel.onsubmit = (event) => {
+      event.preventDefault();
+      const ids = Array.from(selectedIds);
+      const otherText = otherTextArea?.value.trim() ?? "";
+      if (otherText && !ids.includes("other")) {
+        ids.push("other");
+      }
+      const values = request.options
+        .filter((option) => ids.includes(option.id))
+        .map((option) => option.value || option.label)
+        .filter(Boolean);
+      if (otherText) {
+        values.push(otherText);
+      }
+      hideChoicePanel();
+      resolve({
+        request_id: request.request_id,
+        selected_option_id: ids[0] ?? "",
+        selected_option_ids: ids,
+        answer: values.join("\n"),
+        other_text: otherText,
+      });
+    };
+  });
 }
 
 function normalizeGraphBubbles(rawBubbles: unknown[]): ChatBubblePart[] {
@@ -773,6 +1010,42 @@ interface ElfEvent {
 interface SseEvent {
   event: string;
   data: Record<string, unknown>;
+}
+
+interface ElfChatStreamResult {
+  answer: string;
+  bubbles: ChatBubblePart[];
+}
+
+interface ElfInterruptEvent {
+  turn_id?: number | string;
+  request?: unknown;
+}
+
+interface UserInputOption {
+  id: string;
+  label: string;
+  value: string;
+  description?: string;
+  recommended?: boolean;
+}
+
+interface UserInputRequest {
+  kind: "user_input";
+  request_id: string;
+  question: string;
+  selection_mode: "single" | "multiple";
+  options: UserInputOption[];
+  allow_other: boolean;
+  other_option: UserInputOption & { placeholder?: string };
+}
+
+interface UserInputAnswer {
+  request_id: string;
+  selected_option_id: string;
+  selected_option_ids: string[];
+  answer: string;
+  other_text?: string;
 }
 
 type ElfBubbleEmoji =

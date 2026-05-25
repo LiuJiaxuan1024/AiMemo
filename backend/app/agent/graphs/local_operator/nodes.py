@@ -522,7 +522,7 @@ def _expand_planned_actions(action: LocalOperatorAction) -> list[LocalOperatorAc
     if action.get("tool_name") != "write_file":
         return [action]
     arguments = dict(action.get("arguments") or {})
-    if not arguments.get("overwrite"):
+    if not arguments.get("overwrite") or arguments.get("confirmed_overwrite_without_read"):
         return [action]
     path = str(arguments.get("path") or ".")
     return [
@@ -543,6 +543,7 @@ def _build_local_operator_planner_prompt(user_input: str) -> str:
         "能力说明：\n"
         "- 你可以规划读取本机文件系统中的文件或目录，包括用户给出的绝对路径。\n"
         "- 你可以规划写入授权 workspace 内的普通文本文件；写入已有文件时必须设置 overwrite=true，工具会要求先 read_file 完整读取该文件。\n"
+        "- 如果已有文件太大导致 read_file 无法单次完整读取，不能自行绕过读前写保护；只有工具结果已经证明默认完整读取卡住了任务，且用户已通过结构化升级确认授权未完整读取也直接覆盖时，才可设置 confirmed_overwrite_without_read=true。\n"
         "- write_file 的 content 必须是用户明确给出的正文，或用户明确要求你生成且你已经能在本节点中完整生成的正文。\n"
         "- exec_command 只用于短时终端操作，例如查看版本、运行测试、git status；不要用它读写文件。\n"
         "- 不要把“用于写...”“准备写...”“创建一个...文件”理解成可以写入模板；禁止写入“此处填写”“待补充”“TODO”等占位内容。\n"
@@ -556,7 +557,7 @@ def _build_local_operator_planner_prompt(user_input: str) -> str:
         "- search_files(root, pattern, max_results, include_hidden): 按文件名搜索。\n"
         "- search_text(root, query, include_glob, max_results, context_lines): 搜索文本内容。\n"
         "- get_file_info(path): 查看文件或目录是否存在、大小、修改时间。\n\n"
-        "- write_file(path, content, overwrite): 创建或整文件写入文本文件。优先用于新建文件或完整重写；局部修改暂不规划。\n\n"
+        "- write_file(path, content, overwrite, confirmed_overwrite_without_read): 创建或整文件写入文本文件。优先用于新建文件或完整重写；局部修改暂不规划。\n\n"
         "- exec_command(command, cwd, timeout_ms, max_output_bytes): 执行短时、非交互终端命令。\n\n"
         "判断原则：\n"
         "- 用户询问本机/电脑/工作区里是否存在某项目、仓库、目录或文件，需要本地读取。\n"
@@ -633,6 +634,7 @@ def _normalize_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> dict
             "path": _clean_tool_path(str(arguments.get("path") or ".")),
             "content": str(arguments.get("content") or ""),
             "overwrite": bool(arguments.get("overwrite", False)),
+            "confirmed_overwrite_without_read": bool(arguments.get("confirmed_overwrite_without_read", False)),
         }
     if tool_name == "exec_command":
         return {

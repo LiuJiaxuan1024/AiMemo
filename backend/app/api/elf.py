@@ -2,8 +2,9 @@ from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
 
 from app.schemas.chat import ChatRequest
+from app.schemas.chat import ChatResumeRequest
 from app.schemas.elf import ElfEventCreate, ElfEventListRead, ElfEventRead
-from app.services.elf_chat_service import stream_elf_chat_events
+from app.services.elf_chat_service import stream_elf_chat_events, stream_elf_chat_resume_events
 from app.services.elf_event_service import elf_event_service
 
 
@@ -43,6 +44,15 @@ def stream_elf_chat_api(payload: ChatRequest) -> StreamingResponse:
 
     return StreamingResponse(
         stream_elf_chat_events(message=payload.message),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/chat/turns/{turn_id}/resume/stream")
+def resume_elf_chat_api(turn_id: int, payload: ChatResumeRequest) -> StreamingResponse:
+    return StreamingResponse(
+        stream_elf_chat_resume_events(turn_id=turn_id, resume_payload=payload.model_dump(mode="json")),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

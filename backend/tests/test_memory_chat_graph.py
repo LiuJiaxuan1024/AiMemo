@@ -15,6 +15,7 @@ from app.agent.graphs.memory_chat.nodes import route_after_agent
 from app.agent.graphs.memory_chat.nodes import _build_react_agent_system_prompt
 from app.agent.graphs.memory_chat.nodes import _build_react_agent_messages
 from app.agent.graphs.memory_chat.nodes import _extract_ai_tool_calls
+from app.agent.graphs.memory_chat.nodes import _run_agent_tool_action
 from app.agent.graphs.memory_chat.nodes import build_load_turn_state_node
 from app.agent.graphs.memory_chat.nodes import default_retrieval_planner
 from app.agent.graphs.memory_chat.nodes import _build_model_messages
@@ -669,6 +670,101 @@ def test_tools_node_resets_consecutive_failed_on_success(session_factory, monkey
     )
 
     assert update["consecutive_failed_tools"] == 0
+
+
+def test_tools_node_preserves_request_user_input_arguments(session_factory, monkeypatch):
+    """request_user_input 不是 Local Operator 工具，参数不能被通用 normalizer 清空。"""
+
+    captured_actions: list[dict] = []
+
+    def fake_run(state, *, action, session_factory, allowed_tool_names, step_index=None):  # noqa: ARG001
+        captured_actions.append(action)
+        obs = {
+            "tool_call_id": action["tool_call_id"],
+            "tool_name": action["tool_name"],
+            "arguments": action.get("arguments") or {},
+            "ok": True,
+            "data": {},
+            "error_code": "",
+            "message": "用户选择：/home/wujie/test.txt",
+            "blocked": False,
+        }
+        return {
+            "tool_observations": [*state.get("tool_observations", []), obs],
+            "turn_messages": list(state.get("turn_messages") or []),
+            "thought_events": list(state.get("thought_events") or []),
+        }
+
+    monkeypatch.setattr(
+        "app.agent.graphs.memory_chat.nodes._run_agent_tool_action",
+        fake_run,
+    )
+
+    update = build_tools_node(session_factory)(
+        {
+            "agent_decision": {
+                "type": "tool_call",
+                "tool_calls": [
+                    {
+                        "id": "choice-1",
+                        "name": "request_user_input",
+                        "args": {
+                            "question": "test.txt 应该创建在哪个目录下？",
+                            "options": [
+                                {
+                                    "label": "Home 目录",
+                                    "value": "/home/wujie/test.txt",
+                                    "description": "不污染 AiMemo 仓库。",
+                                },
+                                {
+                                    "label": "AiMemo 临时目录",
+                                    "value": "/home/wujie/project/AiMemo/data/test.txt",
+                                    "description": "放在项目运行数据目录。",
+                                },
+                            ],
+                            "allow_other": True,
+                        },
+                    }
+                ],
+            },
+            "tool_observations": [],
+            "turn_messages": [],
+            "thought_events": [],
+            "prompt_context": "",
+        }
+    )
+
+    assert captured_actions[0]["arguments"]["question"] == "test.txt 应该创建在哪个目录下？"
+    assert len(captured_actions[0]["arguments"]["options"]) == 2
+    assert captured_actions[0]["arguments"]["options"][0]["label"] == "Home 目录"
+    assert update["consecutive_failed_tools"] == 0
+
+
+def test_request_user_input_rejects_empty_question_instead_of_interrupting(session_factory):
+    """空参数不能弹出“需要你补充一个选择/继续”的兜底选择框。"""
+
+    update = _run_agent_tool_action(
+        {
+            "tool_observations": [],
+            "turn_messages": [],
+            "thought_events": [],
+            "tool_budget": 3,
+        },
+        action={
+            "tool_call_id": "choice-empty",
+            "tool_name": "request_user_input",
+            "arguments": {},
+        },
+        session_factory=session_factory,
+        allowed_tool_names={"request_user_input"},
+        step_index=1,
+    )
+
+    observation = update["tool_observations"][0]
+    assert observation["ok"] is False
+    assert observation["error_code"] == "INVALID_ARGUMENT"
+    assert "缺少具体问题" in observation["message"]
+    assert "需要你补充一个选择" not in observation["message"]
 
 
 def test_tools_node_executes_consecutive_reads_in_parallel(session_factory, monkeypatch):

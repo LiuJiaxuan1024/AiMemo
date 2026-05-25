@@ -231,6 +231,49 @@ def test_write_file_requires_full_read_before_overwrite(tmp_path: Path):
     assert target.read_text(encoding="utf-8") == "old\ncontent"
 
 
+def test_write_file_allows_confirmed_overwrite_after_partial_read(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "hello.txt"
+    target.write_text("old\ncontent", encoding="utf-8")
+    service = LocalFilesystemService(LocalOperatorPolicy.from_roots([str(workspace)]))
+
+    partial_read = service.read_file("hello.txt", start_line=1, end_line=1)
+    result = service.write_file(
+        "hello.txt",
+        content="new",
+        overwrite=True,
+        confirmed_overwrite_without_read=True,
+    )
+
+    assert partial_read.ok is True
+    assert partial_read.data["full_view"] is False
+    assert result.ok is True
+    assert result.data["type"] == "update"
+    assert result.data["bypassed_read_before_write"] is True
+    assert target.read_text(encoding="utf-8") == "new"
+
+
+def test_write_file_keeps_sensitive_block_with_confirmed_overwrite(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / ".env"
+    target.write_text("SECRET=old", encoding="utf-8")
+    service = LocalFilesystemService(LocalOperatorPolicy.from_roots([str(workspace)]))
+
+    result = service.write_file(
+        ".env",
+        content="SECRET=new",
+        overwrite=True,
+        confirmed_overwrite_without_read=True,
+    )
+
+    assert result.ok is False
+    assert result.error_code == "SENSITIVE_FILE_BLOCKED"
+    assert result.blocked is True
+    assert target.read_text(encoding="utf-8") == "SECRET=old"
+
+
 def test_write_file_rejects_changed_file_after_read(tmp_path: Path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

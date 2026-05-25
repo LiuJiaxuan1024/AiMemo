@@ -8,6 +8,12 @@ class FakeTokenChunk:
     content: object
 
 
+@dataclass
+class FakeInterrupt:
+    id: str
+    value: object
+
+
 def test_maps_updates_to_node_events() -> None:
     events = map_langgraph_stream_chunk(
         "updates",
@@ -93,3 +99,35 @@ def test_extracts_text_from_list_content() -> None:
 
     assert events[0]["event"] == "answer_delta"
     assert events[0]["content"] == "你好"
+
+
+def test_maps_langgraph_interrupt_to_interrupt_event() -> None:
+    events = map_langgraph_stream_chunk(
+        "updates",
+        {
+            "__interrupt__": (
+                FakeInterrupt(
+                    id="interrupt-1",
+                    value={
+                        "kind": "user_input",
+                        "question": "放在哪里？",
+                        "options": [{"id": "home", "label": "Home", "value": "/home/me"}],
+                    },
+                ),
+            )
+        },
+    )
+
+    assert events == [
+        {
+            "event": "interrupt",
+            "interrupt": {
+                "id": "interrupt-1",
+                "value": {
+                    "kind": "user_input",
+                    "question": "放在哪里？",
+                    "options": [{"id": "home", "label": "Home", "value": "/home/me"}],
+                },
+            },
+        }
+    ]
