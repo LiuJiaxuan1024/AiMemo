@@ -173,6 +173,20 @@ export function applyChatStreamEvent(conversationId: number, event: ChatStreamEv
     streamingStore.patch(conversationId, { nodeStatuses: event.data.node_statuses });
     return;
   }
+  if (event.event === "resume") {
+    streamingStore.update(conversationId, (current) => ({
+      ...current,
+      nodeStatuses: event.data.node_statuses,
+      isStreaming: true,
+      streamingTurnId: event.data.turn_id,
+      messages: current.messages.map((message) =>
+        message.turn_id === event.data.turn_id || message.isStreaming
+          ? { ...message, isStreaming: true, status: "streaming", pending_interrupt: null }
+          : message,
+      ),
+    }));
+    return;
+  }
   if (event.event === "answer_delta") {
     const stepIndex = typeof event.data.step_index === "number" ? event.data.step_index : 0;
     streamingStore.update(conversationId, (current) => {
@@ -225,6 +239,28 @@ export function applyChatStreamEvent(conversationId: number, event: ChatStreamEv
     });
     return;
   }
+  if (event.event === "interrupt") {
+    streamingStore.update(conversationId, (current) => {
+      const messages = current.messages.map((message) =>
+        message.isStreaming && message.role === "assistant"
+          ? {
+              ...message,
+              isStreaming: false,
+              status: "interrupted",
+              pending_interrupt: event.data.request,
+            }
+          : message,
+      );
+      return {
+        ...current,
+        messages,
+        nodeStatuses: event.data.node_statuses,
+        isStreaming: false,
+        streamingTurnId: event.data.turn_id,
+      };
+    });
+    return;
+  }
   if (event.event === "done") {
     const { user_message, assistant_message } = event.data.response;
     streamingStore.update(conversationId, (current) => {
@@ -243,7 +279,13 @@ export function applyChatStreamEvent(conversationId: number, event: ChatStreamEv
         )
         .concat([
           { ...user_message, conversation_id: conversationId },
-          { ...assistant_message, conversation_id: conversationId, thoughts, segments },
+          {
+            ...assistant_message,
+            conversation_id: conversationId,
+            thoughts,
+            segments,
+            pending_interrupt: null,
+          },
         ]);
       return {
         ...current,

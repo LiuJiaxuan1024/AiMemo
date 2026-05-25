@@ -7,6 +7,7 @@ import {
   listActiveTurns,
   listConversations,
   listMessages,
+  resumeInterruptedTurn,
   streamChat,
   streamTurnResume,
 } from "./chatApi";
@@ -21,7 +22,13 @@ import {
   emitChatNodeElfEvent,
 } from "./chatElfEvents";
 import { applyChatStreamEvent, streamingStore, useConversationView } from "./streamingStore";
-import type { ChatStreamEvent, ChatTurnGraph, Conversation, DraftAssistantMessage } from "./types";
+import type {
+  ChatStreamEvent,
+  ChatTurnGraph,
+  Conversation,
+  DraftAssistantMessage,
+  UserInputAnswer,
+} from "./types";
 
 const ChatGraphPanel = lazy(() =>
   import("./ChatGraphPanel").then((module) => ({ default: module.ChatGraphPanel })),
@@ -76,6 +83,8 @@ export function ChatWindow() {
         emitChatDoneElfEvent(event.data.turn_id);
       } else if (event.event === "error") {
         emitChatErrorElfEvent(event.data.message, event.data.turn_id);
+      } else if (event.event === "interrupt") {
+        emitChatNodeElfEvent("interrupt");
       }
     },
     [],
@@ -142,6 +151,28 @@ export function ChatWindow() {
     try {
       const { items } = await listActiveTurns(conversationId);
       for (const item of items) {
+        if (item.status === "interrupted") {
+          streamingStore.patch(conversationId, {
+            isStreaming: false,
+            streamingTurnId: item.turn_id,
+            nodeStatuses: item.node_statuses,
+          });
+          if (item.pending_interrupt) {
+            streamingStore.updateMessages(conversationId, (messages) =>
+              messages.map((message) =>
+                message.turn_id === item.turn_id || message.id === item.assistant_message?.id
+                  ? {
+                      ...message,
+                      status: "interrupted",
+                      isStreaming: false,
+                      pending_interrupt: item.pending_interrupt ?? null,
+                    }
+                  : message,
+              ),
+            );
+          }
+          continue;
+        }
         const slot = streamingStore.peek(conversationId);
         if (slot?.streamingTurnId === item.turn_id && slot.abortController) {
           continue;
@@ -351,6 +382,55 @@ export function ChatWindow() {
     }
   }
 
+  async function handleUserInputAnswer(
+    message: DraftAssistantMessage,
+    answer: UserInputAnswer,
+  ) {
+    if (!activeConversationId || !message.turn_id || isStreaming) {
+      return;
+    }
+    const conversationId = activeConversationId;
+    const controller = new AbortController();
+    streamingStore.update(conversationId, (current) => ({
+      ...current,
+      error: "",
+      isStreaming: true,
+      streamingTurnId: message.turn_id ?? null,
+      abortController: controller,
+      messages: current.messages.map((item) =>
+        item.id === message.id
+          ? { ...item, isStreaming: true, status: "streaming", pending_interrupt: null }
+          : item,
+      ),
+    }));
+    try {
+      await resumeInterruptedTurn(
+        conversationId,
+        message.turn_id,
+        answer,
+        (streamEvent) => dispatchStreamEvent(conversationId, streamEvent),
+        { signal: controller.signal },
+      );
+      await refreshConversations();
+    } catch (currentError) {
+      if (!controller.signal.aborted) {
+        setError(
+          conversationId,
+          currentError instanceof Error ? currentError.message : "继续执行失败",
+        );
+      }
+    } finally {
+      const latest = streamingStore.peek(conversationId);
+      if (latest?.abortController === controller) {
+        streamingStore.patch(conversationId, { abortController: null });
+      }
+      if (latest?.isStreaming) {
+        streamingStore.patch(conversationId, { isStreaming: false });
+      }
+      scheduleConversationRefresh();
+    }
+  }
+
   function scheduleConversationRefresh() {
     // 后端自动命名 job 由 worker 每 2 秒拉取，给它 ~6 秒窗口刷新两次列表，
     // 让侧栏 title 从「新对话」过渡到 LLM 生成的短标题。
@@ -412,6 +492,7 @@ export function ChatWindow() {
           endRef={messagesEndRef}
           messages={messages}
           onOpenGraph={handleOpenGraph}
+          onSubmitUserInput={handleUserInputAnswer}
           thoughts={thoughts}
         />
 

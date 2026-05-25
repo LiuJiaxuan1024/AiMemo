@@ -12,6 +12,7 @@ from app.agent.graphs.memory_chat.graph import run_memory_chat_graph, stream_mem
 from app.core.config import settings
 from app.core.database import session_scope
 from app.models.chat_message import ChatMessage
+from app.models.chat_turn import ChatTurn
 from app.models.conversation import Conversation
 from app.models.note import utc_now
 from app.rag.chunking.tokenizer import count_tokens
@@ -25,7 +26,9 @@ from app.services.chat_turn_service import (
     complete_chat_turn,
     create_running_chat_turn,
     fail_chat_turn,
+    interrupt_chat_turn,
     initial_node_statuses,
+    mark_chat_turn_resuming,
     update_chat_turn_progress,
 )
 from app.services.conversation_summary_service import enqueue_conversation_summary_job_if_needed
@@ -230,12 +233,95 @@ def stream_conversation_chat_events(
             "node_statuses": node_statuses,
             "debug_payload": debug_payload,
             "started_at": started_at,
+            "resume_payload": None,
         },
         daemon=True,
         name=f"chat-turn-{turn_id}",
     )
     worker.start()
 
+    yield from buffer.subscribe(from_index=0)
+
+
+def stream_conversation_chat_resume_events(
+    conversation_id: int,
+    turn_id: int,
+    *,
+    resume_payload: dict,
+    session_factory: SessionFactory = session_scope,
+    checkpoint_path: str | None = None,
+    emit_status_events: bool = True,
+    answer_mode: str = "text",
+):
+    """恢复一条因 request_user_input 中断的聊天 turn。"""
+
+    started_at = perf_counter()
+    with session_factory() as session:
+        turn = session.get(ChatTurn, turn_id)
+        if turn is None or turn.conversation_id != conversation_id:
+            from fastapi import HTTPException, status
+
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat turn not found")
+        if turn.status != "interrupted":
+            from fastapi import HTTPException, status
+
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Chat turn is not interrupted")
+        user_message = _get_message_or_error(session, int(turn.user_message_id or 0))
+        assistant_message = _get_message_or_error(session, int(turn.assistant_message_id or 0))
+        node_statuses = _decode_json_object(turn.node_statuses)
+        node_statuses["tools"] = "running"
+        debug_payload = _decode_json_any(turn.debug_payload, fallback=_create_debug_payload())
+        if not isinstance(debug_payload, dict):
+            debug_payload = _create_debug_payload()
+        _mark_debug_event(debug_payload, started_at, "turn_resumed")
+        mark_chat_turn_resuming(
+            session,
+            turn_id,
+            node_statuses=node_statuses,
+            debug_payload=debug_payload,
+        )
+        _update_streaming_assistant_message(
+            session,
+            assistant_message_id=assistant_message.id or 0,
+            content=assistant_message.content,
+            status="streaming",
+        )
+        user_message_id = user_message.id or 0
+        assistant_message_id = assistant_message.id or 0
+        original_user_content = user_message.content
+
+    buffer = chat_turn_buffer.create_fresh(turn_id)
+    buffer.append(
+        _sse(
+            "resume",
+            {
+                "turn_id": turn_id,
+                "node_statuses": node_statuses,
+            },
+        )
+    )
+    worker = threading.Thread(
+        target=_run_turn_to_buffer,
+        kwargs={
+            "buffer": buffer,
+            "conversation_id": conversation_id,
+            "turn_id": turn_id,
+            "message": original_user_content,
+            "session_factory": session_factory,
+            "checkpoint_path": checkpoint_path or settings.langgraph_checkpoint_path,
+            "emit_status_events": emit_status_events,
+            "answer_mode": answer_mode,
+            "user_message_id": user_message_id,
+            "assistant_message_id": assistant_message_id,
+            "node_statuses": node_statuses,
+            "debug_payload": debug_payload,
+            "started_at": started_at,
+            "resume_payload": resume_payload,
+        },
+        daemon=True,
+        name=f"chat-turn-resume-{turn_id}",
+    )
+    worker.start()
     yield from buffer.subscribe(from_index=0)
 
 
@@ -275,6 +361,7 @@ def _run_turn_to_buffer(
     node_statuses: dict[str, str],
     debug_payload: dict,
     started_at: float,
+    resume_payload: dict | None = None,
 ) -> None:
     """Graph worker：在后台线程里跑完一轮 memory_chat_graph，事件全部推进 buffer。
 
@@ -284,6 +371,14 @@ def _run_turn_to_buffer(
 
     final_state = None
     assistant_content = ""
+    if resume_payload is not None:
+        try:
+            with session_factory() as session:
+                existing_assistant = session.get(ChatMessage, assistant_message_id)
+                if existing_assistant is not None:
+                    assistant_content = existing_assistant.content or ""
+        except Exception:
+            logger.exception("failed to load existing assistant content for resumed turn %s", turn_id)
     # 这一轮里"当前 ReAct 步号"——agent 节点把 step_index 写到自己的 state_update 里，
     # 我们用它给随后的 answer_delta 打标，让前端把同一段思考-工具-文本聚到一段 segment。
     current_step_index = 0
@@ -299,6 +394,7 @@ def _run_turn_to_buffer(
             user_message_id=user_message_id,
             assistant_message_id=assistant_message_id,
             answer_mode=answer_mode,
+            resume_payload=resume_payload,
         ):
             if event["event"] == "node":
                 node_name = str(event["node"])
@@ -455,6 +551,57 @@ def _run_turn_to_buffer(
                 # 外置精灵气泡 JSON token 不直接发给普通 Web 聊天。
                 # 专用 /api/elf/chat/stream 会使用 answer_mode=elf_bubble 并在 done 中消费最终 bubbles。
                 continue
+            elif event["event"] == "interrupt":
+                final_state = event.get("state") if isinstance(event.get("state"), dict) else {}
+                checkpoint_id = final_state.get("graph_checkpoint_id")
+                pending_interrupt = _normalize_interrupt_payload(event.get("interrupt"))
+                for node_name, node_status in list(node_statuses.items()):
+                    if node_status == "running":
+                        node_statuses[node_name] = "interrupted"
+                    elif node_status == "pending":
+                        node_statuses[node_name] = "skipped"
+                node_statuses["tools"] = "interrupted"
+                _mark_debug_event(debug_payload, started_at, "turn_interrupted")
+                debug_payload["pending_interrupt"] = pending_interrupt
+                if emit_status_events:
+                    emit_elf_event(
+                        ElfEventCreate(
+                            source="chat",
+                            mood="thinking",
+                            motion="thinking",
+                            message="我需要你做个选择再继续。",
+                            priority=45,
+                            ttl_ms=4200,
+                            dedupe_key=f"chat:{turn_id}:interrupted",
+                            metadata={"conversation_id": conversation_id, "turn_id": turn_id},
+                        )
+                    )
+                with session_factory() as session:
+                    _update_streaming_assistant_message(
+                        session,
+                        assistant_message_id=assistant_message_id,
+                        content=assistant_content,
+                        status="interrupted",
+                    )
+                    interrupt_chat_turn(
+                        session,
+                        turn_id,
+                        checkpoint_id=str(checkpoint_id) if checkpoint_id else None,
+                        node_statuses=node_statuses,
+                        pending_interrupt=pending_interrupt,
+                        debug_payload=debug_payload,
+                    )
+                buffer.append(
+                    _sse(
+                        "interrupt",
+                        {
+                            "turn_id": turn_id,
+                            "request": pending_interrupt,
+                            "node_statuses": node_statuses,
+                        },
+                    )
+                )
+                return
             elif event["event"] == "done":
                 final_state = event["state"]
                 _mark_debug_event(debug_payload, started_at, "graph_done")
@@ -627,6 +774,60 @@ def _sse(event: str, data: dict) -> str:
     """把事件编码为浏览器 EventSource/fetch 可读取的 SSE 文本。"""
 
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _normalize_interrupt_payload(raw_interrupt) -> dict:
+    interrupt = raw_interrupt if isinstance(raw_interrupt, dict) else {}
+    value = interrupt.get("value") if isinstance(interrupt.get("value"), dict) else {}
+    request = dict(value)
+    request.setdefault("kind", "user_input")
+    request.setdefault("request_id", interrupt.get("id") or "")
+    request["interrupt_id"] = str(interrupt.get("id") or "")
+    request["question"] = str(request.get("question") or "需要你补充一个选择。")
+    selection_mode = str(request.get("selection_mode") or "single")
+    request["selection_mode"] = selection_mode if selection_mode in {"single", "multiple"} else "single"
+    raw_options = request.get("options")
+    options = raw_options if isinstance(raw_options, list) else []
+    normalized_options = []
+    for index, option in enumerate(options):
+        if not isinstance(option, dict):
+            continue
+        label = str(option.get("label") or option.get("value") or "").strip()
+        value_text = str(option.get("value") or label).strip()
+        if not label and not value_text:
+            continue
+        normalized_options.append(
+            {
+                "id": str(option.get("id") or f"option-{index + 1}"),
+                "label": label or value_text,
+                "value": value_text or label,
+                "description": str(option.get("description") or "").strip(),
+                "recommended": bool(option.get("recommended", index == 0)),
+            }
+        )
+    request["options"] = normalized_options
+    request["allow_other"] = bool(request.get("allow_other", True))
+    other = request.get("other_option") if isinstance(request.get("other_option"), dict) else {}
+    request["other_option"] = {
+        "id": "other",
+        "label": str(other.get("label") or "其他"),
+        "value": "",
+        "description": str(other.get("description") or "自己输入一个答案。"),
+        "placeholder": str(other.get("placeholder") or "请输入其他答案"),
+    }
+    return request
+
+
+def _decode_json_object(value: str) -> dict[str, str]:
+    decoded = _decode_json_any(value, fallback={})
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _decode_json_any(value: str, *, fallback):
+    try:
+        return json.loads(value or "")
+    except json.JSONDecodeError:
+        return fallback
 
 
 def _build_tool_invocation_payload(observation: dict, *, step_index: int) -> dict:

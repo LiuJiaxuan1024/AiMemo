@@ -265,6 +265,7 @@ class LocalFilesystemService:
         *,
         content: str,
         overwrite: bool = False,
+        confirmed_overwrite_without_read: bool = False,
         known_existing_paths: set[str] | None = None,
     ) -> ToolResult:
         """整文件写入或创建文本文件。
@@ -273,6 +274,7 @@ class LocalFilesystemService:
           path: 目标文件路径，必须位于授权 workspace 内。
           content: 要写入的完整文本内容。
           overwrite: 是否允许覆盖已有文件。
+          confirmed_overwrite_without_read: 仅在用户已明确确认无法完整读取大文件时仍要整文件覆盖时使用。
           known_existing_paths: 兼容旧调用方的“已观察路径”集合。新保护优先使用
             known_read_files，要求覆盖前完整 read_file，并校验 mtime 没有变化。
         """
@@ -298,11 +300,19 @@ class LocalFilesystemService:
 
         existed_before = resolved.exists()
         known_existing_paths = known_existing_paths or set()
+        bypassed_read_before_write = False
         if existed_before:
             read_guard = self._validate_read_before_write(resolved)
             if read_guard:
-                return read_guard
-        if existed_before and not self.known_read_files and not _is_known_existing_path(resolved, known_existing_paths):
+                if not confirmed_overwrite_without_read:
+                    return read_guard
+                bypassed_read_before_write = True
+        if (
+            existed_before
+            and not bypassed_read_before_write
+            and not self.known_read_files
+            and not _is_known_existing_path(resolved, known_existing_paths)
+        ):
             return _error(
                 "write_file",
                 "READ_BEFORE_WRITE_REQUIRED",
@@ -316,7 +326,8 @@ class LocalFilesystemService:
             blocked = self._validate_readable_text_file("write_file", resolved)
             if blocked:
                 return blocked
-            original_content = _decode_text_bytes(resolved.read_bytes())
+            if not bypassed_read_before_write:
+                original_content = _decode_text_bytes(resolved.read_bytes())
 
         resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_text(content, encoding="utf-8", newline="\n")
@@ -331,6 +342,7 @@ class LocalFilesystemService:
                 "line_count": len(content.splitlines()),
                 "content_hash": _sha256_text(content),
                 "previous_content_hash": _sha256_text(original_content) if existed_before else "",
+                "bypassed_read_before_write": bypassed_read_before_write,
                 "modified_at": _iso_mtime(resolved),
             },
         )

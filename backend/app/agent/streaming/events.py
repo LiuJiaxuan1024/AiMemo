@@ -85,6 +85,17 @@ class ThoughtSnapshotEvent(TypedDict):
     thoughts: list[dict[str, Any]]
 
 
+class InterruptEvent(TypedDict):
+    """LangGraph interrupt 事件。
+
+    当 graph 需要用户补充选择时，LangGraph 会输出 `__interrupt__` update。
+    service 层把它转换成 SSE 后，前端展示选择框并用 resume API 继续同一条 turn。
+    """
+
+    event: Literal["interrupt"]
+    interrupt: dict[str, Any]
+
+
 AiJiStreamEvent = (
     NodeUpdateEvent
     | AnswerDeltaEvent
@@ -92,4 +103,5 @@ AiJiStreamEvent = (
     | InternalTokenEvent
     | ThoughtSnapshotEvent
     | ToolInvocationEvent
+    | InterruptEvent
 )

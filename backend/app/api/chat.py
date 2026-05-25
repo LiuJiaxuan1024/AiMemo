@@ -6,6 +6,7 @@ from app.core.database import get_session
 from app.schemas.chat import (
     ChatActiveTurnListRead,
     ChatRequest,
+    ChatResumeRequest,
     ChatResponse,
     ChatTurnGraphRead,
     ChatTurnStateHistoryRead,
@@ -13,6 +14,7 @@ from app.schemas.chat import (
 from app.services.chat_service import (
     run_conversation_chat,
     stream_conversation_chat_events,
+    stream_conversation_chat_resume_events,
     stream_existing_turn_events,
 )
 from app.services.chat_turn_service import (
@@ -124,6 +126,23 @@ def stream_existing_turn_events_api(
     # 该过滤；保留 conversation_id 在 URL 是为了与其他 turn 接口语义一致。
     return StreamingResponse(
         stream_existing_turn_events(turn_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/{conversation_id}/turns/{turn_id}/resume/stream")
+def resume_interrupted_turn_api(
+    conversation_id: int,
+    turn_id: int,
+    payload: ChatResumeRequest,
+) -> StreamingResponse:
+    return StreamingResponse(
+        stream_conversation_chat_resume_events(
+            conversation_id,
+            turn_id,
+            resume_payload=payload.model_dump(mode="json"),
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

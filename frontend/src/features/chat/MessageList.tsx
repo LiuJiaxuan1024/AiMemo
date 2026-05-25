@@ -1,5 +1,5 @@
-import { GitBranch } from "lucide-react";
-import type { RefObject } from "react";
+import { Check, GitBranch } from "lucide-react";
+import { useMemo, useState, type FormEvent, type RefObject } from "react";
 
 import { Button, EmptyState } from "../../shared/ui";
 import { MarkdownMessage } from "./MarkdownMessage";
@@ -12,16 +12,25 @@ import type {
   DraftAssistantMessage,
   MessageSegment,
   ToolInvocation,
+  UserInputAnswer,
+  UserInputRequest,
 } from "./types";
 
 interface MessageListProps {
   endRef: RefObject<HTMLDivElement | null>;
   messages: DraftAssistantMessage[];
   onOpenGraph: (message: DraftAssistantMessage) => void;
+  onSubmitUserInput: (message: DraftAssistantMessage, answer: UserInputAnswer) => void;
   thoughts?: ChatThought[];
 }
 
-export function MessageList({ endRef, messages, onOpenGraph, thoughts = [] }: MessageListProps) {
+export function MessageList({
+  endRef,
+  messages,
+  onOpenGraph,
+  onSubmitUserInput,
+  thoughts = [],
+}: MessageListProps) {
   return (
     <div className="chat-message-list">
       {messages.length === 0 ? (
@@ -64,6 +73,14 @@ export function MessageList({ endRef, messages, onOpenGraph, thoughts = [] }: Me
                 {isAssistant && !isStreaming && !hasSegments && message.thoughts?.length ? (
                   <ThoughtRecap thoughts={message.thoughts} />
                 ) : null}
+                {isAssistant && message.pending_interrupt ? (
+                  <UserInputInterruptCard
+                    disabled={message.status !== "interrupted"}
+                    message={message}
+                    request={message.pending_interrupt}
+                    onSubmit={onSubmitUserInput}
+                  />
+                ) : null}
               </div>
               {isAssistant && message.turn_id ? (
                 <Button
@@ -81,6 +98,147 @@ export function MessageList({ endRef, messages, onOpenGraph, thoughts = [] }: Me
       })}
       <div ref={endRef} />
     </div>
+  );
+}
+
+interface UserInputInterruptCardProps {
+  disabled: boolean;
+  message: DraftAssistantMessage;
+  request: UserInputRequest;
+  onSubmit: (message: DraftAssistantMessage, answer: UserInputAnswer) => void;
+}
+
+function UserInputInterruptCard({
+  disabled,
+  message,
+  request,
+  onSubmit,
+}: UserInputInterruptCardProps) {
+  const mode = request.selection_mode === "multiple" ? "multiple" : "single";
+  const firstOptionId = request.options[0]?.id ?? "";
+  const [selectedIds, setSelectedIds] = useState<string[]>(firstOptionId ? [firstOptionId] : []);
+  const [otherText, setOtherText] = useState("");
+
+  const selectedOptions = useMemo(
+    () => request.options.filter((option) => selectedIds.includes(option.id)),
+    [request.options, selectedIds],
+  );
+  const includesOther = selectedIds.includes("other");
+  const canSubmit =
+    selectedOptions.length > 0 || (request.allow_other && (includesOther || otherText.trim().length > 0));
+
+  function toggleOption(optionId: string) {
+    if (disabled) {
+      return;
+    }
+    if (mode === "single") {
+      setSelectedIds([optionId]);
+      return;
+    }
+    setSelectedIds((current) =>
+      current.includes(optionId)
+        ? current.filter((item) => item !== optionId)
+        : [...current, optionId],
+    );
+  }
+
+  function handleOtherFocus() {
+    if (!request.allow_other || selectedIds.includes("other")) {
+      return;
+    }
+    setSelectedIds((current) => (mode === "single" ? ["other"] : [...current, "other"]));
+  }
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (disabled || !canSubmit) {
+      return;
+    }
+    const ids = [...selectedIds];
+    const trimmedOther = otherText.trim();
+    if (trimmedOther && !ids.includes("other")) {
+      ids.push("other");
+    }
+    const normalValues = request.options
+      .filter((option) => ids.includes(option.id))
+      .map((option) => option.value || option.label)
+      .filter(Boolean);
+    const answerParts = [...normalValues];
+    if (trimmedOther) {
+      answerParts.push(trimmedOther);
+    }
+    const answer = answerParts.join("\n").trim();
+    onSubmit(message, {
+      request_id: request.request_id,
+      selected_option_id: ids[0] ?? "",
+      selected_option_ids: ids,
+      answer,
+      other_text: trimmedOther,
+    });
+  }
+
+  return (
+    <form className="chat-interrupt-card" onSubmit={handleSubmit}>
+      <div className="chat-interrupt-card__header">
+        <span>请先回答这个问题</span>
+        <strong>{mode === "multiple" ? "可多选" : "单选"}</strong>
+      </div>
+      <p className="chat-interrupt-card__question">{request.question}</p>
+      <div className="chat-interrupt-options">
+        {request.options.map((option, index) => {
+          const checked = selectedIds.includes(option.id);
+          return (
+            <label
+              className={`chat-interrupt-option ${checked ? "selected" : ""}`}
+              key={option.id}
+            >
+              <input
+                checked={checked}
+                disabled={disabled}
+                name={`interrupt-${request.request_id}`}
+                onChange={() => toggleOption(option.id)}
+                type={mode === "multiple" ? "checkbox" : "radio"}
+              />
+              <span className="chat-interrupt-option__mark" aria-hidden="true" />
+              <span className="chat-interrupt-option__body">
+                <span>
+                  {option.label}
+                  {option.recommended || index === 0 ? <em>推荐</em> : null}
+                </span>
+                {option.description ? <small>{option.description}</small> : null}
+              </span>
+            </label>
+          );
+        })}
+        {request.allow_other ? (
+          <label className={`chat-interrupt-option chat-interrupt-option--other ${includesOther ? "selected" : ""}`}>
+            <input
+              checked={includesOther}
+              disabled={disabled}
+              name={`interrupt-${request.request_id}`}
+              onChange={() => toggleOption("other")}
+              type={mode === "multiple" ? "checkbox" : "radio"}
+            />
+            <span className="chat-interrupt-option__mark" aria-hidden="true" />
+            <span className="chat-interrupt-option__body">
+              <span>{request.other_option?.label || "Other"}</span>
+              <textarea
+                disabled={disabled}
+                onChange={(event) => setOtherText(event.target.value)}
+                onFocus={handleOtherFocus}
+                placeholder={request.other_option?.placeholder || "请输入其他答案"}
+                rows={2}
+                value={otherText}
+              />
+            </span>
+          </label>
+        ) : null}
+      </div>
+      <Button disabled={disabled || !canSubmit} size="sm" type="submit" variant="primary">
+        <Check aria-hidden="true" size={15} />
+        Submit
+      </Button>
+    </form>
   );
 }
 

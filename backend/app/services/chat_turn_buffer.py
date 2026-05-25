@@ -95,6 +95,19 @@ def get_or_create(turn_id: int) -> TurnBuffer:
         return buf
 
 
+def create_fresh(turn_id: int) -> TurnBuffer:
+    """替换并返回一个新的 buffer。
+
+    用于 interrupted turn 的 resume：上一段 SSE 已经 mark_done，新的 resume 流需要
+    继续用同一个 turn_id 推送后续事件。
+    """
+
+    with _BUFFERS_LOCK:
+        buf = TurnBuffer(turn_id=turn_id)
+        _BUFFERS[turn_id] = buf
+        return buf
+
+
 def get(turn_id: int) -> TurnBuffer | None:
     """返回 buffer；如果已经被 cleanup 回收则返回 None。"""
 

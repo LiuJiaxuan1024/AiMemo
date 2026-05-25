@@ -55,6 +55,10 @@ class WriteFileInput(BaseModel):
     path: str = Field(description="要写入的文件路径，必须位于授权 workspace 内。必须是绝对路径，例如 E:\\demo\\main.py 或 /home/user/demo/main.py。")
     content: str = Field(description="要写入文件的完整内容。该工具会整文件写入。")
     overwrite: bool = Field(default=False, description="是否允许覆盖已存在文件。覆盖前必须先用 read_file 完整读取该文件。")
+    confirmed_overwrite_without_read: bool = Field(
+        default=False,
+        description="仅当用户已通过结构化确认允许在未完整读取旧文件内容时整文件覆盖，才可设置为 true。",
+    )
 
 
 class ExecCommandInput(BaseModel):

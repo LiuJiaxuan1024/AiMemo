@@ -128,6 +128,55 @@ def update_chat_turn_progress(
     session.commit()
 
 
+def interrupt_chat_turn(
+    session: Session,
+    turn_id: int,
+    *,
+    checkpoint_id: str | None,
+    node_statuses: dict[str, str],
+    pending_interrupt: dict,
+    debug_payload: dict | None = None,
+) -> None:
+    """把 turn 标记为等待用户选择。"""
+
+    turn = session.get(ChatTurn, turn_id)
+    if turn is None:
+        return
+    turn.status = "interrupted"
+    turn.checkpoint_id = checkpoint_id
+    turn.node_statuses = json.dumps(node_statuses, ensure_ascii=False)
+    payload = debug_payload if debug_payload is not None else _decode_json_any(turn.debug_payload, fallback={})
+    payload.setdefault("interrupts", [])
+    payload["pending_interrupt"] = pending_interrupt
+    turn.debug_payload = json.dumps(payload, ensure_ascii=False)
+    turn.updated_at = utc_now()
+    session.add(turn)
+    session.commit()
+
+
+def mark_chat_turn_resuming(
+    session: Session,
+    turn_id: int,
+    *,
+    node_statuses: dict[str, str],
+    debug_payload: dict | None = None,
+) -> None:
+    """用户已经提交选择，turn 回到 running。"""
+
+    turn = session.get(ChatTurn, turn_id)
+    if turn is None:
+        return
+    turn.status = "running"
+    turn.node_statuses = json.dumps(node_statuses, ensure_ascii=False)
+    payload = debug_payload if debug_payload is not None else _decode_json_any(turn.debug_payload, fallback={})
+    if isinstance(payload, dict):
+        payload.pop("pending_interrupt", None)
+        turn.debug_payload = json.dumps(payload, ensure_ascii=False)
+    turn.updated_at = utc_now()
+    session.add(turn)
+    session.commit()
+
+
 def complete_chat_turn(
     session: Session,
     turn_id: int,
@@ -188,7 +237,7 @@ def list_active_chat_turns(
     *,
     conversation_id: int,
 ) -> ChatActiveTurnListRead:
-    """列出指定会话里所有 status=running 的 turn。
+    """列出指定会话里所有 status=running/interrupted 的 turn。
 
     用户在 assistant 还在生成时切走另一个会话、再点回来时，前端需要知道
     "这条会话现在有一个正在跑的 turn"。chat_turn_buffer 还保留着事件流，
@@ -204,7 +253,7 @@ def list_active_chat_turns(
         select(ChatTurn)
         .where(
             ChatTurn.conversation_id == conversation_id,
-            ChatTurn.status == "running",
+            ChatTurn.status.in_(["running", "interrupted"]),
         )
         .order_by(ChatTurn.created_at, ChatTurn.id)
     ).all()
@@ -217,13 +266,15 @@ def list_active_chat_turns(
 def _to_chat_active_turn_read(session: Session, turn: ChatTurn) -> ChatActiveTurnRead:
     user = _load_message(session, turn.user_message_id)
     assistant = _load_message(session, turn.assistant_message_id)
+    pending_interrupt = _pending_interrupt_from_turn(turn) if turn.status == "interrupted" else None
     return ChatActiveTurnRead(
         turn_id=turn.id or 0,
         conversation_id=turn.conversation_id,
         status=turn.status,
         node_statuses=_decode_json_object(turn.node_statuses),
+        pending_interrupt=pending_interrupt,
         user_message=_message_to_read(user, turn.id) if user else None,
-        assistant_message=_message_to_read(assistant, turn.id) if assistant else None,
+        assistant_message=_message_to_read(assistant, turn.id, pending_interrupt=pending_interrupt) if assistant else None,
         started_at=turn.created_at,
         updated_at=turn.updated_at,
     )
@@ -235,7 +286,12 @@ def _load_message(session: Session, message_id: int | None) -> ChatMessage | Non
     return session.get(ChatMessage, message_id)
 
 
-def _message_to_read(message: ChatMessage, turn_id: int | None) -> ChatMessageRead:
+def _message_to_read(
+    message: ChatMessage,
+    turn_id: int | None,
+    *,
+    pending_interrupt: dict | None = None,
+) -> ChatMessageRead:
     return ChatMessageRead(
         id=message.id or 0,
         conversation_id=message.conversation_id,
@@ -246,6 +302,7 @@ def _message_to_read(message: ChatMessage, turn_id: int | None) -> ChatMessageRe
         status=message.status,
         token_count=message.token_count,
         turn_id=turn_id,
+        pending_interrupt=pending_interrupt,
         created_at=message.created_at,
         updated_at=message.updated_at,
     )
@@ -592,6 +649,7 @@ def _highlight_graph_mermaid(mermaid: str, node_statuses: dict[str, str]) -> str
         "succeeded": "succeededNode",
         "failed": "failedNode",
         "skipped": "skippedNode",
+        "interrupted": "skippedNode",
     }
     for node_name, node_status in node_statuses.items():
         class_name = class_names.get(node_status)
@@ -627,3 +685,11 @@ def _decode_json_any(value: str, *, fallback):
         return json.loads(value or "")
     except json.JSONDecodeError:
         return fallback
+
+
+def _pending_interrupt_from_turn(turn: ChatTurn) -> dict | None:
+    payload = _decode_json_any(turn.debug_payload, fallback={})
+    if not isinstance(payload, dict):
+        return None
+    pending = payload.get("pending_interrupt")
+    return pending if isinstance(pending, dict) else None

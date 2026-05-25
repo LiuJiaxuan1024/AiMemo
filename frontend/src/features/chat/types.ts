@@ -31,6 +31,7 @@ export interface ChatMessage {
   status: string;
   token_count: number;
   turn_id?: number | null;
+  pending_interrupt?: UserInputRequest | null;
   created_at: string;
   updated_at: string;
 }
@@ -64,6 +65,34 @@ export interface ToolInvocation {
   message: string;
   result_summary: string;
   running: boolean;
+}
+
+export interface UserInputOption {
+  id: string;
+  label: string;
+  value: string;
+  description?: string;
+  recommended?: boolean;
+}
+
+export interface UserInputRequest {
+  kind: "user_input";
+  request_id: string;
+  interrupt_id?: string;
+  question: string;
+  options: UserInputOption[];
+  selection_mode: "single" | "multiple";
+  allow_other: boolean;
+  other_option: UserInputOption & { placeholder?: string };
+  step_index?: number;
+}
+
+export interface UserInputAnswer {
+  request_id: string;
+  selected_option_id: string;
+  selected_option_ids: string[];
+  answer: string;
+  other_text?: string;
 }
 
 /**
@@ -177,6 +206,7 @@ export type ChatStreamEvent =
         node_statuses: Record<string, string>;
       };
     }
+  | { event: "resume"; data: { turn_id: number; node_statuses: Record<string, string> } }
   | { event: "node"; data: { node: string; node_statuses: Record<string, string> } }
   | {
       event: "thought_snapshot";
@@ -210,6 +240,14 @@ export type ChatStreamEvent =
       };
     }
   | {
+      event: "interrupt";
+      data: {
+        turn_id: number;
+        request: UserInputRequest;
+        node_statuses: Record<string, string>;
+      };
+    }
+  | {
       event: "done";
       data: {
         turn_id: number;
@@ -225,6 +263,7 @@ export interface ChatActiveTurn {
   conversation_id: number;
   status: string;
   node_statuses: Record<string, string>;
+  pending_interrupt?: UserInputRequest | null;
   user_message: ChatMessage | null;
   assistant_message: ChatMessage | null;
   started_at: string;

@@ -4,6 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -16,26 +17,78 @@ use gtk::prelude::*;
 const ELF_WIDTH: i32 = 260;
 const BUBBLE_HEIGHT: i32 = 124;
 const CHAT_HEIGHT: i32 = 46;
-const MENU_WIDTH: i32 = 142;
+const MENU_WIDTH: i32 = 164;
 const MENU_HEIGHT: i32 = 78;
+const CHOICE_WIDTH: i32 = 420;
+const CHOICE_HEIGHT: i32 = 380;
+const CHOICE_GAP: i32 = 10;
 const WINDOW_PADDING: i32 = 8;
 const ALPHA_THRESHOLD: u8 = 12;
 const WORKSHOP_URL: &str = "http://127.0.0.1:8000/app/workshop/jobs";
 const ELF_CHAT_URL: &str = "http://127.0.0.1:8000/api/elf/chat/stream";
+const ELF_CHAT_RESUME_URL_PREFIX: &str = "http://127.0.0.1:8000/api/elf/chat/turns";
 const ELF_EVENTS_URL: &str = "http://127.0.0.1:8000/api/elf/events";
 const DEFAULT_EXPRESSION: &str = "01_idle_soft.png";
 
 #[derive(Debug)]
 enum NativeUiMessage {
     Bubble { text: String, expression: String },
+    EventBubble { text: String, expression: String },
     Expression { expression: String },
+    EventExpression { expression: String },
     HideBubble,
+    ChatFinished,
+    ChoiceSubmitted,
+    Choice {
+        request: UserInputRequest,
+        responder: mpsc::Sender<UserInputAnswer>,
+    },
 }
 
 #[derive(Debug)]
 struct ChatBubblePart {
     text: String,
     expression: String,
+}
+
+#[derive(Debug, Clone)]
+struct UserInputOption {
+    id: String,
+    label: String,
+    value: String,
+    description: String,
+    recommended: bool,
+}
+
+#[derive(Debug, Clone)]
+struct UserInputRequest {
+    request_id: String,
+    question: String,
+    selection_mode: String,
+    options: Vec<UserInputOption>,
+    allow_other: bool,
+    other_label: String,
+    other_placeholder: String,
+}
+
+#[derive(Debug, Clone)]
+struct UserInputAnswer {
+    request_id: String,
+    selected_option_id: String,
+    selected_option_ids: Vec<String>,
+    answer: String,
+    other_text: String,
+}
+
+#[derive(Debug)]
+struct ElfInterrupt {
+    turn_id: i64,
+    request: UserInputRequest,
+}
+
+enum ParsedSseOutcome {
+    Done(Vec<ChatBubblePart>),
+    Interrupted(ElfInterrupt),
 }
 
 fn main() {
@@ -50,8 +103,10 @@ fn main() {
             gdk_pixbuf::InterpType::Bilinear,
         )
         .expect("failed to scale Memo Elf image");
-    let width = pixbuf.width() + WINDOW_PADDING * 2;
-    let height = pixbuf.height() + BUBBLE_HEIGHT + CHAT_HEIGHT + WINDOW_PADDING * 2;
+    let width = (pixbuf.width() + WINDOW_PADDING * 2).max(CHOICE_WIDTH + WINDOW_PADDING * 2);
+    let height = pixbuf.height() + BUBBLE_HEIGHT + CHOICE_HEIGHT + CHOICE_GAP + WINDOW_PADDING * 2;
+    let sprite_x = (width - pixbuf.width()) / 2;
+    let interaction_x = (width - CHOICE_WIDTH) / 2;
 
     let window = gtk::Window::builder()
         .title("Memo Elf")
@@ -77,6 +132,7 @@ fn main() {
     let bubble_visible = Rc::new(Cell::new(true));
     let chat_visible = Rc::new(Cell::new(false));
     let menu_visible = Rc::new(Cell::new(false));
+    let chat_busy = Rc::new(Cell::new(false));
     let bubble_text = Rc::new(RefCell::new(String::from("我在这里，点我打开菜单。")));
     let current_pixbuf = Rc::new(RefCell::new(pixbuf.clone()));
     let drag_origin = Rc::new(RefCell::new(None::<(f64, f64)>));
@@ -109,7 +165,7 @@ fn main() {
         }
         context.set_source_pixbuf(
             &draw_current_pixbuf.borrow(),
-            WINDOW_PADDING as f64,
+            sprite_x as f64,
             (BUBBLE_HEIGHT + WINDOW_PADDING) as f64,
         );
         context.paint().expect("failed to draw Memo Elf image");
@@ -122,16 +178,20 @@ fn main() {
         .height_request(height)
         .build();
     fixed.put(&drawing_area, 0, 0);
-    fixed.put(&elf_event_box, WINDOW_PADDING, BUBBLE_HEIGHT + WINDOW_PADDING);
+    fixed.put(&elf_event_box, sprite_x, BUBBLE_HEIGHT + WINDOW_PADDING);
 
     let chat_entry = gtk::Entry::builder()
         .placeholder_text("想和我说什么？回车发送")
-        .width_request(width - WINDOW_PADDING * 2)
+        .width_request(CHOICE_WIDTH)
         .height_request(34)
         .build();
     chat_entry.style_context().add_class("native-chat-entry");
     chat_entry.set_no_show_all(true);
-    fixed.put(&chat_entry, WINDOW_PADDING, height - CHAT_HEIGHT + 5);
+    fixed.put(
+        &chat_entry,
+        interaction_x,
+        BUBBLE_HEIGHT + WINDOW_PADDING + pixbuf.height() + 18,
+    );
 
     let action_menu = gtk::Box::new(gtk::Orientation::Vertical, 6);
     action_menu.style_context().add_class("native-action-menu");
@@ -145,10 +205,16 @@ fn main() {
     open_button.set_size_request(MENU_WIDTH - 16, 28);
     action_menu.pack_start(&chat_button, false, false, 0);
     action_menu.pack_start(&open_button, false, false, 0);
+    fixed.put(&action_menu, sprite_x + pixbuf.width() - MENU_WIDTH, BUBBLE_HEIGHT + WINDOW_PADDING);
+
+    let choice_panel = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    choice_panel.style_context().add_class("native-choice-panel");
+    choice_panel.set_size_request(CHOICE_WIDTH, CHOICE_HEIGHT);
+    choice_panel.set_no_show_all(true);
     fixed.put(
-        &action_menu,
-        width - MENU_WIDTH - WINDOW_PADDING,
-        BUBBLE_HEIGHT + WINDOW_PADDING,
+        &choice_panel,
+        interaction_x,
+        BUBBLE_HEIGHT + WINDOW_PADDING + pixbuf.height() + CHOICE_GAP,
     );
 
     let drag_window = window.clone();
@@ -206,6 +272,7 @@ fn main() {
     let release_drag_started = Rc::clone(&drag_started);
     let release_menu_visible = Rc::clone(&menu_visible);
     let release_menu = action_menu.clone();
+    let release_chat_busy = Rc::clone(&chat_busy);
     elf_event_box.connect_button_release_event(move |_, event| {
         eprintln!(
             "[memo-elf-native] button-release button={} origin={} dragged={} pos={:?}",
@@ -217,6 +284,7 @@ fn main() {
         if event.button() == 1
             && release_drag_origin.borrow().is_some()
             && !release_drag_started.get()
+            && !release_chat_busy.get()
         {
             toggle_action_menu(&release_menu, &release_menu_visible);
         }
@@ -229,7 +297,11 @@ fn main() {
     let chat_button_menu = action_menu.clone();
     let chat_button_chat_visible = Rc::clone(&chat_visible);
     let chat_button_menu_visible = Rc::clone(&menu_visible);
+    let chat_button_busy = Rc::clone(&chat_busy);
     chat_button.connect_clicked(move |_| {
+        if chat_button_busy.get() {
+            return;
+        }
         chat_button_menu.hide();
         chat_button_menu_visible.set(false);
         chat_button_chat_visible.set(true);
@@ -252,17 +324,22 @@ fn main() {
     let entry_chat_visible = Rc::clone(&chat_visible);
     let entry_menu_visible = Rc::clone(&menu_visible);
     let entry_menu = action_menu.clone();
+    let entry_choice_panel = choice_panel.clone();
+    let entry_chat_busy = Rc::clone(&chat_busy);
     let entry_pixbuf = Rc::clone(&current_pixbuf);
     let entry_window = window.clone();
     let chat_sender = sender.clone();
     chat_entry.connect_activate(move |entry| {
         let message = entry.text().trim().to_string();
-        if message.is_empty() {
+        if message.is_empty() || entry_chat_busy.get() {
             return;
         }
+        entry_chat_busy.set(true);
+        entry.set_sensitive(false);
         entry.set_text("");
         entry.hide();
         entry_menu.hide();
+        entry_choice_panel.hide();
         entry_menu_visible.set(false);
         entry_chat_visible.set(false);
         entry_bubble_visible.set(true);
@@ -279,7 +356,7 @@ fn main() {
 
         let sender = chat_sender.clone();
         thread::spawn(move || {
-            match send_elf_chat(&message) {
+            match send_elf_chat(&message, &sender) {
                 Ok(parts) => {
                     // Linux 原生桌宠没有 Web 侧的 DOM/CSS 动画，这里在后台线程按气泡顺序投递 UI 消息，
                     // 让 GTK 主线程逐段刷新气泡，避免多个 bubbles 被合并后只显示第一小段。
@@ -295,12 +372,14 @@ fn main() {
                         expression: DEFAULT_EXPRESSION.to_string(),
                     });
                     let _ = sender.send(NativeUiMessage::HideBubble);
+                    let _ = sender.send(NativeUiMessage::ChatFinished);
                 }
                 Err(error) => {
                     let _ = sender.send(NativeUiMessage::Bubble {
                         text: format!("刚才没连上对话服务：{error}"),
                         expression: expression_from_mood("error").to_string(),
                     });
+                    let _ = sender.send(NativeUiMessage::ChatFinished);
                 }
             }
         });
@@ -311,9 +390,30 @@ fn main() {
     let receive_bubble_visible = Rc::clone(&bubble_visible);
     let receive_pixbuf = Rc::clone(&current_pixbuf);
     let receive_window = window.clone();
+    let receive_menu = action_menu.clone();
+    let receive_menu_visible = Rc::clone(&menu_visible);
+    let receive_chat_entry = chat_entry.clone();
+    let receive_chat_visible = Rc::clone(&chat_visible);
+    let receive_chat_busy = Rc::clone(&chat_busy);
+    let receive_choice_panel = choice_panel.clone();
     receiver.attach(None, move |message| {
         match message {
             NativeUiMessage::Bubble { text, expression } => {
+                *receive_bubble_text.borrow_mut() = text;
+                receive_bubble_visible.set(true);
+                set_expression(
+                    &receive_window,
+                    &receive_pixbuf,
+                    &receive_area,
+                    width,
+                    height,
+                    &expression,
+                );
+            }
+            NativeUiMessage::EventBubble { text, expression } => {
+                if receive_chat_busy.get() {
+                    return ControlFlow::Continue;
+                }
                 *receive_bubble_text.borrow_mut() = text;
                 receive_bubble_visible.set(true);
                 set_expression(
@@ -335,6 +435,19 @@ fn main() {
                     &expression,
                 );
             }
+            NativeUiMessage::EventExpression { expression } => {
+                if receive_chat_busy.get() {
+                    return ControlFlow::Continue;
+                }
+                set_expression(
+                    &receive_window,
+                    &receive_pixbuf,
+                    &receive_area,
+                    width,
+                    height,
+                    &expression,
+                );
+            }
             NativeUiMessage::HideBubble => {
                 receive_bubble_visible.set(false);
                 set_expression(
@@ -345,6 +458,43 @@ fn main() {
                     height,
                     DEFAULT_EXPRESSION,
                 );
+            }
+            NativeUiMessage::ChatFinished => {
+                receive_chat_busy.set(false);
+                receive_chat_entry.set_sensitive(true);
+            }
+            NativeUiMessage::ChoiceSubmitted => {
+                receive_choice_panel.hide();
+                clear_box(&receive_choice_panel);
+                receive_bubble_visible.set(true);
+                *receive_bubble_text.borrow_mut() = String::from("收到，我继续处理。");
+                set_expression(
+                    &receive_window,
+                    &receive_pixbuf,
+                    &receive_area,
+                    width,
+                    height,
+                    expression_from_emoji("working_focus"),
+                );
+            }
+            NativeUiMessage::Choice { request, responder } => {
+                let question = request.question.clone();
+                receive_menu.hide();
+                receive_menu_visible.set(false);
+                receive_chat_entry.hide();
+                receive_chat_entry.set_sensitive(false);
+                receive_chat_visible.set(false);
+                receive_bubble_visible.set(true);
+                *receive_bubble_text.borrow_mut() = question;
+                set_expression(
+                    &receive_window,
+                    &receive_pixbuf,
+                    &receive_area,
+                    width,
+                    height,
+                    expression_from_emoji("curious"),
+                );
+                show_native_choice_panel(&receive_choice_panel, request, responder);
             }
         }
         receive_area.queue_draw();
@@ -376,26 +526,84 @@ fn install_css() {
             b"
             entry.native-chat-entry {
               background: rgba(255, 255, 255, 0.96);
-              border: 1px solid rgba(124, 179, 255, 0.86);
+              border: 1px solid rgba(148, 163, 184, 0.86);
               border-radius: 8px;
               color: #0f172a;
               padding: 8px 10px;
             }
 
             box.native-action-menu {
-              background: rgba(255, 255, 255, 0.96);
-              border: 1px solid rgba(124, 179, 255, 0.86);
-              border-radius: 10px;
+              background: rgba(255, 255, 255, 0.98);
+              border: 1px solid rgba(186, 203, 226, 0.94);
+              border-radius: 8px;
               padding: 8px;
             }
 
             button.native-menu-button {
               min-height: 26px;
-              background: rgba(237, 246, 255, 0.96);
-              border: 1px solid rgba(124, 179, 255, 0.54);
+              background: transparent;
+              border: 1px solid transparent;
+              border-radius: 7px;
+              color: #1f2a44;
+              font-weight: 600;
+              padding: 5px 10px;
+            }
+
+            button.native-menu-button:hover {
+              background: #eff6ff;
+              border-color: #bfdbfe;
+              color: #1849a9;
+            }
+
+            box.native-choice-panel {
+              background: linear-gradient(180deg, rgba(20, 28, 47, 0.96), rgba(15, 23, 42, 0.98));
+              border: 1px solid rgba(96, 165, 250, 0.68);
               border-radius: 8px;
+              padding: 12px;
+            }
+
+            label.native-choice-title {
+              color: #eff6ff;
+              font-size: 13px;
+              font-weight: 700;
+            }
+
+            label.native-choice-hint,
+            label.native-choice-description {
+              color: #94a3b8;
+              font-size: 11px;
+            }
+
+            checkbutton.native-choice-option {
+              background: rgba(30, 41, 59, 0.9);
+              border: 1px solid rgba(148, 163, 184, 0.28);
+              border-radius: 8px;
+              color: #e2e8f0;
+              padding: 9px 10px;
+            }
+
+            checkbutton.native-choice-option:hover,
+            checkbutton.native-choice-option:checked {
+              background: rgba(37, 99, 235, 0.28);
+              border-color: rgba(96, 165, 250, 0.72);
+            }
+
+            entry.native-choice-other {
+              background: rgba(15, 23, 42, 0.94);
+              border: 1px solid rgba(148, 163, 184, 0.36);
+              border-radius: 7px;
+              color: #f8fafc;
+              padding: 7px 8px;
+            }
+
+            button.native-choice-submit {
+              min-height: 28px;
+              background: #60a5fa;
+              border: 1px solid #3b82f6;
+              border-radius: 7px;
               color: #0f172a;
-              padding: 4px 10px;
+              font-weight: 600;
+              padding: 5px 12px;
             }
             ",
         )
@@ -430,6 +638,214 @@ fn toggle_action_menu(menu: &gtk::Box, is_visible: &Rc<Cell<bool>>) {
         menu.queue_draw();
     } else {
         menu.hide();
+    }
+}
+
+fn show_native_choice_panel(
+    panel: &gtk::Box,
+    request: UserInputRequest,
+    responder: mpsc::Sender<UserInputAnswer>,
+) {
+    clear_box(panel);
+    let mode = if request.selection_mode == "multiple" {
+        "multiple"
+    } else {
+        "single"
+    };
+
+    let selected_ids = Rc::new(RefCell::new(Vec::<String>::new()));
+    if let Some(first_option) = request.options.first() {
+        selected_ids.borrow_mut().push(first_option.id.clone());
+    }
+    let buttons = Rc::new(RefCell::new(Vec::<gtk::CheckButton>::new()));
+
+    for option in &request.options {
+        let option_title = if option.recommended {
+            format!("{}（推荐）", option.label)
+        } else {
+            option.label.clone()
+        };
+        let raw_label_text = if option.description.trim().is_empty() {
+            option_title
+        } else {
+            format!("{}\n{}", option_title, option.description)
+        };
+        let label_text = compact_choice_label(&raw_label_text);
+        let button = gtk::CheckButton::with_label(&label_text);
+        button.style_context().add_class("native-choice-option");
+        button.set_hexpand(true);
+        button.set_halign(gtk::Align::Fill);
+        button.set_tooltip_text(Some(raw_label_text.as_str()));
+        button.set_active(selected_ids.borrow().contains(&option.id));
+        let option_id = option.id.clone();
+        let mode_for_toggle = mode.to_string();
+        let selected_for_toggle = Rc::clone(&selected_ids);
+        let buttons_for_toggle = Rc::clone(&buttons);
+        button.connect_toggled(move |active_button| {
+            sync_native_choice_selection(
+                active_button,
+                &option_id,
+                &mode_for_toggle,
+                &selected_for_toggle,
+                &buttons_for_toggle,
+            );
+        });
+        buttons.borrow_mut().push(button.clone());
+        panel.pack_start(&button, false, false, 0);
+    }
+
+    let footer = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    footer.style_context().add_class("native-choice-footer");
+    let footer_sep = gtk::Separator::new(gtk::Orientation::Horizontal);
+    footer.pack_start(&footer_sep, false, false, 0);
+
+    let other_entry = gtk::Entry::builder()
+        .placeholder_text(&request.other_placeholder)
+        .width_request(CHOICE_WIDTH - WINDOW_PADDING * 4)
+        .build();
+    other_entry.style_context().add_class("native-choice-other");
+    if request.allow_other {
+        let other_button = gtk::CheckButton::with_label(&request.other_label);
+        other_button
+            .style_context()
+            .add_class("native-choice-option");
+        let option_id = String::from("other");
+        let mode_for_toggle = mode.to_string();
+        let selected_for_toggle = Rc::clone(&selected_ids);
+        let buttons_for_toggle = Rc::clone(&buttons);
+        other_button.connect_toggled(move |active_button| {
+            sync_native_choice_selection(
+                active_button,
+                &option_id,
+                &mode_for_toggle,
+                &selected_for_toggle,
+                &buttons_for_toggle,
+            );
+        });
+        let other_button_for_focus = other_button.clone();
+        other_entry.connect_focus_in_event(move |_, _| {
+            if !other_button_for_focus.is_active() {
+                other_button_for_focus.set_active(true);
+            }
+            glib::Propagation::Proceed
+        });
+        buttons.borrow_mut().push(other_button.clone());
+        footer.pack_start(&other_button, false, false, 0);
+        footer.pack_start(&other_entry, false, false, 0);
+    }
+
+    let submit_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    let submit = gtk::Button::with_label("Submit");
+    submit.style_context().add_class("native-choice-submit");
+    submit_row.pack_end(&submit, false, false, 0);
+    footer.pack_start(&submit_row, false, false, 0);
+    panel.pack_start(&footer, false, false, 0);
+
+    let panel_for_submit = panel.clone();
+    let selected_for_submit = Rc::clone(&selected_ids);
+    let request_for_submit = request.clone();
+    let other_entry_for_submit = other_entry.clone();
+    submit.connect_clicked(move |_| {
+        let mut ids = selected_for_submit.borrow().clone();
+        let other_text = other_entry_for_submit.text().trim().to_string();
+        if !other_text.is_empty() && !ids.iter().any(|id| id == "other") {
+            ids.push(String::from("other"));
+        }
+        if ids.is_empty() {
+            if let Some(first_option) = request_for_submit.options.first() {
+                ids.push(first_option.id.clone());
+            }
+        }
+        let mut answer_parts = request_for_submit
+            .options
+            .iter()
+            .filter(|option| ids.iter().any(|id| id == &option.id))
+            .map(|option| {
+                if option.value.trim().is_empty() {
+                    option.label.clone()
+                } else {
+                    option.value.clone()
+                }
+            })
+            .filter(|value| !value.trim().is_empty())
+            .collect::<Vec<_>>();
+        if !other_text.is_empty() {
+            answer_parts.push(other_text.clone());
+        }
+        let answer = if answer_parts.is_empty() {
+            String::from("继续")
+        } else {
+            answer_parts.join("\n")
+        };
+        let selected_option_id = ids.first().cloned().unwrap_or_else(|| String::from("other"));
+        let _ = responder.send(UserInputAnswer {
+            request_id: request_for_submit.request_id.clone(),
+            selected_option_id,
+            selected_option_ids: ids,
+            answer,
+            other_text,
+        });
+        panel_for_submit.hide();
+        clear_box(&panel_for_submit);
+    });
+
+    panel.show();
+    for child in panel.children() {
+        child.show_all();
+    }
+}
+
+fn sync_native_choice_selection(
+    active_button: &gtk::CheckButton,
+    option_id: &str,
+    mode: &str,
+    selected_ids: &Rc<RefCell<Vec<String>>>,
+    buttons: &Rc<RefCell<Vec<gtk::CheckButton>>>,
+) {
+    if active_button.is_active() {
+        if mode == "single" {
+            selected_ids.borrow_mut().clear();
+            selected_ids.borrow_mut().push(option_id.to_string());
+            for peer in buttons.borrow().iter() {
+                if !peer.eq(active_button) && peer.is_active() {
+                    peer.set_active(false);
+                }
+            }
+        } else if !selected_ids.borrow().iter().any(|id| id == option_id) {
+            selected_ids.borrow_mut().push(option_id.to_string());
+        }
+        return;
+    }
+
+    selected_ids.borrow_mut().retain(|id| id != option_id);
+}
+
+fn compact_choice_label(text: &str) -> String {
+    const MAX_LINE_CHARS: usize = 42;
+    text.lines()
+        .map(|line| compact_line(line.trim(), MAX_LINE_CHARS))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn compact_line(text: &str, max_chars: usize) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+    let keep_head = max_chars.saturating_sub(3) * 2 / 3;
+    let keep_tail = max_chars.saturating_sub(3).saturating_sub(keep_head);
+    let head = chars.iter().take(keep_head).collect::<String>();
+    let tail = chars
+        .iter()
+        .skip(chars.len().saturating_sub(keep_tail))
+        .collect::<String>();
+    format!("{head}...{tail}")
+}
+
+fn clear_box(container: &gtk::Box) {
+    for child in container.children() {
+        container.remove(&child);
     }
 }
 
@@ -560,7 +976,7 @@ fn rounded_rect(context: &Context, x: f64, y: f64, width: f64, height: f64, radi
     context.close_path();
 }
 
-fn apply_window_shape(window: &gtk::Window, pixbuf: &Pixbuf, width: i32, _height: i32) {
+fn apply_window_shape(window: &gtk::Window, pixbuf: &Pixbuf, width: i32, height: i32) {
     let Some(gdk_window) = window.window() else {
         return;
     };
@@ -572,19 +988,25 @@ fn apply_window_shape(window: &gtk::Window, pixbuf: &Pixbuf, width: i32, _height
         BUBBLE_HEIGHT + WINDOW_PADDING * 2,
     ));
     let _ = region.union_rectangle(&RectangleInt::new(
-        width - MENU_WIDTH - WINDOW_PADDING,
+        ((width - pixbuf.width()) / 2) + pixbuf.width() - MENU_WIDTH,
         BUBBLE_HEIGHT + WINDOW_PADDING,
         MENU_WIDTH,
         MENU_HEIGHT,
     ));
     let _ = region.union_rectangle(&RectangleInt::new(
-        WINDOW_PADDING,
-        _height - CHAT_HEIGHT,
-        width - WINDOW_PADDING * 2,
+        (width - CHOICE_WIDTH) / 2,
+        height - CHAT_HEIGHT,
+        CHOICE_WIDTH,
         CHAT_HEIGHT,
     ));
     let _ = region.union_rectangle(&RectangleInt::new(
-        WINDOW_PADDING,
+        (width - CHOICE_WIDTH) / 2,
+        BUBBLE_HEIGHT + WINDOW_PADDING + pixbuf.height() + CHOICE_GAP,
+        CHOICE_WIDTH,
+        CHOICE_HEIGHT,
+    ));
+    let _ = region.union_rectangle(&RectangleInt::new(
+        (width - pixbuf.width()) / 2,
         BUBBLE_HEIGHT + WINDOW_PADDING,
         pixbuf.width(),
         pixbuf.height(),
@@ -592,7 +1014,7 @@ fn apply_window_shape(window: &gtk::Window, pixbuf: &Pixbuf, width: i32, _height
     union_pixbuf_alpha_runs(
         &region,
         pixbuf,
-        WINDOW_PADDING,
+        (width - pixbuf.width()) / 2,
         BUBBLE_HEIGHT + WINDOW_PADDING,
     );
     gdk_window.shape_combine_region(Some(&region), 0, 0);
@@ -648,6 +1070,7 @@ fn open_workshop() {
 
 fn send_elf_chat(
     message: &str,
+    sender: &glib::Sender<NativeUiMessage>,
 ) -> Result<Vec<ChatBubblePart>, Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(90))
@@ -662,27 +1085,83 @@ fn send_elf_chat(
     }
 
     let body = response.text()?;
-    Ok(parse_elf_sse_answer(&body))
+    resolve_elf_chat_response(&client, sender, body)
 }
 
-fn parse_elf_sse_answer(body: &str) -> Vec<ChatBubblePart> {
+fn resolve_elf_chat_response(
+    client: &reqwest::blocking::Client,
+    sender: &glib::Sender<NativeUiMessage>,
+    body: String,
+) -> Result<Vec<ChatBubblePart>, Box<dyn std::error::Error + Send + Sync>> {
+    match parse_elf_sse_answer(&body)? {
+        ParsedSseOutcome::Done(parts) => Ok(parts),
+        ParsedSseOutcome::Interrupted(interrupt) => {
+            let answer = request_native_user_input(sender, interrupt.request)?;
+            let response = client
+                .post(format!(
+                    "{ELF_CHAT_RESUME_URL_PREFIX}/{}/resume/stream",
+                    interrupt.turn_id
+                ))
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(user_input_answer_to_json(&answer).to_string())
+                .send()?;
+            if !response.status().is_success() {
+                return Err(format!("resume HTTP {}", response.status()).into());
+            }
+            resolve_elf_chat_response(client, sender, response.text()?)
+        }
+    }
+}
+
+fn request_native_user_input(
+    sender: &glib::Sender<NativeUiMessage>,
+    request: UserInputRequest,
+) -> Result<UserInputAnswer, Box<dyn std::error::Error + Send + Sync>> {
+    let (response_sender, response_receiver) = mpsc::channel();
+    sender
+        .send(NativeUiMessage::Choice {
+            request,
+            responder: response_sender,
+        })
+        .map_err(|_| "failed to show native choice panel")?;
+    let answer = response_receiver
+        .recv()
+        .map_err(|_| "native choice panel was closed before submitting")?;
+    let _ = sender.send(NativeUiMessage::ChoiceSubmitted);
+    Ok(answer)
+}
+
+fn user_input_answer_to_json(answer: &UserInputAnswer) -> serde_json::Value {
+    serde_json::json!({
+        "request_id": answer.request_id,
+        "selected_option_id": answer.selected_option_id,
+        "selected_option_ids": answer.selected_option_ids,
+        "answer": answer.answer,
+        "other_text": answer.other_text,
+    })
+}
+
+fn parse_elf_sse_answer(
+    body: &str,
+) -> Result<ParsedSseOutcome, Box<dyn std::error::Error + Send + Sync>> {
     let mut answer = String::new();
     let mut bubbles: Vec<ChatBubblePart> = Vec::new();
     for block in body.split("\n\n") {
         let mut event_name = "";
-        let mut data = "";
+        let mut data_lines: Vec<&str> = Vec::new();
         for line in block.lines() {
             if let Some(value) = line.strip_prefix("event:") {
                 event_name = value.trim();
             }
             if let Some(value) = line.strip_prefix("data:") {
-                data = value.trim();
+                data_lines.push(value.trim());
             }
         }
+        let data = data_lines.join("\n");
         if data.is_empty() {
             continue;
         }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) else {
             continue;
         };
         match event_name {
@@ -698,12 +1177,15 @@ fn parse_elf_sse_answer(body: &str) -> Vec<ChatBubblePart> {
                     bubbles.extend(raw_bubbles.iter().filter_map(parse_chat_bubble));
                 }
             }
+            "interrupt" => {
+                return Ok(ParsedSseOutcome::Interrupted(parse_elf_interrupt(&value)?));
+            }
             "error" => {
                 if let Some(message) = value.get("message").and_then(|message| message.as_str()) {
-                    return vec![ChatBubblePart {
+                    return Ok(ParsedSseOutcome::Done(vec![ChatBubblePart {
                         text: message.to_string(),
                         expression: expression_from_mood("error").to_string(),
-                    }];
+                    }]));
                 }
             }
             _ => {}
@@ -711,18 +1193,132 @@ fn parse_elf_sse_answer(body: &str) -> Vec<ChatBubblePart> {
     }
 
     if !bubbles.is_empty() {
-        return bubbles;
+        return Ok(ParsedSseOutcome::Done(bubbles));
     }
     if answer.trim().is_empty() {
-        vec![ChatBubblePart {
+        Ok(ParsedSseOutcome::Done(vec![ChatBubblePart {
             text: String::from("我刚才有点走神了，再说一次好吗？"),
             expression: expression_from_emoji("confused").to_string(),
-        }]
+        }]))
     } else {
-        vec![ChatBubblePart {
+        Ok(ParsedSseOutcome::Done(vec![ChatBubblePart {
             text: answer.trim().to_string(),
             expression: expression_from_mood("talking").to_string(),
-        }]
+        }]))
+    }
+}
+
+fn parse_elf_interrupt(
+    value: &serde_json::Value,
+) -> Result<ElfInterrupt, Box<dyn std::error::Error + Send + Sync>> {
+    let turn_id = value
+        .get("turn_id")
+        .and_then(|turn_id| {
+            turn_id
+                .as_i64()
+                .or_else(|| turn_id.as_str().and_then(|text| text.parse::<i64>().ok()))
+        })
+        .unwrap_or(0);
+    if turn_id <= 0 {
+        return Err("interrupt event did not include a valid turn_id".into());
+    }
+    Ok(ElfInterrupt {
+        turn_id,
+        request: normalize_user_input_request(value.get("request")),
+    })
+}
+
+fn normalize_user_input_request(raw: Option<&serde_json::Value>) -> UserInputRequest {
+    let payload = raw.and_then(|value| value.as_object());
+    let mut options = payload
+        .and_then(|payload| payload.get("options"))
+        .and_then(|options| options.as_array())
+        .map(|raw_options| {
+            raw_options
+                .iter()
+                .take(6)
+                .enumerate()
+                .filter_map(|(index, option)| {
+                    let item = option.as_object()?;
+                    let label = json_string_opt(item.get("label"))
+                        .or_else(|| json_string_opt(item.get("value")))
+                        .unwrap_or_default();
+                    let value = json_string_opt(item.get("value")).unwrap_or_else(|| label.clone());
+                    if label.trim().is_empty() && value.trim().is_empty() {
+                        return None;
+                    }
+                    Some(UserInputOption {
+                        id: json_string_opt(item.get("id"))
+                            .unwrap_or_else(|| format!("option-{}", index + 1)),
+                        label: if label.trim().is_empty() {
+                            value.clone()
+                        } else {
+                            label
+                        },
+                        value,
+                        description: json_string_opt(item.get("description")).unwrap_or_default(),
+                        recommended: item
+                            .get("recommended")
+                            .and_then(|recommended| recommended.as_bool())
+                            .unwrap_or(index == 0),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if options.is_empty() {
+        options.push(UserInputOption {
+            id: String::from("option-1"),
+            label: String::from("继续"),
+            value: String::from("继续"),
+            description: String::from("使用当前上下文继续。"),
+            recommended: true,
+        });
+    }
+
+    let other_option = payload
+        .and_then(|payload| payload.get("other_option"))
+        .and_then(|value| value.as_object());
+    UserInputRequest {
+        request_id: payload
+            .and_then(|payload| payload.get("request_id"))
+            .and_then(json_string_value)
+            .unwrap_or_default(),
+        question: payload
+            .and_then(|payload| payload.get("question"))
+            .and_then(json_string_value)
+            .unwrap_or_else(|| String::from("请补充一个具体选择。")),
+        selection_mode: payload
+            .and_then(|payload| payload.get("selection_mode"))
+            .and_then(json_string_value)
+            .filter(|mode| mode == "multiple")
+            .unwrap_or_else(|| String::from("single")),
+        options,
+        allow_other: payload
+            .and_then(|payload| payload.get("allow_other"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true),
+        other_label: other_option
+            .and_then(|option| option.get("label"))
+            .and_then(json_string_value)
+            .unwrap_or_else(|| String::from("Other")),
+        other_placeholder: other_option
+            .and_then(|option| option.get("placeholder"))
+            .and_then(json_string_value)
+            .unwrap_or_else(|| String::from("请输入其他答案")),
+    }
+}
+
+fn json_string_opt(value: Option<&serde_json::Value>) -> Option<String> {
+    value.and_then(json_string_value)
+}
+
+fn json_string_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => Some(text.trim().to_string()),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        serde_json::Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
     }
 }
 
@@ -778,14 +1374,14 @@ fn start_event_polling(sender: glib::Sender<NativeUiMessage>) {
                                 event.get("message").and_then(|message| message.as_str())
                             {
                                 if !message.trim().is_empty() {
-                                    let _ = sender.send(NativeUiMessage::Bubble {
+                                    let _ = sender.send(NativeUiMessage::EventBubble {
                                         text: message.trim().to_string(),
                                         expression,
                                     });
                                     continue;
                                 }
                             }
-                            let _ = sender.send(NativeUiMessage::Expression { expression });
+                            let _ = sender.send(NativeUiMessage::EventExpression { expression });
                         }
                     }
                 }
@@ -855,17 +1451,7 @@ fn wrap_bubble_text(text: &str) -> Vec<String> {
     let clean_text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut lines = Vec::new();
     for paragraph in clean_text.split('\n') {
-        let mut line = String::new();
-        for ch in paragraph.chars() {
-            line.push(ch);
-            if line.chars().count() >= 16 {
-                lines.push(line);
-                line = String::new();
-            }
-        }
-        if !line.is_empty() {
-            lines.push(line);
-        }
+        lines.extend(wrap_bubble_paragraph(paragraph));
     }
     if lines.is_empty() {
         lines.push(String::from("……"));
@@ -879,6 +1465,43 @@ fn wrap_bubble_text(text: &str) -> Vec<String> {
     } else {
         lines
     }
+}
+
+fn wrap_bubble_paragraph(paragraph: &str) -> Vec<String> {
+    const MAX_CHARS: usize = 18;
+    const BREAK_PUNCTUATION: [char; 8] = ['。', '！', '？', '；', ';', '!', '?', ','];
+    let chars = paragraph.chars().collect::<Vec<_>>();
+    if chars.len() <= MAX_CHARS {
+        return if paragraph.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![paragraph.trim().to_string()]
+        };
+    }
+
+    let mut result = Vec::new();
+    let mut start = 0;
+    while start < chars.len() {
+        let end = (start + MAX_CHARS).min(chars.len());
+        if end >= chars.len() {
+            result.push(chars[start..end].iter().collect::<String>().trim().to_string());
+            break;
+        }
+        let mut split = None;
+        for index in (start..end).rev() {
+            if BREAK_PUNCTUATION.contains(&chars[index]) {
+                split = Some(index + 1);
+                break;
+            }
+        }
+        let split_at = split.unwrap_or(end);
+        let line = chars[start..split_at].iter().collect::<String>().trim().to_string();
+        if !line.is_empty() {
+            result.push(line);
+        }
+        start = split_at;
+    }
+    result
 }
 
 fn bubble_duration_ms(text: &str) -> u64 {

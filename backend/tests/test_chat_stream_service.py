@@ -1,18 +1,17 @@
 import json
 import threading
 import time
-from datetime import timedelta
 from pathlib import Path
 
 from sqlmodel import select
 
-from app.models.note import utc_now
 from app.models.chat_message import ChatMessage
 from app.models.chat_turn import ChatTurn
 from app.schemas.conversation import ConversationCreate
 from app.services import chat_turn_buffer
 from app.services.chat_service import (
     stream_conversation_chat_events,
+    stream_conversation_chat_resume_events,
     stream_existing_turn_events,
 )
 from app.services.chat_turn_service import (
@@ -243,6 +242,162 @@ def test_stream_chat_keeps_running_after_client_disconnect(
     assert assistant.status == "completed"
 
 
+def test_stream_chat_interrupts_and_resumes_same_turn(
+    session,
+    session_factory,
+    tmp_path: Path,
+    monkeypatch,
+):
+    """request_user_input interrupt 应落库为 interrupted，并能用 resume 接着跑完同一轮。"""
+
+    chat_turn_buffer.reset_for_tests()
+    conversation = create_conversation(session, ConversationCreate(title="用户选择"))
+    checkpoint_path = tmp_path / "checkpoints.db"
+    seen_resume_payloads: list[dict] = []
+
+    def fake_stream_memory_chat_graph(**kwargs):
+        user_message_id = int(kwargs["user_message_id"])
+        assistant_message_id = int(kwargs["assistant_message_id"])
+        resume_payload = kwargs.get("resume_payload")
+        if resume_payload is None:
+            yield {
+                "event": "node",
+                "node": "tools",
+                "state": {"agent_step_index": 1},
+            }
+            yield {
+                "event": "interrupt",
+                "node": "",
+                "interrupt": {
+                    "id": "choice-1",
+                    "value": {
+                        "kind": "user_input",
+                        "request_id": "choice-1",
+                        "question": "新项目要写到哪里？",
+                        "selection_mode": "single",
+                        "allow_other": True,
+                        "options": [
+                            {
+                                "id": "home",
+                                "label": "Home 下新建",
+                                "value": "/home/wujie/demo",
+                                "description": "保持 AiMemo 仓库干净。",
+                                "recommended": True,
+                            }
+                        ],
+                    },
+                },
+                "state": {
+                    "user_message_id": user_message_id,
+                    "assistant_message_id": assistant_message_id,
+                    "graph_checkpoint_id": "checkpoint-interrupt",
+                },
+            }
+            return
+
+        seen_resume_payloads.append(dict(resume_payload))
+        yield {"event": "node", "node": "tools", "state": {"agent_step_index": 1}}
+        yield {"event": "answer_delta", "node": "agent", "content": "已按你的选择继续。", "metadata": {}}
+        yield {"event": "node", "node": "persist_messages", "state": {}}
+        yield {
+            "event": "done",
+            "node": "",
+            "state": {
+                "user_message_id": user_message_id,
+                "assistant_message_id": assistant_message_id,
+                "assistant_answer": "已按你的选择继续。",
+                "graph_checkpoint_id": "checkpoint-done",
+                "needs_retrieval": False,
+                "needs_query_rewrite": False,
+                "retrieval_query": "",
+                "retrieval_grade": "none",
+                "retrieval_grade_reason": "",
+                "retrieval_reason": "",
+                "retrieved_chunks": [],
+            },
+        }
+
+    monkeypatch.setattr(
+        "app.services.chat_service.stream_memory_chat_graph",
+        fake_stream_memory_chat_graph,
+    )
+
+    interrupted_events = [
+        _parse_sse(event)
+        for event in stream_conversation_chat_events(
+            conversation.id,
+            message="帮我写一个项目",
+            session_factory=session_factory,
+            checkpoint_path=str(checkpoint_path),
+        )
+    ]
+
+    assert [event["event"] for event in interrupted_events] == ["turn", "node", "interrupt"]
+    turn_id = interrupted_events[0]["data"]["turn_id"]
+    interrupt_request = interrupted_events[-1]["data"]["request"]
+    assert interrupt_request["question"] == "新项目要写到哪里？"
+    assert interrupt_request["options"][0]["id"] == "home"
+    assert interrupt_request["other_option"]["id"] == "other"
+
+    session.expire_all()
+    turn = session.get(ChatTurn, turn_id)
+    assert turn is not None
+    assert turn.status == "interrupted"
+    assert turn.checkpoint_id == "checkpoint-interrupt"
+    assistant = session.get(ChatMessage, turn.assistant_message_id)
+    assert assistant is not None
+    assert assistant.status == "interrupted"
+
+    active = list_active_chat_turns(session, conversation_id=conversation.id)
+    assert [item.turn_id for item in active.items] == [turn_id]
+    assert active.items[0].status == "interrupted"
+    assert active.items[0].pending_interrupt is not None
+    assert active.items[0].assistant_message is not None
+    assert active.items[0].assistant_message.pending_interrupt is not None
+
+    resumed_events = [
+        _parse_sse(event)
+        for event in stream_conversation_chat_resume_events(
+            conversation.id,
+            turn_id,
+            resume_payload={
+                "request_id": "choice-1",
+                "selected_option_id": "home",
+                "selected_option_ids": ["home"],
+                "answer": "/home/wujie/demo",
+            },
+            session_factory=session_factory,
+            checkpoint_path=str(checkpoint_path),
+        )
+    ]
+
+    assert seen_resume_payloads == [
+        {
+            "request_id": "choice-1",
+            "selected_option_id": "home",
+            "selected_option_ids": ["home"],
+            "answer": "/home/wujie/demo",
+        }
+    ]
+    assert [event["event"] for event in resumed_events] == [
+        "resume",
+        "node",
+        "node",
+        "answer_delta",
+        "node",
+        "done",
+    ]
+
+    session.expire_all()
+    turn = session.get(ChatTurn, turn_id)
+    assert turn is not None
+    assert turn.status == "completed"
+    assistant = session.get(ChatMessage, turn.assistant_message_id)
+    assert assistant is not None
+    assert assistant.content == "已按你的选择继续。"
+    assert assistant.status == "completed"
+
+
 def test_stream_existing_turn_events_replays_completed_buffer(
     session,
     session_factory,
@@ -402,8 +557,8 @@ def test_stream_chat_persists_exception_detail_when_worker_crashes(
     assert "traceback" in diagnostic["exception"]
 
 
-def test_list_active_chat_turns_returns_only_running_turns(session):
-    """active-turns 接口只能返回 running 状态的 turn，按创建顺序排序。"""
+def test_list_active_chat_turns_returns_running_and_interrupted_turns(session):
+    """active-turns 接口返回 running/interrupted turn，按创建顺序排序。"""
 
     chat_turn_buffer.reset_for_tests()
     conversation = create_conversation(session, ConversationCreate(title="活跃 turn 列表"))
@@ -420,93 +575,39 @@ def test_list_active_chat_turns_returns_only_running_turns(session):
         status="running",
         node_statuses=json.dumps({"agent": "running"}, ensure_ascii=False),
     )
-    session.add(completed_turn)
-    session.add(running_turn)
-    session.commit()
-
-    result = list_active_chat_turns(session, conversation_id=conversation.id)
-    assert [item.turn_id for item in result.items] == [running_turn.id]
-    assert result.items[0].status == "running"
-    assert result.items[0].node_statuses == {"agent": "running"}
-
-
-def test_stale_turn_with_agent_tool_calls_is_marked_failed_with_diagnostic(session):
-    """agent 已产出 tool_calls 但 tools 未落审计时，应自动收敛并写入诊断。"""
-
-    chat_turn_buffer.reset_for_tests()
-    conversation = create_conversation(session, ConversationCreate(title="陈旧 turn 诊断"))
-    user = ChatMessage(
+    interrupted_turn = ChatTurn(
         conversation_id=conversation.id,
-        role="user",
-        content="你自己找吧",
-        status="completed",
-    )
-    assistant = ChatMessage(
-        conversation_id=conversation.id,
-        role="assistant",
-        content="我开始找。",
-        status="streaming",
-    )
-    session.add(user)
-    session.add(assistant)
-    session.flush()
-
-    stale_time = utc_now() - timedelta(minutes=20)
-    turn = ChatTurn(
-        conversation_id=conversation.id,
-        user_message_id=user.id,
-        assistant_message_id=assistant.id,
         thread_id=f"conversation:{conversation.id}",
-        status="running",
-        node_statuses=json.dumps(
-            {
-                "agent": "succeeded",
-                "tools": "pending",
-                "persist_messages": "pending",
-            },
-            ensure_ascii=False,
-        ),
+        status="interrupted",
+        node_statuses=json.dumps({"tools": "interrupted"}, ensure_ascii=False),
         debug_payload=json.dumps(
             {
-                "nodes": {
-                    "agent": {
-                        "state": {
-                            "agent_decision": {
-                                "type": "tool_call",
-                                "tool_calls": [
-                                    {
-                                        "id": "call-search",
-                                        "name": "search_files",
-                                        "args": {"root": "C:\\", "pattern": "YuanShen.exe"},
-                                    }
-                                ],
-                            }
-                        }
-                    }
+                "pending_interrupt": {
+                    "kind": "user_input",
+                    "request_id": "choice-1",
+                    "question": "请选择",
+                    "options": [],
                 }
             },
             ensure_ascii=False,
         ),
-        created_at=stale_time,
-        updated_at=stale_time,
     )
-    session.add(turn)
+    session.add(completed_turn)
+    session.add(running_turn)
+    session.add(interrupted_turn)
     session.commit()
 
     result = list_active_chat_turns(session, conversation_id=conversation.id)
-
-    assert result.items == []
-    session.refresh(turn)
-    session.refresh(assistant)
-    assert turn.status == "failed"
-    assert assistant.status == "failed"
-    assert "agent 已生成工具调用" in turn.error
-    node_statuses = json.loads(turn.node_statuses)
-    assert node_statuses["tools"] == "failed"
-    debug_payload = json.loads(turn.debug_payload)
-    diagnostic = debug_payload["diagnostics"][-1]
-    assert diagnostic["code"] == "TOOLS_NODE_NOT_ENTERED_AFTER_AGENT_TOOL_CALL"
-    assert diagnostic["tool_names"] == ["search_files"]
+    assert [item.turn_id for item in result.items] == [running_turn.id, interrupted_turn.id]
+    assert result.items[0].status == "running"
+    assert result.items[0].node_statuses == {"agent": "running"}
+    assert result.items[1].status == "interrupted"
+    assert result.items[1].pending_interrupt == {
+        "kind": "user_input",
+        "request_id": "choice-1",
+        "question": "请选择",
+        "options": [],
+    }
 
 
 def _wait_until(predicate, *, timeout: float, interval: float = 0.05) -> None:

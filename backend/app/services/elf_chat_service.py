@@ -66,3 +66,28 @@ def stream_elf_chat_events(
         emit_status_events=False,
         answer_mode="elf_bubble",
     )
+
+
+def stream_elf_chat_resume_events(
+    *,
+    turn_id: int,
+    resume_payload: dict,
+    session_factory: SessionFactory = session_scope,
+    checkpoint_path: str | None = None,
+):
+    conversation = get_or_create_elf_conversation(session_factory=session_factory)
+    conversation_id = conversation.id
+    if conversation_id is None:
+        raise RuntimeError("Elf conversation id is required.")
+
+    from app.services.chat_service import stream_conversation_chat_resume_events
+
+    yield from stream_conversation_chat_resume_events(
+        conversation_id,
+        turn_id,
+        resume_payload=resume_payload,
+        session_factory=session_factory,
+        checkpoint_path=checkpoint_path,
+        emit_status_events=False,
+        answer_mode="elf_bubble",
+    )

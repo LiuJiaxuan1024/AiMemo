@@ -11,8 +11,10 @@ import re
 from typing import Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 from langgraph.config import get_stream_writer
-from langgraph.types import Send
+from langgraph.types import Send, interrupt
+from pydantic import BaseModel, Field
 from sqlmodel import Session, desc, select
 
 from app.ai.json_utils import parse_json_object
@@ -68,6 +70,36 @@ logger = logging.getLogger(__name__)
 # ReAct 兜底：本地工具连续失败超过这个批次数后，agent 节点直接产出说明性回答，
 # 不再让 LLM 重试，防止配合 LangGraph 默认 recursion_limit 仍然耗时 90s+ 才结束。
 MAX_CONSECUTIVE_FAILED_TOOL_BATCHES = 3
+REQUEST_USER_INPUT_TOOL_NAME = "request_user_input"
+USER_INTERRUPT_TOOL_NAMES = {REQUEST_USER_INPUT_TOOL_NAME}
+
+
+class UserInputOption(BaseModel):
+    label: str = Field(description="展示给用户看的选项标题。")
+    value: str = Field(description="选中后交给 agent 继续执行的具体答案。")
+    description: str = Field(default="", description="一行以内的选项说明，解释影响或取舍。")
+
+
+class RequestUserInputToolInput(BaseModel):
+    question: str = Field(
+        min_length=6,
+        description="展示给用户的问题，必须具体说明为什么需要用户选择，并以问句形式提出。",
+    )
+    options: list[UserInputOption] = Field(
+        default_factory=list,
+        min_length=2,
+        max_length=4,
+        description="推荐选项，按推荐程度排序。必须是 2-4 个具体选择；不要包含 Other，界面会自动追加。",
+    )
+    selection_mode: Literal["single", "multiple"] = Field(
+        default="single",
+        description="single 表示用户只能选择一个推荐项；multiple 表示用户可以多选推荐项。",
+    )
+    allow_other: bool = Field(default=True, description="是否允许用户输入自定义答案。")
+    other_placeholder: str = Field(
+        default="请输入其他答案",
+        description="用户选择 Other 时的输入框占位文本。",
+    )
 
 
 @dataclass(frozen=True)
@@ -585,7 +617,7 @@ def build_tools_node(session_factory: SessionFactory):
         )
         observations_before = len(state.get("tool_observations", []))
         working_state: MemoryChatGraphState = dict(state)
-        allowed = READ_TOOL_NAMES | WRITE_TOOL_NAMES | EXEC_TOOL_NAMES
+        allowed = READ_TOOL_NAMES | WRITE_TOOL_NAMES | EXEC_TOOL_NAMES | USER_INTERRUPT_TOOL_NAMES
 
         # 每条工具完成后立刻通过 custom stream channel 把它推给上游，
         # 避免必须等整个 tools 节点 update 派发后才能看到所有卡片。
@@ -628,10 +660,11 @@ def build_tools_node(session_factory: SessionFactory):
 
         def _build_action(index: int, tool_call: dict) -> dict:
             tool_name = str(tool_call.get("name") or tool_call.get("tool_name") or "")
-            arguments = _normalize_tool_arguments(
-                tool_name,
-                dict(tool_call.get("args") or tool_call.get("arguments") or {}),
-            )
+            raw_arguments = dict(tool_call.get("args") or tool_call.get("arguments") or {})
+            if tool_name == REQUEST_USER_INPUT_TOOL_NAME:
+                arguments = _normalize_request_user_input_arguments(raw_arguments)
+            else:
+                arguments = _normalize_tool_arguments(tool_name, raw_arguments)
             return {
                 "tool_call_id": str(tool_call.get("id") or f"tool-{index + 1}-{tool_name}"),
                 "tool_name": tool_name,
@@ -676,6 +709,34 @@ def build_tools_node(session_factory: SessionFactory):
                 )
                 _emit_observation(final_observation)
             return update
+
+        for index, tool_call in enumerate(tool_calls):
+            tool_name = str(tool_call.get("name") or tool_call.get("tool_name") or "")
+            if tool_name != REQUEST_USER_INPUT_TOOL_NAME:
+                continue
+            action = _build_action(index, tool_call)
+            update = _invoke_one(working_state, action)
+            working_state = {**working_state, **update}
+            observations = list(working_state.get("tool_observations", []))
+            tool_context = _tool_observations_to_context(observations)
+            return {
+                "tool_observations": observations,
+                "tool_observation_context": tool_context,
+                "prompt_context": _append_tool_context(working_state.get("prompt_context", ""), tool_context),
+                "turn_messages": working_state.get("turn_messages", []),
+                "tool_budget": working_state.get("tool_budget", state.get("tool_budget", 0)),
+                "consecutive_failed_tools": 0,
+                "thought_events": [
+                    *working_state.get("thought_events", []),
+                    _thought(
+                        "user-input-resolved",
+                        "用户已补充选择",
+                        "已收到用户的选择，继续执行当前任务。",
+                        related_node="tools",
+                        step_index=step_index,
+                    ),
+                ],
+            }
 
         # 按"连续的 READ 段"切分 tool_calls：
         # - 连续若干个 READ 工具 → 同一批并行执行（共享同一个 snapshot）
@@ -767,13 +828,55 @@ def _create_react_tools(
     """创建 ReAct agent 可见的本地工具集合。"""
 
     policy = LocalOperatorPolicy.from_roots(_default_local_operator_workspace_roots())
-    return create_read_tools(
+    tools = create_read_tools(
         session_factory=session_factory,
         policy=policy,
         conversation_id=_resolve_conversation_id(state),
         turn_id=None,
         known_existing_paths=_known_existing_paths_from_observations(state.get("tool_observations", [])),
         known_read_files=_known_read_files_from_observations(state.get("tool_observations", [])),
+    )
+    tools[REQUEST_USER_INPUT_TOOL_NAME] = _create_request_user_input_tool()
+    return tools
+
+
+def _create_request_user_input_tool() -> StructuredTool:
+    def request_user_input(
+        question: str,
+        options: list[dict],
+        allow_other: bool = True,
+        selection_mode: str = "single",
+        other_placeholder: str = "请输入其他答案",
+    ) -> str:
+        """Ask the user to choose when required information is missing."""
+
+        return json_dumps_compact(
+            {
+                "ok": False,
+                "tool_name": REQUEST_USER_INPUT_TOOL_NAME,
+                "message": "request_user_input is handled by the graph interrupt runtime.",
+                "data": {
+                    "question": question,
+                    "options": options,
+                    "selection_mode": selection_mode,
+                    "allow_other": allow_other,
+                    "other_placeholder": other_placeholder,
+                },
+            }
+        )
+
+    return StructuredTool.from_function(
+        func=request_user_input,
+        name=REQUEST_USER_INPUT_TOOL_NAME,
+        description=(
+            "当必须让用户补充选择、确认路径、选择方案、提供缺失参数或确认风险操作时调用。"
+            "调用后 graph 会暂停并向用户展示选择框；用户回答后会从同一轮继续执行。"
+            "不要把“请选择：1...2...3...”写成普通最终回答；需要用户选择时必须调用此工具。"
+            "question 必须是展示给用户的完整问题，说明为什么需要用户选择；不能空泛。"
+            "options 只放 2-4 个建议选项，推荐项放第一；不要包含 Other，界面会自动追加自定义输入。"
+            "如果用户可同时选择多个项目/功能/范围，selection_mode 必须设为 multiple。"
+        ),
+        args_schema=RequestUserInputToolInput,
     )
 
 
@@ -849,6 +952,17 @@ def _build_react_agent_system_prompt() -> str:
         "- 工具失败时先诊断根因，再选择下一步；不要原样盲目重试，也不要切换到无关工具碰运气。\n"
         "- 写入已有文件或覆盖文件前，必须先用 read_file 完整读取目标文件；"
         "get_file_info/list_dir 只能确认存在，不能替代读取正文。\n"
+        "- 遇到全局工具规则限制时，先按默认规则调用基础工具推进任务；不要一上来就询问是否绕过规则。"
+        "如果工具返回结果证明默认规则已经卡住任务，或可靠工具元信息能明确判断默认规则不可能完成，"
+        "再进入升级确认：不要反复尝试、不要绕开工具、也不要假装完成，而是调用 request_user_input 申请更高权限授权；"
+        "question 说明卡住的是哪条规则、绕过风险和授权范围；"
+        "options 至少包含“取消/改用更安全方案”和“确认授权继续”。用户确认后，只能绕过本次明确授权的具体限制；"
+        "workspace 越权、敏感文件、删除、命令安全、占位内容等底线保护仍不可绕过。\n"
+        "- 升级确认少样本：如果 read_file 返回 full_view=false、truncated=true 或 WRITE_WITH_PARTIAL_READ，"
+        "且用户目标是整文件替换一个过大的已有文件，不要分批读取到耗尽上下文。"
+        "调用 request_user_input 询问是否允许“未完整读取旧内容就直接整文件覆盖”。"
+        "用户明确选择确认后，才可调用 write_file(overwrite=true, confirmed_overwrite_without_read=true)；"
+        "未确认时禁止设置该参数。\n"
         "- exec_command 只用于短时非交互命令；读写文件用 read_file/write_file。\n"
         "- 启动会一直前台跑的服务（flask run、uvicorn、npm start/dev、manage.py runserver、"
         "python http.server 等）必须用 exec_command_background，不要用 exec_command；"
@@ -861,6 +975,36 @@ def _build_react_agent_system_prompt() -> str:
         "再根据 task_id 操作；不要凭空猜 task_id，也不要直接 kill。\n"
         "- 任务超过 3 步时，先在内部形成简短计划，并按真实工具结果推进；"
         "如果结果不符合预期，基于错误和已完成步骤调整后续动作。\n"
+        "- 如果缺少必须由用户决定的信息（例如新项目/新文件目标目录、多个可行方案、"
+        "风险操作是否继续、无法安全默认的配置选择），必须调用 request_user_input，"
+        "把 2-4 个建议选项放在 options 里，并允许 other；不要只用普通文字提问后结束本轮。"
+        "必须保持项目上下文隔离：历史对话里某个项目的目录、技术栈、依赖、配置、数据源、账号、风险授权或用户偏好，"
+        "不等于授权以后所有新项目都继承这些条件；除非用户本轮明确说“继续上个项目/同一个项目/沿用上次目录或配置”，"
+        "否则遇到新的项目、应用、文件组或独立功能时，不能复用旧项目条件，必须重新确认会影响落地的关键条件。"
+        "question 字段就是用户会看到的问题，必须写清楚你为什么暂停以及具体要用户决定什么；"
+        "不要留空，也不要写“需要你补充一个选择”这种泛泛提示。"
+        "如果用户可以同时选择多个推荐项，selection_mode 设为 multiple。"
+        "调用 request_user_input 时应作为本批唯一工具调用，等用户选择后再继续执行。"
+        "禁止输出“请选择：1...2...3...”这种普通文本选择题作为最终回答；"
+        "这类场景必须走 request_user_input。外置桌面精灵/galgame 式对话同样如此："
+        "如果精灵需要用户选择路径、方案或确认风险，不能只用气泡问“选择哪个路径”，"
+        "必须调用 request_user_input，让前端渲染可点击选项卡和 Other 输入。\n"
+        "- request_user_input 少样本：用户说“创建一个 test.txt 文件，写入 helloworld”，"
+        "但没有说明目录时，调用 request_user_input，question=\"test.txt 应该创建在哪个目录下？\"，"
+        "options 可包括：label=\"Home 目录\", value=\"/home/<user>/test.txt\", "
+        "description=\"不污染当前 AiMemo 仓库\"；以及 label=\"AiMemo 仓库内的明确子路径\", "
+        "value=\"/home/<user>/project/AiMemo/<subdir>/test.txt\", description=\"仅当用户确实想把文件放进本项目\"。"
+        "不要直接回答路径列表。\n"
+        "- request_user_input 少样本：上一轮用户选择 `/home/user/demo1`、React、SQLite 写一个项目；本轮用户说“再做一个记账小程序”。"
+        "这属于新的项目，不能默认复用 `/home/user/demo1`、React、SQLite 或上一轮授权，"
+        "必须再次调用 request_user_input 询问目标目录，并在技术栈/数据源会影响落地时一并确认。"
+        "只有用户本轮说“继续改 demo1/沿用上次目录和技术栈”，才可复用这些条件。\n"
+        "- request_user_input 少样本：用户说“给应用加导出功能”，若可同时选择导出 Markdown、PDF、HTML，"
+        "调用 request_user_input 且 selection_mode=\"multiple\"；若项目已有唯一导出模式可沿用，则直接执行，不要多问。\n"
+        "- request_user_input 少样本：read_file 返回 truncated=true，用户又要求整文件覆盖 `/path/big.json`。"
+        "调用 request_user_input，question=\"`/path/big.json` 太大，无法在单次工具调用中完整读取。你是否确认在未完整读取旧内容的情况下直接整文件覆盖？\"，"
+        "options 包含 label=\"取消覆盖，改用新路径或更小范围\" 与 label=\"确认直接覆盖旧文件\"。"
+        "只有用户选择确认后才设置 confirmed_overwrite_without_read=true。\n"
         "- 多个互不依赖的读取、搜索或信息查询可以在同一轮 tool_calls 中并行发出；"
         "有依赖关系的步骤必须等上一步 ToolMessage 返回后再继续。\n"
         "- 不要把删除、清理、覆盖配置、重建项目作为开局动作；只有定位到具体原因后才做针对性修改。\n"
@@ -1366,6 +1510,267 @@ def _clean_tool_path(path: str) -> str:
 
     return path.strip().replace("`", "").strip(" \t\r\n").rstrip("）)。；;，,。")
 
+
+def _normalize_request_user_input_arguments(arguments: dict) -> dict:
+    """保留并规整结构化提问参数。
+
+    Local Operator 的通用 _normalize_tool_arguments 会把未知工具参数清成空 dict。
+    request_user_input 是 memory_chat 自己的交互工具，必须单独保留 question/options。
+    """
+
+    raw_options = arguments.get("options")
+    options: list[dict] = []
+    if isinstance(raw_options, list):
+        for raw_option in raw_options[:4]:
+            if not isinstance(raw_option, dict):
+                continue
+            label = str(raw_option.get("label") or raw_option.get("value") or "").strip()
+            value = str(raw_option.get("value") or label).strip()
+            if not label and not value:
+                continue
+            options.append(
+                {
+                    "id": str(raw_option.get("id") or ""),
+                    "label": label or value,
+                    "value": value or label,
+                    "description": str(raw_option.get("description") or "").strip(),
+                }
+            )
+    raw_selection_mode = arguments.get("selection_mode")
+    if raw_selection_mode is None and isinstance(arguments.get("multiSelect"), bool):
+        raw_selection_mode = "multiple" if bool(arguments.get("multiSelect")) else "single"
+    elif raw_selection_mode is None:
+        raw_selection_mode = arguments.get("multiSelect")
+    selection_mode = str(raw_selection_mode or "single").strip().lower()
+    if selection_mode not in {"single", "multiple"}:
+        selection_mode = "multiple" if bool(arguments.get("allow_multiple", False)) else "single"
+    return {
+        "question": str(arguments.get("question") or "").strip(),
+        "options": options,
+        "selection_mode": selection_mode,
+        "allow_other": bool(arguments.get("allow_other", True)),
+        "other_placeholder": str(arguments.get("other_placeholder") or "请输入其他答案").strip(),
+    }
+
+
+def _run_request_user_input_action(
+    state: MemoryChatGraphState,
+    *,
+    action: AgentToolActionPayload,
+    step_index: int | None = None,
+) -> MemoryChatGraphState:
+    arguments = dict(action.get("arguments") or {})
+    invalid_reason = _invalid_user_input_request_reason(arguments)
+    if invalid_reason:
+        observation: AgentToolObservationPayload = {
+            "tool_call_id": str(action.get("tool_call_id") or ""),
+            "tool_name": REQUEST_USER_INPUT_TOOL_NAME,
+            "arguments": arguments,
+            "ok": False,
+            "data": {},
+            "error_code": "INVALID_ARGUMENT",
+            "message": (
+                f"{invalid_reason}。请重新调用 request_user_input：question 必须是用户能直接理解的具体问题，"
+                "options 必须包含 2-4 个具体建议选项；不要用普通文本列选项。"
+            ),
+            "blocked": False,
+        }
+        return {
+            "tool_observations": [*state.get("tool_observations", []), observation],
+            "tool_budget": int(state.get("tool_budget") or 0),
+            "turn_messages": [
+                *state.get("turn_messages", []),
+                _turn_message(
+                    "tool",
+                    _tool_observation_message(observation),
+                    name=REQUEST_USER_INPUT_TOOL_NAME,
+                    tool_call_id=str(action.get("tool_call_id") or "") or None,
+                ),
+            ],
+            "thought_events": [
+                *state.get("thought_events", []),
+                _thought(
+                    f"request-user-input-invalid-{action.get('tool_call_id') or step_index or 'choice'}",
+                    "提问参数不完整",
+                    "request_user_input 缺少具体问题或建议选项，要求 agent 重新发起结构化提问。",
+                    related_node="tools",
+                    related_tool_call_id=str(action.get("tool_call_id") or "") or None,
+                    status="failed",
+                    step_index=step_index,
+                ),
+            ],
+        }
+    request = _build_user_input_interrupt_payload(arguments, action=action, step_index=step_index)
+    resume_value = interrupt(request)
+    answer_payload = _normalize_user_input_resume(resume_value, request)
+    observation: AgentToolObservationPayload = {
+        "tool_call_id": str(action.get("tool_call_id") or ""),
+        "tool_name": REQUEST_USER_INPUT_TOOL_NAME,
+        "arguments": arguments,
+        "ok": True,
+        "data": {
+            "request": request,
+            "answer": answer_payload["answer"],
+            "selected_option_id": answer_payload["selected_option_id"],
+            "selected_option_ids": answer_payload["selected_option_ids"],
+            "selected_option_label": answer_payload["selected_option_label"],
+            "selected_option_labels": answer_payload["selected_option_labels"],
+            "is_other": answer_payload["is_other"],
+        },
+        "error_code": "",
+        "message": f"用户选择：{answer_payload['answer']}",
+        "blocked": False,
+    }
+    return {
+        "tool_observations": [*state.get("tool_observations", []), observation],
+        "tool_budget": int(state.get("tool_budget") or 0),
+        "turn_messages": [
+            *state.get("turn_messages", []),
+            _turn_message(
+                "tool",
+                _tool_observation_message(observation),
+                name=REQUEST_USER_INPUT_TOOL_NAME,
+                tool_call_id=str(action.get("tool_call_id") or "") or None,
+            ),
+        ],
+        "thought_events": [
+            *state.get("thought_events", []),
+            _thought(
+                f"request-user-input-{action.get('tool_call_id') or step_index or 'choice'}",
+                "等待用户选择",
+                f"已向用户询问：{request['question']}",
+                related_node="tools",
+                related_tool_call_id=str(action.get("tool_call_id") or "") or None,
+                status="interrupted",
+                step_index=step_index,
+            ),
+        ],
+    }
+
+
+def _build_user_input_interrupt_payload(
+    arguments: dict,
+    *,
+    action: AgentToolActionPayload,
+    step_index: int | None,
+) -> dict:
+    question = str(arguments.get("question") or "").strip()
+    raw_options = arguments.get("options")
+    options: list[dict] = []
+    if isinstance(raw_options, list):
+        for index, raw_option in enumerate(raw_options[:4]):
+            if not isinstance(raw_option, dict):
+                continue
+            label = str(raw_option.get("label") or raw_option.get("value") or "").strip()
+            value = str(raw_option.get("value") or label).strip()
+            if not label and not value:
+                continue
+            option_id = str(raw_option.get("id") or f"option-{index + 1}")
+            options.append(
+                {
+                    "id": option_id,
+                    "label": label or value,
+                    "value": value or label,
+                    "description": str(raw_option.get("description") or "").strip(),
+                    "recommended": index == 0,
+                }
+            )
+    selection_mode = str(arguments.get("selection_mode") or "").strip().lower()
+    if selection_mode not in {"single", "multiple"}:
+        selection_mode = "multiple" if bool(arguments.get("allow_multiple", False)) else "single"
+    return {
+        "kind": "user_input",
+        "request_id": str(action.get("tool_call_id") or f"user-input-{step_index or 0}"),
+        "question": question,
+        "options": options,
+        "selection_mode": selection_mode,
+        "allow_other": bool(arguments.get("allow_other", True)),
+        "other_option": {
+            "id": "other",
+            "label": "其他",
+            "value": "",
+            "description": "自己输入一个答案。",
+            "placeholder": str(arguments.get("other_placeholder") or "请输入其他答案").strip(),
+        },
+        "step_index": int(step_index or 0),
+    }
+
+
+def _invalid_user_input_request_reason(arguments: dict) -> str:
+    question = str(arguments.get("question") or "").strip()
+    if len(question) < 6 or question in {"需要你补充一个选择。", "需要你补充一个选择", "请选择"}:
+        return "request_user_input 缺少具体问题"
+    raw_options = arguments.get("options")
+    if not isinstance(raw_options, list):
+        return "request_user_input 缺少 options"
+    valid_options = []
+    for raw_option in raw_options:
+        if not isinstance(raw_option, dict):
+            continue
+        label = str(raw_option.get("label") or raw_option.get("value") or "").strip()
+        value = str(raw_option.get("value") or label).strip()
+        if label or value:
+            valid_options.append(raw_option)
+    if len(valid_options) < 2:
+        return "request_user_input 至少需要 2 个具体建议选项"
+    return ""
+
+
+def _normalize_user_input_resume(resume_value, request: dict) -> dict:
+    payload = resume_value if isinstance(resume_value, dict) else {"answer": str(resume_value or "")}
+    raw_ids = payload.get("selected_option_ids")
+    if isinstance(raw_ids, list):
+        selected_option_ids = [str(item) for item in raw_ids if str(item)]
+    else:
+        selected_option_ids = []
+    legacy_id = str(payload.get("selected_option_id") or payload.get("option_id") or "")
+    if legacy_id and legacy_id not in selected_option_ids:
+        selected_option_ids.append(legacy_id)
+    answer = str(payload.get("answer") or "").strip()
+    selected_option_labels: list[str] = []
+    selected_option_values: list[str] = []
+    is_other = "other" in selected_option_ids
+    options = request.get("options") if isinstance(request.get("options"), list) else []
+    options_by_id = {
+        str(option.get("id") or ""): option
+        for option in options
+        if isinstance(option, dict)
+    }
+    if not selected_option_ids and request.get("selection_mode") != "multiple" and options:
+        first_id = str(options[0].get("id") or "")
+        if first_id:
+            selected_option_ids.append(first_id)
+    for option_id in selected_option_ids:
+        if option_id == "other":
+            continue
+        option = options_by_id.get(option_id)
+        if not isinstance(option, dict):
+            continue
+        label = str(option.get("label") or "")
+        value = str(option.get("value") or label)
+        if label:
+            selected_option_labels.append(label)
+        if value:
+            selected_option_values.append(value)
+    other_text = str(payload.get("other_text") or "").strip()
+    if not answer:
+        answer_parts = [*selected_option_values]
+        if is_other and other_text:
+            answer_parts.append(other_text)
+        answer = "\n".join(answer_parts).strip()
+    if not answer:
+        answer = "继续"
+    selected_option_id = selected_option_ids[0] if selected_option_ids else "other"
+    return {
+        "answer": answer,
+        "selected_option_id": selected_option_id,
+        "selected_option_ids": selected_option_ids or [selected_option_id],
+        "selected_option_label": selected_option_labels[0] if selected_option_labels else ("其他" if is_other else answer),
+        "selected_option_labels": selected_option_labels or (["其他"] if is_other else [answer]),
+        "is_other": is_other,
+    }
+
+
 def _run_agent_tool_action(
     state: MemoryChatGraphState,
     *,
@@ -1383,6 +1788,9 @@ def _run_agent_tool_action(
     tool_name = str(action.get("tool_name") or "")
     arguments = dict(action.get("arguments") or {})
     tool_call_id = str(action.get("tool_call_id") or "")
+
+    if tool_name == REQUEST_USER_INPUT_TOOL_NAME:
+        return _run_request_user_input_action(state, action=action, step_index=step_index)
 
     if tool_name not in allowed_tool_names:
         observation: AgentToolObservationPayload = {
@@ -1590,6 +1998,8 @@ def _summarize_tool_observation(observation: AgentToolObservationPayload) -> str
     if not observation.get("ok"):
         return f"{tool_name} 没有成功：{observation.get('error_code', '')} {observation.get('message', '')}".strip()
     data = dict(observation.get("data") or {})
+    if tool_name == REQUEST_USER_INPUT_TOOL_NAME:
+        return f"用户已选择：{data.get('answer') or observation.get('message') or ''}".strip()
     if tool_name == "write_file":
         return f"写入完成：{data.get('relative_path') or data.get('path')}"
     if tool_name == "read_file":

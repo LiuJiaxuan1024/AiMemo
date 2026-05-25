@@ -145,16 +145,16 @@ html.linux-elf-window .elf img {
 }
 
 .elf-menu {
-  background: rgba(255, 255, 255, 0.94);
-  border: 1px solid rgba(203, 213, 225, 0.95);
-  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid rgba(186, 203, 226, 0.92);
+  border-radius: 8px;
   bottom: 18px;
-  box-shadow: 0 16px 34px rgba(15, 23, 42, 0.16);
+  box-shadow: 0 18px 38px rgba(15, 23, 42, 0.15);
   display: grid;
-  gap: 6px;
-  min-width: 132px;
+  gap: 5px;
+  min-width: 148px;
   opacity: 0;
-  padding: 8px;
+  padding: 7px;
   pointer-events: none;
   position: absolute;
   right: 22px;
@@ -171,24 +171,28 @@ html.linux-elf-window .elf img {
 }
 
 .elf-menu button {
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
-  border-radius: 8px;
-  color: #1849a9;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: #1f2a44;
   cursor: pointer;
   font-size: 13px;
-  padding: 9px 12px;
+  font-weight: 650;
+  padding: 9px 11px;
+  text-align: left;
 }
 
 .elf-menu button:hover {
-  background: #dbeafe;
+  background: #eff6ff;
+  border-color: #bfdbfe;
+  color: #1849a9;
 }
 
 .chat-panel {
   align-items: center;
-  background: rgba(255, 255, 255, 0.96);
-  border: 1px solid rgba(203, 213, 225, 0.95);
-  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid rgba(186, 203, 226, 0.92);
+  border-radius: 8px;
   bottom: 18px;
   box-shadow: 0 16px 34px rgba(15, 23, 42, 0.16);
   display: grid;
@@ -246,10 +250,11 @@ html.linux-elf-window .chat-panel {
 .chat-panel button {
   background: #2563eb;
   border: 1px solid #1d4ed8;
-  border-radius: 8px;
+  border-radius: 7px;
   color: #ffffff;
   cursor: pointer;
   font-size: 13px;
+  font-weight: 650;
   padding: 9px 10px;
 }
 
@@ -257,6 +262,154 @@ html.linux-elf-window .chat-panel {
 .chat-panel textarea:disabled {
   cursor: wait;
   opacity: 0.68;
+}
+
+.choice-panel {
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid rgba(186, 203, 226, 0.95);
+  border-radius: 8px;
+  bottom: 18px;
+  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.17);
+  box-sizing: border-box;
+  display: grid;
+  gap: 9px;
+  opacity: 0;
+  padding: 10px;
+  pointer-events: none;
+  position: absolute;
+  right: 22px;
+  transform: translateY(8px) scale(0.98);
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease;
+  width: 282px;
+}
+
+.choice-panel.open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
+}
+
+.choice-panel-title {
+  align-items: start;
+  display: grid;
+  gap: 4px;
+}
+
+.choice-panel-title strong {
+  color: #1f2a44;
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.choice-panel-title span {
+  color: #64748b;
+  font-size: 11px;
+}
+
+.choice-options {
+  display: grid;
+  gap: 7px;
+  max-height: 250px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.choice-option {
+  align-items: flex-start;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  box-sizing: border-box;
+  color: #243045;
+  cursor: pointer;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: auto minmax(0, 1fr);
+  padding: 8px 9px;
+}
+
+.choice-option:hover,
+.choice-option.selected {
+  background: #f0f7ff;
+  border-color: #93c5fd;
+}
+
+.choice-option input {
+  margin-top: 3px;
+}
+
+.choice-option > span {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.choice-option > span > span {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.choice-option em {
+  background: #e0f2fe;
+  border-radius: 999px;
+  color: #0369a1;
+  font-size: 10px;
+  font-style: normal;
+  padding: 1px 6px;
+}
+
+.choice-option small {
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.choice-option textarea {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  box-sizing: border-box;
+  color: #1d2433;
+  font: inherit;
+  line-height: 1.4;
+  min-height: 48px;
+  outline: none;
+  padding: 7px 8px;
+  resize: vertical;
+  width: 100%;
+}
+
+.choice-option textarea:focus {
+  border-color: #60a5fa;
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.18);
+}
+
+.choice-submit {
+  background: #2563eb;
+  border: 1px solid #1d4ed8;
+  border-radius: 7px;
+  color: #ffffff;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 650;
+  justify-self: end;
+  min-width: 92px;
+  padding: 8px 12px;
+}
+
+html.linux-elf-window .choice-panel {
+  box-shadow: none;
+  right: 18px;
+  width: 250px;
 }
 
 @keyframes memo-breathe {
