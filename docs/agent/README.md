@@ -59,6 +59,8 @@ LangGraph 不直接替代业务数据库。
 - 用户长期笔记、结构化字段和后续向量索引由业务存储负责。
 - jobs 表负责应用级任务排队、重试、锁和恢复。
 - Agent 通过工具调用业务服务，例如 `search_notes`、`get_note`、`create_note`。
+- 本地文件和命令能力必须经过 Local Operator 工具层，保留权限校验、审计和结构化 observation。
+- 需要用户确认的问题通过 `request_user_input` 触发 LangGraph interrupt，由前端/桌面精灵渲染选项卡并恢复同一轮 graph。
 
 ## 当前 Graph
 
@@ -69,6 +71,7 @@ LangGraph 不直接替代业务数据库。
 - [Conversation Memory Graph](./conversation-memory-graph.md)
 - [Context Pyramid](./context-pyramid.md)
 - [Local Operator Agent](./local-operator-agent.md)
+- [前后台任务边界](./background-vs-foreground.md)
 - [Dynamic Execution Graph](./dynamic-execution-graph.md)
 - [Memory Chat Agent 工具循环升级草案](./tool-loop-agent-upgrade.md)
 - [Claude-Code Agent 设计借鉴与 AiMemo 升级方案](./claude-code-agent-lessons.md)
@@ -80,8 +83,8 @@ LangGraph 不直接替代业务数据库。
 load_turn_state
   -> dispatch_context_workers
   -> merge_prompt_context
-  -> agent_think
-  -> tool loop / final answer
+  -> agent
+  -> tools / interrupt / final answer
   -> persist_messages
   -> enqueue_conversation_memory_job
 ```
@@ -97,5 +100,17 @@ L4 长期核心记忆
 ```
 
 其中 L3 context worker 内部负责 plan / rewrite / retrieve / grade。
-Local Operator 不再作为上下文 worker 运行；read/write 工具已经迁入主对话
-`agent_think -> tool -> observe -> agent_think` 循环，工具结果会回灌给 agent 再决定是否继续行动。
+Local Operator 不再作为上下文 worker 运行；read/write/exec/background 工具已经迁入主对话
+ReAct 工具循环。模型发出 tool call，工具结果作为 `ToolMessage` 回灌给 agent，再由 agent 决定继续调用工具、请求用户选择，或生成最终回答。
+
+当前工具集合包括：
+
+```text
+list_dir / read_file / search_files / search_text / get_file_info
+write_file
+exec_command
+exec_command_background / read_background_output / kill_background_task / list_background_tasks
+request_user_input
+```
+
+其中 `exec_command` 只用于本轮需要 stdout/stderr/exit_code 的前台短时命令；长跑服务必须走后台任务工具，详见 [前后台任务边界](./background-vs-foreground.md)。

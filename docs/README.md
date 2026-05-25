@@ -1,6 +1,6 @@
-# Ai 记文档
+# Memo Elf / AiMemo 文档
 
-本文档目录按项目结构和主题组织。建议先读“当前实现”，再按需要查看设计草案和历史报告。
+本文档目录按项目结构和主题组织。Memo Elf 是桌面精灵本体，AiMemo 是它的第一个记忆能力。建议先读“当前实现”，再按需要查看设计草案和历史报告。
 
 ## 推荐阅读路径
 
@@ -11,8 +11,9 @@
 5. [Memory Chat Graph](./agent/memory-chat-graph.md)
 6. [长期记忆管理](./backend/memories.md)
 7. [Local Operator Agent](./agent/local-operator-agent.md)
-8. [前端说明](./frontend/README.md)
-9. [Memo Elf 桌面化架构](./desktop/memo-elf-desktop-architecture.md)
+8. [前后台任务边界](./agent/background-vs-foreground.md)
+9. [前端说明](./frontend/README.md)
+10. [Memo Elf 桌面化架构](./desktop/memo-elf-desktop-architecture.md)
 
 ## 当前实现
 
@@ -47,6 +48,8 @@
 - [Conversation Title Graph](./agent/conversation-title-graph.md)
 - [Memory Consolidation](./agent/memory-consolidation.md)
 - [Local Operator Agent](./agent/local-operator-agent.md)
+- [前后台任务边界](./agent/background-vs-foreground.md)
+- [Claude-Code Agent 设计借鉴](./agent/claude-code-agent-lessons.md)
 
 ### 前端
 

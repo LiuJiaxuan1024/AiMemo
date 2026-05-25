@@ -58,7 +58,7 @@ DASHSCOPE_EMBEDDING_MODEL=text-embedding-v4
 EMBEDDING_DIMENSIONS=1024
 ```
 
-Local Operator read-only 默认允许读取仓库根目录和当前用户 Home 目录。需要追加更多目录时，
+Local Operator 默认授权仓库根目录和当前用户 Home 目录，用于受控文件读取、写入和命令工作目录。需要追加更多目录时，
 可以在 `.env` 中配置：
 
 ```text

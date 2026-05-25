@@ -1,6 +1,37 @@
 # Local Operator Agent 设计
 
-本文档描述 Ai 记下一阶段的本地操作智能体设计。目标是让用户在和 AI 对话时，可以授权 AI 读取本地文件、后续写入文件、执行命令，从“记忆型个人知识库”逐步升级为“本地个人智能体”。
+本文档描述 Ai 记 / Memo Elf 的本地操作智能体设计。目标是让用户在和 AI 对话时，可以授权 AI 读取本地文件、写入文件、执行命令，并逐步从“记忆型个人知识库”升级为“本地个人智能体”。
+
+## 当前实现状态
+
+Local Operator 已经不再是单独挂在 Memory Chat Graph 旁边的 read-only 子图。当前实现采用主对话 ReAct 工具循环：
+
+```text
+agent
+  -> tools
+  -> ToolMessage observation
+  -> agent
+  -> final answer / request_user_input
+```
+
+当前可用工具：
+
+| 工具 | 用途 | 约束 |
+| --- | --- | --- |
+| `list_dir` | 列目录 | 只读，路径必须在授权 roots 内 |
+| `read_file` | 读取文本文件 | 支持行范围和最大字节数，返回 `full_view/truncated` |
+| `search_files` | 按文件名搜索 | 只读 |
+| `search_text` | 搜索文本内容 | 只读 |
+| `get_file_info` | 查看文件 / 目录元信息 | 只读 |
+| `write_file` | 创建或整文件覆盖文本文件 | 覆盖已有文件前要求完整 `read_file`，除非用户明确确认绕过 |
+| `exec_command` | 前台执行短时非交互命令 | 返回 stdout/stderr/exit_code；非 0 退出码是工具失败，供 agent 重规划 |
+| `exec_command_background` | 后台启动长跑服务 | 仅用于 flask/uvicorn/npm dev 等持续运行服务 |
+| `read_background_output` | 读取后台任务输出 | 通过 task_id 轮询状态和日志 |
+| `kill_background_task` | 停止后台任务 | 会终止进程树 |
+| `list_background_tasks` | 列出当前会话后台任务 | 含历史 / orphaned |
+| `request_user_input` | 结构化反问用户 | 触发 LangGraph interrupt，前端/桌面精灵渲染选项卡 |
+
+旧文档中“第一阶段只实现 read”“建议作为独立子图”的描述属于设计演进记录；当前代码以本节为准。前后台命令边界见 [前后台任务边界](./background-vs-foreground.md)。
 
 ## 项目规则注入（AGENTS.md → planner system prompt）
 
@@ -24,7 +55,7 @@ write  创建或修改文件，必须先生成 diff 并等待用户确认
 exec   执行本地命令，必须经过风险评估和用户确认
 ```
 
-第一阶段只实现 `read`。这是因为读取能力没有副作用，适合作为工具调用框架、权限边界、前端展示和 graph 编排的第一块地基。
+早期第一阶段只实现 `read`。目前已经扩展到 `write`、`exec` 和后台服务任务，但仍保留读取优先、工具审计和风险分层的设计原则。
 
 ## 与 Memory Chat Graph 的关系
 

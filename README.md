@@ -25,7 +25,7 @@ AiMemo Memory Skill
 
 Local Operator
   面向未来的本地电脑操作能力。
-  当前已实现 read-only 文件读取子图，后续再谨慎扩展 write / exec。
+  当前已接入主对话工具循环，支持受控 read / write / exec，以及后台服务任务管理。
 ```
 
 换句话说：
@@ -48,6 +48,7 @@ Local Operator
 后端精灵事件中心
 Tauri 桌面精灵壳
 打开 AiMemo 主页面
+结构化选项卡确认（request_user_input）
 笔记创建与本地 SQLite 存储
 笔记标题 / 摘要 / 标签自动整理
 笔记 chunk 分片与 embedding 入库
@@ -59,7 +60,8 @@ Memory Chat Graph 对话
 LangGraph checkpoint 持久化
 本地 job 队列与启动恢复
 任务 graph 可视化
-Local Operator read-only 本地文件读取子图
+Graph 调试工作台 checkpoint history / state diff
+Local Operator 本地读写文件、短时命令执行和后台服务任务
 前端 Markdown 渲染和基础调试面板
 ```
 
@@ -99,7 +101,7 @@ backend/
     agent/       LangGraph graph、模型、streaming、上下文构建
     api/         FastAPI 路由
     jobs/        本地任务队列、worker、reconciler
-    local_operator/ read-only 本地文件工具、权限策略和审计
+    local_operator/ 本地文件 / 命令工具、权限策略和审计
     models/      SQLModel 数据模型
     rag/         chunking、hash、vector store、search
     services/    业务服务层
@@ -418,6 +420,7 @@ npm run build
 - [Memory Chat Graph](./docs/agent/memory-chat-graph.md)
 - [Memory Chat Graph 设计草案](./docs/agent/memory-chat-graph-design.md)
 - [Local Operator Agent](./docs/agent/local-operator-agent.md)
+- [前后台任务边界](./docs/agent/background-vs-foreground.md)
 - [本地任务系统](./docs/backend/jobs.md)
 - [向量存储](./docs/backend/vector-storage.md)
 - [精灵助手](./docs/frontend/elf-assistant.md)
