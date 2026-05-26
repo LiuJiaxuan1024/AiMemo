@@ -77,6 +77,40 @@ class AgentThoughtPayload(TypedDict, total=False):
     step_index: int
 
 
+class AgentTaskStepPayload(TypedDict, total=False):
+    """本轮任务中的一个显式步骤。"""
+
+    id: str
+    description: str
+    status: Literal["pending", "running", "completed", "failed", "skipped"]
+    tool_name: str
+    arguments: dict
+    result_summary: str
+    retry_count: int
+
+
+class AgentTaskPayload(TypedDict, total=False):
+    """主 ReAct 循环可见的任务模型。"""
+
+    id: str
+    goal: str
+    status: Literal["planning", "running", "needs_user_input", "completed", "failed"]
+    current_step_id: str
+    steps: list[AgentTaskStepPayload]
+    acceptance_criteria: list[str]
+    assumptions: list[str]
+
+
+class AgentWorldStatePayload(TypedDict, total=False):
+    """工具执行后沉淀的世界状态摘要。"""
+
+    known_paths: dict[str, dict]
+    command_results: list[dict]
+    background_tasks: list[dict]
+    observations: list[dict]
+    failures: list[dict]
+
+
 class TurnMessagePayload(TypedDict, total=False):
     """单轮 graph 内部追加的消息流。
 
@@ -144,6 +178,10 @@ class MemoryChatGraphState(TypedDict, total=False):
     consecutive_failed_tools: int
     # 当前 ReAct 步号；每次 agent 节点进入时 +1，关联到本步产生的 thought 与 tool_invocation。
     agent_step_index: int
+    task: AgentTaskPayload
+    world_state: AgentWorldStatePayload
+    verification: dict
+    replan_required: bool
     agent_decision: dict
     tool_observations: list[AgentToolObservationPayload]
     tool_observation_context: str

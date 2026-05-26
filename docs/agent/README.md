@@ -71,6 +71,7 @@ LangGraph 不直接替代业务数据库。
 - [Conversation Memory Graph](./conversation-memory-graph.md)
 - [Context Pyramid](./context-pyramid.md)
 - [Local Operator Agent](./local-operator-agent.md)
+- [Agent 工具扩展提案](./tooling-expansion-proposal.md)
 - [前后台任务边界](./background-vs-foreground.md)
 - [Dynamic Execution Graph](./dynamic-execution-graph.md)
 - [Memory Chat Agent 工具循环升级草案](./tool-loop-agent-upgrade.md)
@@ -83,8 +84,12 @@ LangGraph 不直接替代业务数据库。
 load_turn_state
   -> dispatch_context_workers
   -> merge_prompt_context
+  -> plan_task
   -> agent
-  -> tools / interrupt / final answer
+  -> tools
+  -> observe_tool_result
+  -> verify_goal
+  -> agent / final answer
   -> persist_messages
   -> enqueue_conversation_memory_job
 ```
@@ -102,6 +107,8 @@ L4 长期核心记忆
 其中 L3 context worker 内部负责 plan / rewrite / retrieve / grade。
 Local Operator 不再作为上下文 worker 运行；read/write/exec/background 工具已经迁入主对话
 ReAct 工具循环。模型发出 tool call，工具结果作为 `ToolMessage` 回灌给 agent，再由 agent 决定继续调用工具、请求用户选择，或生成最终回答。
+`plan_task` 会在 agent 前为本轮建立轻量任务对象；`observe_tool_result` 会把工具结果吸收进
+`world_state`；`verify_goal` 会记录当前进展是否需要重规划。第一版 verifier 是确定性轻量规则，后续可替换为更强的目标验收器。
 
 当前工具集合包括：
 

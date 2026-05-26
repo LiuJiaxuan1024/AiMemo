@@ -1,5 +1,5 @@
 import { Check, GitBranch } from "lucide-react";
-import { useMemo, useState, type RefObject } from "react";
+import { useState, type RefObject } from "react";
 
 import { Button, EmptyState } from "../../shared/ui";
 import { MarkdownMessage } from "./MarkdownMessage";
@@ -13,6 +13,7 @@ import type {
   MessageSegment,
   ToolInvocation,
   UserInputAnswer,
+  UserInputQuestion,
   UserInputRequest,
 } from "./types";
 
@@ -118,98 +119,135 @@ function UserInputInterruptCard({
   request,
   onSubmit,
 }: UserInputInterruptCardProps) {
-  const mode = request.selection_mode === "multiple" ? "multiple" : "single";
-  const firstOptionId = request.options[0]?.id ?? "";
-  const [selectedIds, setSelectedIds] = useState<string[]>(firstOptionId ? [firstOptionId] : []);
-  const [otherText, setOtherText] = useState("");
+  const questions = request.questions?.length
+    ? request.questions
+    : [
+        {
+          id: `${request.request_id}-question-1`,
+          question: request.question,
+          options: request.options,
+          selection_mode: request.selection_mode,
+          allow_other: request.allow_other,
+          other_placeholder: request.other_option?.placeholder || "在这里补充你的答案",
+        },
+      ];
+  const [activeIndex, setActiveIndex] = useState(0);
+  type QuestionAnswer = NonNullable<UserInputAnswer["question_answers"]>[number];
+  const [answers, setAnswers] = useState<Record<string, QuestionAnswer>>({});
 
-  const selectedOptions = useMemo(
-    () => request.options.filter((option) => selectedIds.includes(option.id)),
-    [request.options, selectedIds],
-  );
-  const includesOther = selectedIds.includes("other");
-  const canSubmit =
-    selectedOptions.length > 0 || (request.allow_other && (includesOther || otherText.trim().length > 0));
+  const current = questions[activeIndex];
+  const currentAnswer = current ? answers[current.id] : undefined;
+  const canGoBack = activeIndex > 0;
+  const canGoNext = Boolean(currentAnswer);
+  const canSubmit = questions.length > 0 && questions.every((question) => answers[question.id]);
 
-  function toggleOption(optionId: string) {
-    if (disabled) {
+  function updateCurrentAnswer(answer: QuestionAnswer) {
+    if (!current) {
       return;
     }
-    if (mode === "single") {
-      setSelectedIds([optionId]);
-      return;
-    }
-    setSelectedIds((current) =>
-      current.includes(optionId)
-        ? current.filter((item) => item !== optionId)
-        : [...current, optionId],
-    );
+    setAnswers((currentAnswers) => ({
+      ...currentAnswers,
+      [current.id]: answer,
+    }));
   }
 
-  function handleOtherFocus() {
-    if (!request.allow_other || selectedIds.includes("other")) {
+  function handleSubmitCurrent(selection: {
+    selected_option_id: string;
+    selected_option_ids: string[];
+    answer: string;
+    other_text?: string;
+    selected_option_labels: string[];
+    is_other?: boolean;
+  }) {
+    if (!current) {
       return;
     }
-    setSelectedIds((current) => (mode === "single" ? ["other"] : [...current, "other"]));
-  }
-
-  function handleSubmit() {
-    if (disabled || !canSubmit) {
-      return;
-    }
-    const ids = [...selectedIds];
-    const trimmedOther = otherText.trim();
-    if (trimmedOther && !ids.includes("other")) {
-      ids.push("other");
-    }
-    const normalValues = request.options
-      .filter((option) => ids.includes(option.id))
-      .map((option) => option.value || option.label)
-      .filter(Boolean);
-    const answerParts = [...normalValues];
-    if (trimmedOther) {
-      answerParts.push(trimmedOther);
-    }
-    const answer = answerParts.join("\n").trim();
-    onSubmit(message, {
-      request_id: request.request_id,
-      selected_option_id: ids[0] ?? "",
-      selected_option_ids: ids,
-      answer,
-      other_text: trimmedOther,
+    updateCurrentAnswer({
+      question_id: current.id,
+      question: current.question,
+      ...selection,
     });
   }
 
-  function handleOtherClick() {
-    if (!request.allow_other || disabled) {
+  function goNext() {
+    if (!canGoNext || disabled) {
       return;
     }
-    if (!selectedIds.includes("other")) {
-      setSelectedIds((current) => (mode === "single" ? ["other"] : [...current, "other"]));
+    setActiveIndex((index) => Math.min(index + 1, questions.length - 1));
+  }
+
+  function goBack() {
+    if (!canGoBack || disabled) {
+      return;
     }
+    setActiveIndex((index) => Math.max(index - 1, 0));
+  }
+
+  function handleFinalSubmit() {
+    if (disabled || !canSubmit) {
+      return;
+    }
+    const question_answers = questions
+      .map((question) => answers[question.id])
+      .filter(Boolean)
+      .map((item) => item!);
+    const answer = question_answers.map((item, index) => `${index + 1}. ${item.question}\n答：${item.answer}`).join("\n");
+    const selected_option_ids = question_answers.flatMap((item) => item.selected_option_ids);
+    const selected_option_labels = question_answers.flatMap((item) => item.selected_option_labels);
+    onSubmit(message, {
+      request_id: request.request_id,
+      request_ids: questions.map((question) => question.id),
+      selected_option_id: selected_option_ids[0] ?? "",
+      selected_option_ids,
+      answer,
+      answers: question_answers.map((item) => item.answer),
+      question_answers,
+      other_text: question_answers.find((item) => item.other_text)?.other_text,
+    });
   }
 
   return (
     <div className="chat-interrupt-card" role="group" aria-label={request.question}>
-      <p className="chat-interrupt-card__question">{request.question}</p>
+      <div className="chat-interrupt-card__header">
+        <p className="chat-interrupt-card__question">{current?.question ?? request.question}</p>
+        {questions.length > 1 ? (
+          <span className="chat-interrupt-card__step">
+            {activeIndex + 1}/{questions.length}
+          </span>
+        ) : null}
+      </div>
       <div className="chat-interrupt-options">
-        {request.options.map((option, index) => {
+        {current?.options.map((option, index) => {
+          const selectedIds = currentAnswer?.selected_option_ids ?? [];
           const checked = selectedIds.includes(option.id);
           return (
             <button
               className={`chat-interrupt-option ${checked ? "selected" : ""}`}
               key={option.id}
-              onClick={() => toggleOption(option.id)}
+              onClick={() => {
+                if (disabled || !current) {
+                  return;
+                }
+                const mode = current.selection_mode === "multiple" ? "multiple" : "single";
+                const nextSelected = mode === "single"
+                  ? [option.id]
+                  : checked
+                    ? selectedIds.filter((item) => item !== option.id)
+                    : [...selectedIds, option.id];
+                handleSubmitCurrent({
+                  ...selectedAnswerFromQuestion(current, nextSelected, currentAnswer?.other_text ?? ""),
+                });
+              }}
               type="button"
             >
               <input
                 aria-hidden="true"
                 checked={checked}
                 disabled={disabled}
-                name={`interrupt-${request.request_id}`}
+                name={`interrupt-${request.request_id}-${current?.id ?? "current"}`}
                 onChange={() => undefined}
                 tabIndex={-1}
-                type={mode === "multiple" ? "checkbox" : "radio"}
+                type={current?.selection_mode === "multiple" ? "checkbox" : "radio"}
               />
               <span className="chat-interrupt-option__mark" aria-hidden="true" />
               <span className="chat-interrupt-option__body">
@@ -222,42 +260,140 @@ function UserInputInterruptCard({
             </button>
           );
         })}
-        {request.allow_other ? (
-          <button
-            className={`chat-interrupt-option chat-interrupt-option--other ${includesOther ? "selected" : ""}`}
-            onClick={handleOtherClick}
-            type="button"
+        {current?.allow_other ? (
+          <div
+            className={`chat-interrupt-option chat-interrupt-option--other ${currentAnswer?.selected_option_ids?.includes("other") ? "selected" : ""}`}
+            onClick={(event) => {
+              if ((event.target as HTMLElement).closest("input")) {
+                return;
+              }
+              if (disabled || !current) {
+                return;
+              }
+              const mode = current.selection_mode === "multiple" ? "multiple" : "single";
+              const nextIds = mode === "single"
+                ? ["other"]
+                : currentAnswer?.selected_option_ids?.includes("other")
+                  ? currentAnswer.selected_option_ids
+                  : [...(currentAnswer?.selected_option_ids ?? []), "other"];
+              updateCurrentAnswer({
+                question_id: current.id,
+                question: current.question,
+                selected_option_id: nextIds[0] ?? "other",
+                selected_option_ids: nextIds,
+                answer: currentAnswer?.other_text?.trim() || "",
+                selected_option_labels: ["其他"],
+                other_text: currentAnswer?.other_text,
+                is_other: true,
+              });
+            }}
           >
             <input
               aria-hidden="true"
-              checked={includesOther}
+              checked={currentAnswer?.selected_option_ids?.includes("other") ?? false}
               disabled={disabled}
-              name={`interrupt-${request.request_id}`}
+              name={`interrupt-${request.request_id}-${current?.id ?? "current"}`}
               onChange={() => undefined}
               tabIndex={-1}
-              type={mode === "multiple" ? "checkbox" : "radio"}
+              type={current?.selection_mode === "multiple" ? "checkbox" : "radio"}
             />
             <span className="chat-interrupt-option__mark" aria-hidden="true" />
             <span className="chat-interrupt-option__body chat-interrupt-option__body--other">
-              <span className="chat-interrupt-option__other-label">其他</span>
-              <input
-                className="chat-interrupt-option__inline-input"
-                disabled={disabled}
-                onChange={(event) => setOtherText(event.target.value)}
-                onFocus={handleOtherFocus}
-                placeholder={request.other_option?.placeholder || "在这里补充你的答案"}
-                value={otherText}
-              />
+              <div className="chat-interrupt-option__inline-row">
+                <input
+                  className="chat-interrupt-option__inline-input"
+                  disabled={disabled}
+                  onFocus={() => {
+                    if (!current) {
+                      return;
+                    }
+                    const mode = current.selection_mode === "multiple" ? "multiple" : "single";
+                    const nextIds = mode === "single"
+                      ? ["other"]
+                      : currentAnswer?.selected_option_ids?.includes("other")
+                        ? currentAnswer.selected_option_ids
+                        : [...(currentAnswer?.selected_option_ids ?? []), "other"];
+                    updateCurrentAnswer({
+                      question_id: current.id,
+                      question: current.question,
+                      selected_option_id: nextIds[0] ?? "other",
+                      selected_option_ids: nextIds,
+                      answer: currentAnswer?.other_text?.trim() || "",
+                      selected_option_labels: ["其他"],
+                      other_text: currentAnswer?.other_text,
+                      is_other: true,
+                    });
+                  }}
+                  onChange={(event) => {
+                    if (!current) {
+                      return;
+                    }
+                    const mode = current.selection_mode === "multiple" ? "multiple" : "single";
+                    const nextIds = mode === "single"
+                      ? ["other"]
+                      : currentAnswer?.selected_option_ids?.includes("other")
+                        ? currentAnswer.selected_option_ids
+                        : [...(currentAnswer?.selected_option_ids ?? []), "other"];
+                    updateCurrentAnswer({
+                      question_id: current.id,
+                      question: current.question,
+                      selected_option_id: nextIds[0] ?? "other",
+                      selected_option_ids: nextIds,
+                      answer: event.target.value.trim(),
+                      selected_option_labels: ["其他"],
+                      other_text: event.target.value,
+                      is_other: true,
+                    });
+                  }}
+                  placeholder={current?.other_placeholder || request.other_option?.placeholder || "请输入其他答案"}
+                  value={currentAnswer?.other_text ?? ""}
+                />
+              </div>
             </span>
-          </button>
+          </div>
         ) : null}
       </div>
-      <Button disabled={disabled || !canSubmit} onClick={handleSubmit} size="sm" type="button" variant="primary">
-        <Check aria-hidden="true" size={15} />
-        Submit
-      </Button>
+      <div className="chat-interrupt-card__nav">
+        {questions.length > 1 ? (
+          <>
+            <Button disabled={disabled || !canGoBack} onClick={goBack} size="sm" type="button" variant="secondary">
+              上一题
+            </Button>
+            <Button disabled={disabled || !canGoNext} onClick={goNext} size="sm" type="button" variant="primary">
+              下一题
+            </Button>
+          </>
+        ) : null}
+      </div>
+      <div className="chat-interrupt-card__submit">
+        <Button disabled={disabled || !canSubmit} onClick={handleFinalSubmit} size="sm" type="button" variant="primary">
+          <Check aria-hidden="true" size={15} />
+          Submit
+        </Button>
+      </div>
     </div>
   );
+}
+
+function selectedAnswerFromQuestion(
+  question: UserInputQuestion,
+  selectedIds: string[],
+  otherText = "",
+) {
+  const selectedOptions = question.options.filter((item) => selectedIds.includes(item.id));
+  const answerParts = selectedOptions.map((item) => item.value || item.label).filter(Boolean);
+  const trimmedOther = otherText.trim();
+  if (trimmedOther) {
+    answerParts.push(trimmedOther);
+  }
+  return {
+    selected_option_id: selectedIds[0] ?? "",
+    selected_option_ids: selectedIds,
+    answer: answerParts.join("\n"),
+    selected_option_labels: selectedOptions.map((item) => item.label).concat(selectedIds.includes("other") ? ["其他"] : []),
+    other_text: otherText,
+    is_other: selectedIds.includes("other"),
+  };
 }
 
 function TypingIndicator({

@@ -783,6 +783,27 @@ def _normalize_interrupt_payload(raw_interrupt) -> dict:
     request.setdefault("kind", "user_input")
     request.setdefault("request_id", interrupt.get("id") or "")
     request["interrupt_id"] = str(interrupt.get("id") or "")
+    raw_questions = request.get("questions")
+    if isinstance(raw_questions, list) and raw_questions:
+        normalized_questions = []
+        for index, item in enumerate(raw_questions):
+            normalized_question = _normalize_user_input_question(item, index)
+            if normalized_question:
+                normalized_questions.append(normalized_question)
+        request["questions"] = normalized_questions
+        if normalized_questions:
+            request["question"] = normalized_questions[0]["question"]
+            request["options"] = normalized_questions[0]["options"]
+            request["selection_mode"] = normalized_questions[0]["selection_mode"]
+            request["allow_other"] = normalized_questions[0]["allow_other"]
+            request["other_option"] = {
+                "id": "other",
+                "label": "其他",
+                "value": "",
+                "description": "自己输入一个答案。",
+                "placeholder": normalized_questions[0]["other_placeholder"],
+            }
+        return request
     request["question"] = str(request.get("question") or "需要你补充一个选择。")
     selection_mode = str(request.get("selection_mode") or "single")
     request["selection_mode"] = selection_mode if selection_mode in {"single", "multiple"} else "single"
@@ -816,6 +837,44 @@ def _normalize_interrupt_payload(raw_interrupt) -> dict:
         "placeholder": str(other.get("placeholder") or "请输入其他答案"),
     }
     return request
+
+
+def _normalize_user_input_question(raw_question, index: int) -> dict | None:
+    if not isinstance(raw_question, dict):
+        return None
+    question = str(raw_question.get("question") or "").strip()
+    raw_options = raw_question.get("options")
+    options = raw_options if isinstance(raw_options, list) else []
+    normalized_options = []
+    for option_index, option in enumerate(options):
+        if not isinstance(option, dict):
+            continue
+        label = str(option.get("label") or option.get("value") or "").strip()
+        value_text = str(option.get("value") or label).strip()
+        if not label and not value_text:
+            continue
+        normalized_options.append(
+            {
+                "id": str(option.get("id") or f"question-{index + 1}-option-{option_index + 1}"),
+                "label": label or value_text,
+                "value": value_text or label,
+                "description": str(option.get("description") or "").strip(),
+                "recommended": bool(option.get("recommended", option_index == 0)),
+            }
+        )
+    if len(question) < 6 or len(normalized_options) < 2:
+        return None
+    selection_mode = str(raw_question.get("selection_mode") or "single")
+    if selection_mode not in {"single", "multiple"}:
+        selection_mode = "single"
+    return {
+        "id": str(raw_question.get("id") or f"question-{index + 1}"),
+        "question": question,
+        "options": normalized_options,
+        "selection_mode": selection_mode,
+        "allow_other": bool(raw_question.get("allow_other", True)),
+        "other_placeholder": str(raw_question.get("other_placeholder") or "请输入其他答案"),
+    }
 
 
 def _decode_json_object(value: str) -> dict[str, str]:

@@ -547,27 +547,29 @@ function choiceAckText(answer: UserInputAnswer) {
 
 function normalizeUserInputRequest(raw: unknown): UserInputRequest {
   const payload = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
-  const options = Array.isArray(payload.options)
-    ? payload.options
-        .map((option, index): UserInputOption | null => {
-          if (!option || typeof option !== "object") {
+  const options = normalizeUserInputOptions(payload.options, "option");
+  const questions = Array.isArray(payload.questions)
+    ? payload.questions
+        .map((rawQuestion, index): UserInputQuestion | null => {
+          if (!rawQuestion || typeof rawQuestion !== "object") {
             return null;
           }
-          const item = option as Record<string, unknown>;
-          const label = String(item.label ?? item.value ?? "").trim();
-          const value = String(item.value ?? label).trim();
-          if (!label && !value) {
+          const item = rawQuestion as Record<string, unknown>;
+          const question = String(item.question ?? "").trim();
+          const nestedOptions = normalizeUserInputOptions(item.options, `question-${index + 1}-option`);
+          if (!question || nestedOptions.length < 2) {
             return null;
           }
           return {
-            id: String(item.id ?? `option-${index + 1}`),
-            label: label || value,
-            value: value || label,
-            description: String(item.description ?? ""),
-            recommended: Boolean(item.recommended ?? index === 0),
+            id: String(item.id ?? `question-${index + 1}`),
+            question,
+            selection_mode: item.selection_mode === "multiple" ? "multiple" : "single",
+            options: nestedOptions,
+            allow_other: item.allow_other !== false,
+            other_placeholder: String(item.other_placeholder ?? "请输入其他答案"),
           };
         })
-        .filter((option): option is UserInputOption => option !== null)
+        .filter((question): question is UserInputQuestion => question !== null)
     : [];
   return {
     kind: "user_input",
@@ -586,7 +588,34 @@ function normalizeUserInputRequest(raw: unknown): UserInputRequest {
           ? String((payload.other_option as Record<string, unknown>).placeholder ?? "Type another answer")
           : "Type another answer",
     },
+    questions,
   };
+}
+
+function normalizeUserInputOptions(rawOptions: unknown, idPrefix: string): UserInputOption[] {
+  if (!Array.isArray(rawOptions)) {
+    return [];
+  }
+  return rawOptions
+    .map((option, index): UserInputOption | null => {
+      if (!option || typeof option !== "object") {
+        return null;
+      }
+      const item = option as Record<string, unknown>;
+      const label = String(item.label ?? item.value ?? "").trim();
+      const value = String(item.value ?? label).trim();
+      if (!label && !value) {
+        return null;
+      }
+      return {
+        id: String(item.id ?? `${idPrefix}-${index + 1}`),
+        label: label || value,
+        value: value || label,
+        description: String(item.description ?? ""),
+        recommended: Boolean(item.recommended ?? index === 0),
+      };
+    })
+    .filter((option): option is UserInputOption => option !== null);
 }
 
 function showChoicePanel(request: UserInputRequest): Promise<UserInputAnswer> {
@@ -610,24 +639,78 @@ function showChoicePanel(request: UserInputRequest): Promise<UserInputAnswer> {
     }
     choicePanel.classList.remove("closing");
     choicePanel.replaceChildren();
-    const mode = request.selection_mode === "multiple" ? "multiple" : "single";
-    const selectedIds = new Set<string>();
-    if (request.options[0]?.id) {
-      selectedIds.add(request.options[0].id);
-    }
+    const questions = request.questions?.length
+      ? request.questions
+      : [
+          {
+            id: `${request.request_id}-question-1`,
+            question: request.question,
+            selection_mode: request.selection_mode,
+            options: request.options,
+            allow_other: request.allow_other,
+            other_placeholder: request.other_option.placeholder || "在这里补充你的答案",
+          },
+        ];
+    const answers = new Map<string, NonNullable<UserInputAnswer["question_answers"]>[number]>();
+    let activeIndex = 0;
 
+    const header = document.createElement("div");
+    header.className = "choice-panel-title";
+    const title = document.createElement("strong");
+    const subtitle = document.createElement("span");
+    header.append(title, subtitle);
     const list = document.createElement("div");
     list.className = "choice-options";
+    const actions = document.createElement("div");
+    actions.className = "choice-actions";
+    choicePanel.append(header);
     choicePanel.append(list);
+    choicePanel.append(actions);
 
-    const syncInputs = () => {
+    const syncInputs = (selectedIds: Set<string>) => {
       list.querySelectorAll<HTMLInputElement>('input[type="radio"], input[type="checkbox"]').forEach((input) => {
         input.checked = selectedIds.has(input.value);
         input.closest("label")?.classList.toggle("selected", input.checked);
       });
     };
 
-    function setSelected(id: string) {
+    function renderQuestion() {
+      const question = questions[activeIndex] ?? questions[0];
+      const stored = answers.get(question.id);
+      const mode = question.selection_mode === "multiple" ? "multiple" : "single";
+      const selectedIds = new Set<string>(stored?.selected_option_ids ?? []);
+      if (!selectedIds.size && question.options[0]?.id) {
+        selectedIds.add(question.options[0].id);
+      }
+      title.textContent = question.question;
+      subtitle.textContent = questions.length > 1 ? `${activeIndex + 1}/${questions.length}` : "";
+      list.replaceChildren();
+      actions.replaceChildren();
+
+      function saveCurrentAnswer(otherText = "") {
+        const ids = Array.from(selectedIds);
+        const selectedOptions = question.options.filter((option) => ids.includes(option.id));
+        const values = selectedOptions.map((option) => option.value || option.label).filter(Boolean);
+        const trimmedOther = otherText.trim();
+        if (trimmedOther) {
+          values.push(trimmedOther);
+        }
+        answers.set(question.id, {
+          question_id: question.id,
+          question: question.question,
+          selected_option_id: ids[0] ?? "other",
+          selected_option_ids: ids.length ? ids : ["other"],
+          selected_option_labels: selectedOptions
+            .map((option) => option.label)
+            .concat(ids.includes("other") ? ["其他"] : []),
+          answer: values.join("\n"),
+          other_text: otherText,
+          is_other: ids.includes("other"),
+        });
+        updateActions();
+      }
+
+      function setSelected(id: string, otherText = "") {
       if (mode === "single") {
         selectedIds.clear();
         selectedIds.add(id);
@@ -636,15 +719,16 @@ function showChoicePanel(request: UserInputRequest): Promise<UserInputAnswer> {
       } else {
         selectedIds.add(id);
       }
-      syncInputs();
-    }
+        syncInputs(selectedIds);
+        saveCurrentAnswer(otherText);
+      }
 
-    for (const option of request.options) {
+      for (const option of question.options) {
       const label = document.createElement("label");
       label.className = "choice-option";
       const input = document.createElement("input");
       input.type = mode === "multiple" ? "checkbox" : "radio";
-      input.name = `choice-${request.request_id}`;
+        input.name = `choice-${request.request_id}-${question.id}`;
       input.value = option.id;
       input.addEventListener("change", () => setSelected(option.id));
       const body = document.createElement("span");
@@ -665,65 +749,102 @@ function showChoicePanel(request: UserInputRequest): Promise<UserInputAnswer> {
       list.append(label);
     }
 
-    let otherInput: HTMLInputElement | null = null;
-    if (request.allow_other) {
+      let otherInput: HTMLInputElement | null = null;
+      if (question.allow_other) {
       const other = document.createElement("label");
       other.className = "choice-option choice-option-other";
       const input = document.createElement("input");
       input.type = mode === "multiple" ? "checkbox" : "radio";
-      input.name = `choice-${request.request_id}`;
+        input.name = `choice-${request.request_id}-${question.id}`;
       input.value = "other";
-      input.addEventListener("change", () => setSelected("other"));
+        input.addEventListener("change", () => setSelected("other", otherInput?.value ?? ""));
       const body = document.createElement("span");
       const main = document.createElement("span");
-      main.textContent = request.other_option.label || "其他";
+      main.textContent = "其他";
       otherInput = document.createElement("input");
       otherInput.type = "text";
-      otherInput.placeholder = request.other_option.placeholder || "在这里补充你的答案";
+        otherInput.placeholder = question.other_placeholder || "在这里补充你的答案";
+        otherInput.value = stored?.other_text ?? "";
       otherInput.addEventListener("focus", () => {
         if (!selectedIds.has("other")) {
-          setSelected("other");
+            setSelected("other", otherInput?.value ?? "");
         }
       });
+        otherInput.addEventListener("input", () => {
+          selectedIds.add("other");
+          syncInputs(selectedIds);
+          saveCurrentAnswer(otherInput?.value ?? "");
+        });
       body.append(main, otherInput);
       other.append(input, body);
       list.append(other);
     }
 
-    const submit = document.createElement("button");
-    submit.type = "submit";
-    submit.className = "choice-submit";
-    submit.textContent = "Submit";
-    choicePanel.append(submit);
-    choicePanel.classList.add("open");
-    choicePanel.setAttribute("aria-hidden", "false");
-    syncInputs();
+      function updateActions() {
+        actions.replaceChildren();
+        if (activeIndex > 0) {
+          const back = document.createElement("button");
+          back.type = "button";
+          back.className = "choice-submit choice-submit--secondary";
+          back.textContent = "上一题";
+          back.addEventListener("click", () => {
+            activeIndex -= 1;
+            renderQuestion();
+          });
+          actions.append(back);
+        }
+        if (activeIndex < questions.length - 1) {
+          const next = document.createElement("button");
+          next.type = "button";
+          next.className = "choice-submit";
+          next.textContent = "下一题";
+          next.disabled = !answers.has(question.id);
+          next.addEventListener("click", () => {
+            if (!answers.has(question.id)) {
+              return;
+            }
+            activeIndex += 1;
+            renderQuestion();
+          });
+          actions.append(next);
+        } else {
+          const submit = document.createElement("button");
+          submit.type = "submit";
+          submit.className = "choice-submit";
+          submit.textContent = "Submit";
+          submit.disabled = questions.some((item) => !answers.has(item.id));
+          actions.append(submit);
+        }
+      }
+
+      syncInputs(selectedIds);
+      saveCurrentAnswer(stored?.other_text ?? "");
+      updateActions();
+    }
 
     choicePanel.onsubmit = (event) => {
       event.preventDefault();
-      const ids = Array.from(selectedIds);
-      const otherText = otherInput?.value.trim() ?? "";
-      if (otherText && !ids.includes("other")) {
-        ids.push("other");
-      }
-      const values = request.options
-        .filter((option) => ids.includes(option.id))
-        .map((option) => option.value || option.label)
-        .filter(Boolean);
-      if (otherText) {
-        values.push(otherText);
-      }
+      const questionAnswers = questions
+        .map((question) => answers.get(question.id))
+        .filter((item): item is NonNullable<typeof item> => Boolean(item));
+      const ids = questionAnswers.flatMap((item) => item.selected_option_ids);
       const answer: UserInputAnswer = {
         request_id: request.request_id,
+        request_ids: questions.map((question) => question.id),
         selected_option_id: ids[0] ?? "",
         selected_option_ids: ids,
-        answer: values.join("\n"),
-        other_text: otherText,
+        answer: questionAnswers.map((item, index) => `${index + 1}. ${item.question}\n答：${item.answer}`).join("\n"),
+        answers: questionAnswers.map((item) => item.answer),
+        question_answers: questionAnswers,
+        other_text: questionAnswers.find((item) => item.other_text)?.other_text,
       };
       closeChoicePanelWithAnimation(() => {
         resolve(answer);
       });
     };
+    choicePanel.classList.add("open");
+    choicePanel.setAttribute("aria-hidden", "false");
+    renderQuestion();
   });
 }
 
@@ -1177,6 +1298,16 @@ interface UserInputRequest {
   options: UserInputOption[];
   allow_other: boolean;
   other_option: UserInputOption & { placeholder?: string };
+  questions?: UserInputQuestion[];
+}
+
+interface UserInputQuestion {
+  id: string;
+  question: string;
+  selection_mode: "single" | "multiple";
+  options: UserInputOption[];
+  allow_other: boolean;
+  other_placeholder: string;
 }
 
 interface UserInputAnswer {
@@ -1185,6 +1316,18 @@ interface UserInputAnswer {
   selected_option_ids: string[];
   answer: string;
   other_text?: string;
+  request_ids?: string[];
+  answers?: string[];
+  question_answers?: Array<{
+    question_id: string;
+    question: string;
+    answer: string;
+    selected_option_id: string;
+    selected_option_ids: string[];
+    selected_option_labels: string[];
+    other_text?: string;
+    is_other?: boolean;
+  }>;
 }
 
 type ElfBubbleEmoji =

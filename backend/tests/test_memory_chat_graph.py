@@ -17,12 +17,16 @@ from app.agent.graphs.memory_chat.nodes import _build_react_agent_system_prompt
 from app.agent.graphs.memory_chat.nodes import _build_react_agent_messages
 from app.agent.graphs.memory_chat.nodes import _extract_ai_tool_calls
 from app.agent.graphs.memory_chat.nodes import _run_agent_tool_action
+from app.agent.graphs.memory_chat.nodes import _normalize_user_input_resume
 from app.agent.graphs.memory_chat.nodes import build_load_turn_state_node
 from app.agent.graphs.memory_chat.nodes import default_retrieval_planner
 from app.agent.graphs.memory_chat.nodes import _build_model_messages
 from app.agent.graphs.memory_chat.nodes import _parse_elf_bubble_parts
 from app.agent.graphs.memory_chat.nodes import build_merge_prompt_context_node
 from app.agent.graphs.memory_chat.nodes import _tool_observations_to_context
+from app.agent.graphs.memory_chat.nodes import build_observe_tool_result_node
+from app.agent.graphs.memory_chat.nodes import build_plan_task_node
+from app.agent.graphs.memory_chat.nodes import build_verify_goal_node
 from app.models.chat_message import ChatMessage
 from app.models.long_term_memory import LongTermMemory
 from app.models.conversation import Conversation
@@ -248,16 +252,17 @@ def test_memory_chat_graph_main_flow_is_flat_context_worker_graph(session_factor
     assert "dispatch_context_workers" in mermaid
     assert "build_l3_retrieved_memory" in mermaid
     assert "build_current_conversation_window" in mermaid
+    assert "plan_task" in mermaid
     assert "agent" in mermaid
     assert "tools" in mermaid
-    assert "plan_task" not in mermaid
+    assert "observe_tool_result" in mermaid
+    assert "verify_goal" in mermaid
     assert "agent_think" not in mermaid
     assert "select_tool" not in mermaid
     assert "check_tool_policy" not in mermaid
     assert "run_read_tool" not in mermaid
     assert "run_write_tool" not in mermaid
     assert "run_exec_tool" not in mermaid
-    assert "observe_tool_result" not in mermaid
     assert "build_local_operator_context" not in mermaid
     assert "merge_prompt_context" in mermaid
     assert "generate_elf_bubble_answer" in mermaid
@@ -360,13 +365,52 @@ def test_react_agent_messages_preserve_structured_tool_call_context():
     assert tool_messages[-1].tool_call_id == "call-list-demo"
 
 
+def test_task_runtime_nodes_track_world_state_and_verification():
+    planned = build_plan_task_node()(
+        {
+            "conversation_id": 1,
+            "user_message": "创建 test.cc 并运行",
+            "thought_events": [],
+        }
+    )
+    assert planned["task"]["goal"] == "创建 test.cc 并运行"
+    assert "write_file" in " ".join(planned["task"]["acceptance_criteria"])
+
+    state = {
+        **planned,
+        "agent_step_index": 1,
+        "tool_observations": [
+            {
+                "tool_call_id": "call-write",
+                "tool_name": "write_file",
+                "arguments": {"path": "E:/demo/test.cc"},
+                "ok": True,
+                "data": {"path": "E:/demo/test.cc", "relative_path": "test.cc"},
+                "error_code": "",
+                "message": "",
+                "blocked": False,
+            }
+        ],
+    }
+    observed = build_observe_tool_result_node()(state)
+    assert observed["world_state"]["known_paths"]["E:/demo/test.cc"]["ok"] is True
+    assert observed["task"]["steps"][0]["tool_name"] == "write_file"
+
+    verified = build_verify_goal_node()({**state, **observed})
+    assert verified["verification"]["status"] == "ready_for_agent"
+    assert verified["replan_required"] is False
+
+
 def test_initial_chat_turn_statuses_include_dynamic_tool_loop_nodes():
     """前端 graph 状态表应覆盖主图里的动态任务和 exec/verify 节点。"""
 
     statuses = initial_node_statuses()
 
+    assert "plan_task" in statuses
     assert "agent" in statuses
     assert "tools" in statuses
+    assert "observe_tool_result" in statuses
+    assert "verify_goal" in statuses
 
 
 def test_react_agent_prompt_includes_absolute_path_and_tool_discipline():
@@ -855,6 +899,63 @@ def test_request_user_input_rejects_empty_question_instead_of_interrupting(sessi
     assert observation["error_code"] == "INVALID_ARGUMENT"
     assert "缺少具体问题" in observation["message"]
     assert "需要你补充一个选择" not in observation["message"]
+
+
+def test_request_user_input_normalizes_multi_question_resume():
+    """多问题选择应保留逐题答案，避免 agent 分不清答案对应的问题。"""
+
+    request = {
+        "kind": "user_input",
+        "request_id": "choice-multi",
+        "questions": [
+            {
+                "id": "target_dir",
+                "question": "项目应该创建在哪个目录下？",
+                "selection_mode": "single",
+                "options": [
+                    {"id": "home", "label": "Home 下新建", "value": "E:/demo/blog"},
+                    {"id": "repo", "label": "AiMemo 子目录", "value": "E:/Ai记/data/blog"},
+                ],
+            },
+            {
+                "id": "program_kind",
+                "question": "这个程序要实现什么功能？",
+                "selection_mode": "single",
+                "options": [
+                    {"id": "hello", "label": "Hello World", "value": "输出 Hello World"},
+                    {"id": "custom", "label": "自定义", "value": ""},
+                ],
+            },
+        ],
+    }
+
+    payload = {
+        "request_id": "choice-multi",
+        "question_answers": [
+            {
+                "question_id": "target_dir",
+                "selected_option_id": "home",
+                "selected_option_ids": ["home"],
+                "answer": "E:/demo/blog",
+            },
+            {
+                "question_id": "program_kind",
+                "selected_option_id": "other",
+                "selected_option_ids": ["other"],
+                "answer": "生成 8 个随机数",
+                "other_text": "生成 8 个随机数",
+            },
+        ],
+    }
+
+    normalized = _normalize_user_input_resume(payload, request)
+
+    assert normalized["selected_option_ids"] == ["home", "other"]
+    assert normalized["question_answers"][0]["question_id"] == "target_dir"
+    assert normalized["question_answers"][0]["answer"] == "E:/demo/blog"
+    assert normalized["question_answers"][1]["question_id"] == "program_kind"
+    assert normalized["question_answers"][1]["is_other"] is True
+    assert "项目应该创建在哪个目录下" in normalized["answer"]
 
 
 def test_tools_node_executes_consecutive_reads_in_parallel(session_factory, monkeypatch):

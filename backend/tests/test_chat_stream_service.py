@@ -398,6 +398,79 @@ def test_stream_chat_interrupts_and_resumes_same_turn(
     assert assistant.status == "completed"
 
 
+def test_stream_chat_normalizes_multi_question_interrupt(
+    session,
+    session_factory,
+    tmp_path: Path,
+    monkeypatch,
+):
+    """interrupt payload 支持 questions[]，同时保留旧版 question/options 兼容字段。"""
+
+    chat_turn_buffer.reset_for_tests()
+    conversation = create_conversation(session, ConversationCreate(title="多问题选择"))
+    checkpoint_path = tmp_path / "checkpoints.db"
+
+    def fake_stream_memory_chat_graph(**kwargs):
+        yield {
+            "event": "interrupt",
+            "node": "",
+            "interrupt": {
+                "id": "choice-multi",
+                "value": {
+                    "kind": "user_input",
+                    "request_id": "choice-multi",
+                    "questions": [
+                        {
+                            "id": "target_dir",
+                            "question": "项目应该创建在哪个目录下？",
+                            "selection_mode": "single",
+                            "options": [
+                                {"id": "home", "label": "Home 下新建", "value": "E:/demo"},
+                                {"id": "repo", "label": "AiMemo data", "value": "E:/Ai记/data/demo"},
+                            ],
+                        },
+                        {
+                            "id": "feature",
+                            "question": "这个程序要实现什么功能？",
+                            "selection_mode": "single",
+                            "options": [
+                                {"id": "hello", "label": "Hello World", "value": "hello"},
+                                {"id": "random", "label": "随机数", "value": "random"},
+                            ],
+                        },
+                    ],
+                },
+            },
+            "state": {
+                "user_message_id": int(kwargs["user_message_id"]),
+                "assistant_message_id": int(kwargs["assistant_message_id"]),
+                "graph_checkpoint_id": "checkpoint-interrupt",
+            },
+        }
+
+    monkeypatch.setattr(
+        "app.services.chat_service.stream_memory_chat_graph",
+        fake_stream_memory_chat_graph,
+    )
+
+    events = [
+        _parse_sse(event)
+        for event in stream_conversation_chat_events(
+            conversation.id,
+            message="创建一个 test.cc",
+            session_factory=session_factory,
+            checkpoint_path=str(checkpoint_path),
+        )
+    ]
+
+    request = events[-1]["data"]["request"]
+    assert request["request_id"] == "choice-multi"
+    assert len(request["questions"]) == 2
+    assert request["question"] == "项目应该创建在哪个目录下？"
+    assert request["options"][0]["id"] == "home"
+    assert request["other_option"]["id"] == "other"
+
+
 def test_stream_existing_turn_events_replays_completed_buffer(
     session,
     session_factory,

@@ -22,7 +22,10 @@ from app.agent.graphs.memory_chat.nodes import (
     build_generate_elf_bubble_answer_node,
     build_load_turn_state_node,
     build_merge_prompt_context_node,
+    build_observe_tool_result_node,
+    build_plan_task_node,
     build_persist_messages_node,
+    build_verify_goal_node,
     build_tools_node,
     dispatch_context_workers,
     route_after_agent,
@@ -78,8 +81,11 @@ def build_memory_chat_graph(
     graph.add_node("build_l0_current_input", build_l0_current_input_node())
     graph.add_node("build_current_conversation_window", build_current_conversation_window_node())
     graph.add_node("merge_prompt_context", build_merge_prompt_context_node())
+    graph.add_node("plan_task", build_plan_task_node())
     graph.add_node("agent", build_agent_node(session_factory, answer_generator=answer_generator))
     graph.add_node("tools", build_tools_node(session_factory))
+    graph.add_node("observe_tool_result", build_observe_tool_result_node())
+    graph.add_node("verify_goal", build_verify_goal_node())
     graph.add_node(
         "generate_elf_bubble_answer",
         build_generate_elf_bubble_answer_node(bubble_answer_generator),
@@ -101,13 +107,16 @@ def build_memory_chat_graph(
     graph.add_edge("build_l1_recent_messages", "merge_prompt_context")
     graph.add_edge("build_l0_current_input", "merge_prompt_context")
     graph.add_edge("build_current_conversation_window", "merge_prompt_context")
-    graph.add_edge("merge_prompt_context", "agent")
+    graph.add_edge("merge_prompt_context", "plan_task")
+    graph.add_edge("plan_task", "agent")
     graph.add_conditional_edges(
         "agent",
         route_after_agent,
         ["tools", "persist_messages", "generate_elf_bubble_answer"],
     )
-    graph.add_edge("tools", "agent")
+    graph.add_edge("tools", "observe_tool_result")
+    graph.add_edge("observe_tool_result", "verify_goal")
+    graph.add_edge("verify_goal", "agent")
     graph.add_edge("generate_elf_bubble_answer", "persist_messages")
     graph.add_edge("persist_messages", END)
     return graph

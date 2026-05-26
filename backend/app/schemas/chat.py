@@ -16,9 +16,13 @@ class ChatResumeRequest(BaseModel):
     """恢复被 interrupt 暂停的对话。"""
 
     request_id: str = Field(default="", max_length=120)
+    request_ids: list[str] = Field(default_factory=list, max_length=20)
     selected_option_id: str = Field(default="", max_length=120)
     selected_option_ids: list[str] = Field(default_factory=list, max_length=20)
     answer: str = Field(default="", max_length=4000)
+    answers: list[str] = Field(default_factory=list, max_length=20)
+    question_answers: list[dict] = Field(default_factory=list, max_length=20)
+    other_text: str = Field(default="", max_length=4000)
 
 
 class ChatResponse(BaseModel):

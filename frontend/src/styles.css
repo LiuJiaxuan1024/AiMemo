@@ -1629,7 +1629,7 @@ textarea {
 .chat-sidebar button,
 .chat-main-header span,
 .chat-debug-panel button,
-.chat-message-bubble button,
+.chat-message-bubble button:not(.chat-interrupt-option),
 .chat-input-bar button {
   border-radius: 6px;
   font-weight: 650;
@@ -1637,7 +1637,7 @@ textarea {
 
 .chat-sidebar header button,
 .chat-debug-panel button,
-.chat-message-bubble button {
+.chat-message-bubble button:not(.chat-interrupt-option) {
   background: #ffffff;
   border: 1px solid #cbd2e1;
   color: #344054;
@@ -2484,47 +2484,64 @@ textarea {
 }
 
 .chat-interrupt-card {
-  background: linear-gradient(180deg, rgba(248, 251, 255, 0.98), rgba(255, 255, 255, 0.99));
-  border: 1px solid #d7e4f8;
-  border-radius: 10px;
-  box-shadow: 0 10px 26px -24px rgba(15, 23, 42, 0.42);
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid #dbe6f3;
+  border-radius: 12px;
+  box-shadow: 0 8px 22px -20px rgba(15, 23, 42, 0.24);
+  box-sizing: border-box;
   display: grid;
-  gap: 8px;
+  gap: 10px;
   margin-top: 2px;
-  max-width: 640px;
-  padding: 11px 12px 12px;
+  max-width: min(540px, 100%);
+  padding: 13px;
+}
+
+.chat-interrupt-card__header {
+  align-items: start;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
 }
 
 .chat-interrupt-card__question {
-  color: #101828;
+  color: #0f172a;
   font-size: 14px;
   font-weight: 600;
-  line-height: 1.6;
+  line-height: 1.45;
   margin: 0;
   overflow-wrap: anywhere;
 }
 
+.chat-interrupt-card__step {
+  color: #64748b;
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  padding-top: 2px;
+}
+
 .chat-interrupt-options {
   display: grid;
-  gap: 6px;
+  gap: 9px;
 }
 
 .chat-interrupt-option {
-  align-items: flex-start;
+  align-items: center;
   appearance: none;
-  background: rgba(248, 250, 252, 0.92);
-  border: 1px solid #e2e8f0;
+  background: #fbfcfe;
+  border: 1px solid #e3e9f2;
   border-radius: 9px;
   color: inherit;
   cursor: pointer;
   display: grid;
   font: inherit;
-  gap: 8px;
-  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 12px;
+  grid-template-columns: 16px minmax(0, 1fr);
   justify-content: stretch;
   justify-items: start;
+  min-height: 58px;
   min-width: 0;
-  padding: 9px 10px;
+  padding: 10px 13px;
   text-align: left;
   transition:
     background-color 0.15s ease,
@@ -2534,12 +2551,26 @@ textarea {
 
 .chat-interrupt-option:hover,
 .chat-interrupt-option.selected {
-  background: #eef6ff;
-  border-color: #93c5fd;
-  box-shadow: 0 6px 18px -16px rgba(37, 99, 235, 0.5);
+  background: #f4f8ff;
+  border-color: #a9caff;
+  box-shadow: 0 7px 16px -18px rgba(37, 99, 235, 0.34);
 }
 
-.chat-interrupt-option input {
+.chat-message-bubble .chat-interrupt-option {
+  align-items: center;
+  border-radius: 9px;
+  display: grid;
+  flex: initial;
+  font-weight: 400;
+  justify-content: stretch;
+  min-height: 58px;
+  min-width: 0;
+  padding: 10px 13px;
+  width: 100%;
+}
+
+.chat-interrupt-option input[type="radio"],
+.chat-interrupt-option input[type="checkbox"] {
   height: 1px;
   opacity: 0;
   pointer-events: none;
@@ -2548,12 +2579,13 @@ textarea {
 }
 
 .chat-interrupt-option__mark {
-  border: 1px solid #94a3b8;
+  align-self: center;
+  border: 1px solid #9aa7b7;
   border-radius: 999px;
   display: inline-flex;
-  height: 16px;
-  margin-top: 2px;
-  width: 16px;
+  height: 14px;
+  margin-top: 0;
+  width: 14px;
 }
 
 .chat-interrupt-option input[type="checkbox"] + .chat-interrupt-option__mark {
@@ -2563,7 +2595,7 @@ textarea {
 .chat-interrupt-option.selected .chat-interrupt-option__mark {
   background: #2563eb;
   border-color: #2563eb;
-  box-shadow: inset 0 0 0 4px #ffffff;
+  box-shadow: inset 0 0 0 3.5px #ffffff;
 }
 
 .chat-interrupt-option input[type="checkbox"]:checked + .chat-interrupt-option__mark {
@@ -2571,6 +2603,7 @@ textarea {
 }
 
 .chat-interrupt-option__body {
+  align-self: center;
   display: grid;
   gap: 3px;
   justify-items: start;
@@ -2581,75 +2614,117 @@ textarea {
 
 .chat-interrupt-option__body > span {
   align-items: center;
-  color: #243045;
+  color: #26344a;
   display: flex;
   flex-wrap: wrap;
-  font-size: 13px;
-  font-weight: 650;
+  font-size: 14px;
+  font-weight: 500;
   gap: 6px;
   justify-content: flex-start;
-  line-height: 1.35;
+  line-height: 1.32;
   text-align: left;
   width: 100%;
 }
 
 .chat-interrupt-option__body em {
-  background: #e0f2fe;
+  background: #e8f1ff;
   border-radius: 999px;
-  color: #0369a1;
+  color: #1d4ed8;
   font-size: 11px;
   font-style: normal;
-  font-weight: 650;
+  font-weight: 600;
   padding: 1px 7px;
 }
 
 .chat-interrupt-option__body small {
-  color: #64748b;
-  font-size: 12px;
-  line-height: 1.45;
+  color: #6b7788;
+  font-size: 12.5px;
+  font-weight: 400;
+  line-height: 1.38;
   overflow-wrap: anywhere;
+}
+
+.chat-interrupt-option--other {
+  align-items: center;
+  cursor: text;
+  min-height: 58px;
+  padding: 10px 13px;
+}
+
+.chat-interrupt-option--other:hover {
+  background: #fbfcfe;
+  border-color: #d8e2ee;
+  box-shadow: none;
+}
+
+.chat-interrupt-option--other.selected {
+  background: #f4f8ff;
+  border-color: #a9caff;
+}
+
+.chat-interrupt-option__body--other {
+  gap: 0;
+  padding-top: 0;
+}
+
+.chat-interrupt-option__inline-row {
+  align-items: center;
+  display: flex;
+  min-height: 100%;
+  width: 100%;
+}
+
+.chat-interrupt-option--other.selected .chat-interrupt-option__inline-row,
+.chat-interrupt-option__inline-row:focus-within {
+  box-shadow: none;
 }
 
 .chat-interrupt-option__inline-input {
   background: transparent;
   border: 0;
-  border-bottom: 1px solid #cbd5e1;
-  border-radius: 0;
-  color: #243045;
+  color: #26344a;
+  cursor: text;
   font: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.4;
-  max-height: 72px;
-  min-height: 24px;
-  overflow: hidden;
-  padding: 1px 0 3px;
-  resize: none;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.32;
+  min-width: 0;
+  padding: 0;
   width: 100%;
 }
 
-.chat-interrupt-option--other {
-  align-items: center;
-  background: #fbfdff;
-  min-height: 54px;
-  padding-block: 10px;
-}
-
 .chat-interrupt-option__inline-input:focus {
-  border-color: #60a5fa;
   box-shadow: none;
   outline: none;
 }
 
 .chat-interrupt-option__inline-input::placeholder {
-  color: #94a3b8;
+  color: #7d8999;
   font-weight: 500;
 }
 
-.chat-interrupt-card > button {
-  justify-self: end;
-  min-width: 110px;
-  margin-top: 4px;
+.chat-interrupt-card__nav {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.chat-interrupt-card__nav > button {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-interrupt-card__submit {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.chat-interrupt-card__submit > button {
+  min-width: 120px;
+}
+
+.chat-interrupt-card__submit > button:only-child {
+  width: 100%;
 }
 
 .markdown-message {
@@ -2769,7 +2844,7 @@ textarea {
   font-weight: 650;
 }
 
-.chat-message-bubble button {
+.chat-message-bubble button:not(.chat-interrupt-option) {
   align-items: center;
   display: inline-flex;
   flex: 0 0 auto;

@@ -34,8 +34,11 @@ MEMORY_CHAT_NODE_ORDER = [
     "build_l0_current_input",
     "build_current_conversation_window",
     "merge_prompt_context",
+    "plan_task",
     "agent",
     "tools",
+    "observe_tool_result",
+    "verify_goal",
     "generate_elf_bubble_answer",
     "persist_messages",
 ]

@@ -40,9 +40,11 @@ from app.agent.context import (
     context_layer_from_payload,
 )
 from app.agent.graphs.memory_chat.state import (
+    AgentTaskPayload,
     AgentThoughtPayload,
     AgentToolActionPayload,
     AgentToolObservationPayload,
+    AgentWorldStatePayload,
     ChatMessagePayload,
     ContextLayerPayload,
     ElfBubblePayload,
@@ -81,24 +83,27 @@ class UserInputOption(BaseModel):
 
 
 class RequestUserInputToolInput(BaseModel):
+    questions: list[dict] = Field(
+        default_factory=list,
+        description="连续展示给用户的结构化问题列表。每项包含 question/options/selection_mode 等字段。",
+    )
     question: str = Field(
-        min_length=6,
-        description="展示给用户的问题，必须具体说明为什么需要用户选择，并以问句形式提出。",
+        default="",
+        min_length=0,
+        description="兼容旧版单问题提问；当 questions 为空时才使用。",
     )
     options: list[UserInputOption] = Field(
         default_factory=list,
-        min_length=2,
-        max_length=4,
-        description="推荐选项，按推荐程度排序。必须是 2-4 个具体选择；不要包含 Other，界面会自动追加。",
+        description="兼容旧版单问题的推荐选项。",
     )
     selection_mode: Literal["single", "multiple"] = Field(
         default="single",
-        description="single 表示用户只能选择一个推荐项；multiple 表示用户可以多选推荐项。",
+        description="兼容旧版单问题的选择模式。",
     )
-    allow_other: bool = Field(default=True, description="是否允许用户输入自定义答案。")
+    allow_other: bool = Field(default=True, description="兼容旧版单问题：是否允许用户输入自定义答案。")
     other_placeholder: str = Field(
         default="请输入其他答案",
-        description="用户选择 Other 时的输入框占位文本。",
+        description="兼容旧版单问题：用户选择 Other 时的输入框占位文本。",
     )
 
 
@@ -202,6 +207,12 @@ def build_load_turn_state_node(
                 # ReAct 工具循环由 LangGraph recursion_limit 与模型 tool_calls 自然控制。
                 # 这里保留 tool_budget 字段只为兼容旧 debug payload，不再参与路由。
                 "tool_budget": 20,
+                "task": {},
+                "world_state": _empty_world_state(),
+                "verification": {},
+                "replan_required": False,
+                "consecutive_failed_tools": 0,
+                "agent_step_index": 0,
                 "agent_decision": {},
                 "tool_observations": [],
                 "tool_observation_context": "",
@@ -844,11 +855,12 @@ def _create_react_tools(
 
 def _create_request_user_input_tool() -> StructuredTool:
     def request_user_input(
-        question: str,
-        options: list[dict],
+        question: str = "",
+        options: list[dict] | None = None,
         allow_other: bool = True,
         selection_mode: str = "single",
         other_placeholder: str = "请输入其他答案",
+        questions: list[dict] | None = None,
     ) -> str:
         """Ask the user to choose when required information is missing."""
 
@@ -858,8 +870,9 @@ def _create_request_user_input_tool() -> StructuredTool:
                 "tool_name": REQUEST_USER_INPUT_TOOL_NAME,
                 "message": "request_user_input is handled by the graph interrupt runtime.",
                 "data": {
+                    "questions": questions or [],
                     "question": question,
-                    "options": options,
+                    "options": options or [],
                     "selection_mode": selection_mode,
                     "allow_other": allow_other,
                     "other_placeholder": other_placeholder,
@@ -874,8 +887,10 @@ def _create_request_user_input_tool() -> StructuredTool:
             "当必须让用户补充选择、确认路径、选择方案、提供缺失参数或确认风险操作时调用。"
             "调用后 graph 会暂停并向用户展示选择框；用户回答后会从同一轮继续执行。"
             "不要把“请选择：1...2...3...”写成普通最终回答；需要用户选择时必须调用此工具。"
-            "question 必须是展示给用户的完整问题，说明为什么需要用户选择；不能空泛。"
-            "options 只放 2-4 个建议选项，推荐项放第一；不要包含 Other，界面会自动追加自定义输入。"
+            "如果需要一次收集多个信息，优先使用 questions 数组，每个 question 都包含自己的 options；"
+            "例如同时询问项目目录和项目类型时，传 questions=[{question:'项目放在哪里？', options:[...]}, {question:'项目类型是什么？', options:[...]}]。"
+            "单个问题时可以继续使用 question/options。question 必须说明为什么需要用户选择；不能空泛。"
+            "每个 options 只放 2-4 个建议选项，推荐项放第一；不要包含 Other，界面会自动追加自定义输入。"
             "如果用户可同时选择多个项目/功能/范围，selection_mode 必须设为 multiple。"
         ),
         args_schema=RequestUserInputToolInput,
@@ -893,6 +908,9 @@ def _build_react_agent_messages(state: MemoryChatGraphState) -> list:
         SystemMessage(content=_build_react_agent_system_prompt()),
         HumanMessage(content=state.get("prompt_context", "")),
     ]
+    task_context = _build_task_runtime_context(state)
+    if task_context:
+        messages.append(SystemMessage(content=task_context))
     messages.extend(_turn_messages_to_langchain_messages(state.get("turn_messages", [])))
     return messages
 
@@ -923,6 +941,28 @@ def _turn_messages_to_langchain_messages(turn_messages: list[TurnMessagePayload]
             else:
                 messages.append(AIMessage(content=content))
     return messages
+
+
+def _build_task_runtime_context(state: MemoryChatGraphState) -> str:
+    """构建 agent 可见的任务运行时状态。"""
+
+    task = state.get("task") or {}
+    if not task:
+        return ""
+    world_state = state.get("world_state") or {}
+    verification = state.get("verification") or {}
+    payload = {
+        "task": task,
+        "world_state": world_state,
+        "verification": verification,
+        "replan_required": bool(state.get("replan_required", False)),
+    }
+    return (
+        "下面是本轮任务运行时状态。你必须基于它决定下一步："
+        "如果 replan_required=true，要根据失败原因调整方案，不要原样重试；"
+        "如果验收条件尚未满足，继续调用工具；只有目标满足时才最终回答。\n"
+        f"{json_dumps_compact(payload)}"
+    )
 
 
 def _build_react_agent_system_prompt() -> str:
@@ -1157,6 +1197,126 @@ def build_merge_prompt_context_node():
         return {"prompt_context": prompt_context}
 
     return merge_prompt_context
+
+
+def build_plan_task_node():
+    """把本轮用户输入显式化成 task，供后续工具循环持续引用。
+
+    这里先做确定性轻量计划，不额外调用 LLM。真正的工具选择仍由 ReAct agent 完成；
+    这个节点的价值是给 checkpoint/debug 和后续 verify/replan 一个稳定任务对象。
+    """
+
+    def plan_task(state: MemoryChatGraphState) -> MemoryChatGraphState:
+        user_message = _resolve_user_message(state).strip()
+        task: AgentTaskPayload = {
+            "id": f"turn-{state.get('user_message_id') or state.get('conversation_id') or 'current'}",
+            "goal": user_message,
+            "status": "running",
+            "current_step_id": "step-1",
+            "steps": [
+                {
+                    "id": "step-1",
+                    "description": _classify_initial_step_description(user_message),
+                    "status": "pending",
+                    "tool_name": "",
+                    "arguments": {},
+                    "result_summary": "",
+                    "retry_count": 0,
+                }
+            ],
+            "acceptance_criteria": _infer_acceptance_criteria(user_message),
+            "assumptions": [],
+        }
+        return {
+            "task": task,
+            "world_state": _empty_world_state(),
+            "verification": {"status": "pending", "reason": "task planned"},
+            "replan_required": False,
+            "thought_events": [
+                *state.get("thought_events", []),
+                _thought(
+                    "plan-task",
+                    "规划任务",
+                    f"目标：{user_message[:120]}",
+                    related_node="plan_task",
+                    step_index=0,
+                ),
+            ],
+        }
+
+    return plan_task
+
+
+def build_observe_tool_result_node():
+    """把工具结果吸收进 task/world state。
+
+    tools 节点负责执行；observe 节点负责把结果变成 agent 可持续利用的世界状态。
+    """
+
+    def observe_tool_result(state: MemoryChatGraphState) -> MemoryChatGraphState:
+        observations = list(state.get("tool_observations") or [])
+        world_state = _world_state_from_observations(observations)
+        task = _task_with_latest_observation(state.get("task") or {}, observations)
+        latest = observations[-1] if observations else {}
+        latest_summary = _summarize_tool_observation(latest) if latest else "本轮还没有工具结果。"
+        return {
+            "world_state": world_state,
+            "task": task,
+            "thought_events": [
+                *state.get("thought_events", []),
+                _thought(
+                    "observe-tool-result",
+                    "吸收工具结果",
+                    latest_summary,
+                    related_node="observe_tool_result",
+                    related_tool_call_id=str(latest.get("tool_call_id") or "") or None,
+                    step_index=int(state.get("agent_step_index") or 0),
+                ),
+            ],
+        }
+
+    return observe_tool_result
+
+
+def build_verify_goal_node():
+    """基于工具事实做一层轻量验收，防止“工具成功 == 任务成功”。
+
+    第一版只做确定性检查：失败工具会要求 agent 重新规划；没有失败时把状态标为
+    ready_for_agent，让下一次 agent 调用基于 ToolMessage 决定继续还是最终回答。
+    """
+
+    def verify_goal(state: MemoryChatGraphState) -> MemoryChatGraphState:
+        observations = list(state.get("tool_observations") or [])
+        latest = observations[-1] if observations else {}
+        failed = [obs for obs in observations if not bool(obs.get("ok"))]
+        verification = {
+            "status": "needs_replan" if latest and not bool(latest.get("ok")) else "ready_for_agent",
+            "reason": _verification_reason(state, latest),
+            "observation_count": len(observations),
+            "failure_count": len(failed),
+        }
+        task = dict(state.get("task") or {})
+        if latest and not bool(latest.get("ok")):
+            task["status"] = "running"
+        elif observations:
+            task["status"] = "running"
+        return {
+            "verification": verification,
+            "task": task,
+            "replan_required": verification["status"] == "needs_replan",
+            "thought_events": [
+                *state.get("thought_events", []),
+                _thought(
+                    "verify-goal",
+                    "验收当前进展",
+                    str(verification["reason"]),
+                    related_node="verify_goal",
+                    step_index=int(state.get("agent_step_index") or 0),
+                ),
+            ],
+        }
+
+    return verify_goal
 
 
 def route_answer_mode(state: MemoryChatGraphState) -> str:
@@ -1536,6 +1696,7 @@ def _normalize_request_user_input_arguments(arguments: dict) -> dict:
     request_user_input 是 memory_chat 自己的交互工具，必须单独保留 question/options。
     """
 
+    questions = _normalize_user_input_questions(arguments)
     raw_options = arguments.get("options")
     options: list[dict] = []
     if isinstance(raw_options, list):
@@ -1563,6 +1724,7 @@ def _normalize_request_user_input_arguments(arguments: dict) -> dict:
     if selection_mode not in {"single", "multiple"}:
         selection_mode = "multiple" if bool(arguments.get("allow_multiple", False)) else "single"
     return {
+        "questions": questions,
         "question": str(arguments.get("question") or "").strip(),
         "options": options,
         "selection_mode": selection_mode,
@@ -1629,6 +1791,7 @@ def _run_request_user_input_action(
         "data": {
             "request": request,
             "answer": answer_payload["answer"],
+            "question_answers": answer_payload["question_answers"],
             "selected_option_id": answer_payload["selected_option_id"],
             "selected_option_ids": answer_payload["selected_option_ids"],
             "selected_option_label": answer_payload["selected_option_label"],
@@ -1672,6 +1835,22 @@ def _build_user_input_interrupt_payload(
     action: AgentToolActionPayload,
     step_index: int | None,
 ) -> dict:
+    questions = _normalize_user_input_questions(arguments)
+    if questions:
+        return {
+            "kind": "user_input",
+            "request_id": str(action.get("tool_call_id") or f"user-input-{step_index or 0}"),
+            "questions": questions,
+            "allow_other": bool(arguments.get("allow_other", True)),
+            "other_option": {
+                "id": "other",
+                "label": "其他",
+                "value": "",
+                "description": "自己输入一个答案。",
+                "placeholder": str(arguments.get("other_placeholder") or "请输入其他答案").strip(),
+            },
+            "step_index": int(step_index or 0),
+        }
     question = str(arguments.get("question") or "").strip()
     raw_options = arguments.get("options")
     options: list[dict] = []
@@ -1715,6 +1894,8 @@ def _build_user_input_interrupt_payload(
 
 
 def _invalid_user_input_request_reason(arguments: dict) -> str:
+    if _normalize_user_input_questions(arguments):
+        return ""
     question = str(arguments.get("question") or "").strip()
     if len(question) < 6 or question in {"需要你补充一个选择。", "需要你补充一个选择", "请选择"}:
         return "request_user_input 缺少具体问题"
@@ -1734,8 +1915,57 @@ def _invalid_user_input_request_reason(arguments: dict) -> str:
     return ""
 
 
+def _normalize_user_input_questions(arguments: dict) -> list[dict]:
+    raw_questions = arguments.get("questions")
+    if not isinstance(raw_questions, list):
+        return []
+    questions: list[dict] = []
+    for index, raw_question in enumerate(raw_questions[:6]):
+        if not isinstance(raw_question, dict):
+            continue
+        question_text = str(raw_question.get("question") or "").strip()
+        raw_options = raw_question.get("options")
+        options: list[dict] = []
+        if isinstance(raw_options, list):
+            for option_index, raw_option in enumerate(raw_options[:4]):
+                if not isinstance(raw_option, dict):
+                    continue
+                label = str(raw_option.get("label") or raw_option.get("value") or "").strip()
+                value = str(raw_option.get("value") or label).strip()
+                if not label and not value:
+                    continue
+                options.append(
+                    {
+                        "id": str(raw_option.get("id") or f"question-{index + 1}-option-{option_index + 1}"),
+                        "label": label or value,
+                        "value": value or label,
+                        "description": str(raw_option.get("description") or "").strip(),
+                        "recommended": bool(raw_option.get("recommended", option_index == 0)),
+                    }
+                )
+        if len(question_text) < 6 or len(options) < 2:
+            continue
+        selection_mode = str(raw_question.get("selection_mode") or "single").strip().lower()
+        if selection_mode not in {"single", "multiple"}:
+            selection_mode = "single"
+        questions.append(
+            {
+                "id": str(raw_question.get("id") or f"question-{index + 1}"),
+                "question": question_text,
+                "options": options,
+                "selection_mode": selection_mode,
+                "allow_other": bool(raw_question.get("allow_other", True)),
+                "other_placeholder": str(raw_question.get("other_placeholder") or "请输入其他答案").strip(),
+            }
+        )
+    return questions
+
+
 def _normalize_user_input_resume(resume_value, request: dict) -> dict:
     payload = resume_value if isinstance(resume_value, dict) else {"answer": str(resume_value or "")}
+    questions = request.get("questions") if isinstance(request.get("questions"), list) else []
+    if questions:
+        return _normalize_multi_user_input_resume(payload, request, questions)
     raw_ids = payload.get("selected_option_ids")
     if isinstance(raw_ids, list):
         selected_option_ids = [str(item) for item in raw_ids if str(item)]
@@ -1781,12 +2011,119 @@ def _normalize_user_input_resume(resume_value, request: dict) -> dict:
     selected_option_id = selected_option_ids[0] if selected_option_ids else "other"
     return {
         "answer": answer,
+        "question_answers": [],
         "selected_option_id": selected_option_id,
         "selected_option_ids": selected_option_ids or [selected_option_id],
         "selected_option_label": selected_option_labels[0] if selected_option_labels else ("其他" if is_other else answer),
         "selected_option_labels": selected_option_labels or (["其他"] if is_other else [answer]),
         "is_other": is_other,
     }
+
+
+def _normalize_multi_user_input_resume(payload: dict, request: dict, questions: list[dict]) -> dict:
+    """把多问题选择结果还原成 agent 可读的逐题答案。
+
+    前端/桌面端会一次性提交多个问题的选择。这里保留每题的 question_id、问题文本和答案，
+    避免工具 observation 只剩几行值，导致 agent 分不清“哪个答案对应哪个问题”。
+    """
+
+    raw_question_answers = payload.get("question_answers")
+    answer_items: list[dict] = []
+    if isinstance(raw_question_answers, list):
+        answer_items = [item for item in raw_question_answers if isinstance(item, dict)]
+    raw_answers = payload.get("answers")
+    fallback_answers = [str(item).strip() for item in raw_answers] if isinstance(raw_answers, list) else []
+    answers_by_id = {
+        str(item.get("question_id") or item.get("id") or ""): item
+        for item in answer_items
+        if str(item.get("question_id") or item.get("id") or "")
+    }
+    normalized_items: list[dict] = []
+    answer_lines: list[str] = []
+    all_selected_ids: list[str] = []
+    all_selected_labels: list[str] = []
+    any_other = False
+
+    for index, question in enumerate(questions):
+        question_id = str(question.get("id") or f"question-{index + 1}")
+        item = answers_by_id.get(question_id)
+        if item is None and index < len(answer_items):
+            item = answer_items[index]
+        if item is None:
+            item = {}
+        selected_ids = _string_list(item.get("selected_option_ids"))
+        legacy_id = str(item.get("selected_option_id") or "").strip()
+        if legacy_id and legacy_id not in selected_ids:
+            selected_ids.append(legacy_id)
+        options = question.get("options") if isinstance(question.get("options"), list) else []
+        options_by_id = {
+            str(option.get("id") or ""): option
+            for option in options
+            if isinstance(option, dict)
+        }
+        if not selected_ids and question.get("selection_mode") != "multiple" and options:
+            first_id = str(options[0].get("id") or "")
+            if first_id:
+                selected_ids.append(first_id)
+        selected_labels: list[str] = []
+        selected_values: list[str] = []
+        for option_id in selected_ids:
+            if option_id == "other":
+                continue
+            option = options_by_id.get(option_id)
+            if not isinstance(option, dict):
+                continue
+            label = str(option.get("label") or "").strip()
+            value = str(option.get("value") or label).strip()
+            if label:
+                selected_labels.append(label)
+            if value:
+                selected_values.append(value)
+        other_text = str(item.get("other_text") or "").strip()
+        is_other = "other" in selected_ids or bool(other_text)
+        any_other = any_other or is_other
+        answer = str(item.get("answer") or "").strip()
+        if not answer and index < len(fallback_answers):
+            answer = fallback_answers[index]
+        if not answer:
+            parts = [*selected_values]
+            if other_text:
+                parts.append(other_text)
+            answer = "\n".join(parts).strip()
+        if not answer:
+            answer = "继续"
+        question_text = str(question.get("question") or question_id)
+        normalized_item = {
+            "question_id": question_id,
+            "question": question_text,
+            "answer": answer,
+            "selected_option_id": selected_ids[0] if selected_ids else "other",
+            "selected_option_ids": selected_ids or ["other"],
+            "selected_option_labels": selected_labels or (["其他"] if is_other else [answer]),
+            "other_text": other_text,
+            "is_other": is_other,
+        }
+        normalized_items.append(normalized_item)
+        answer_lines.append(f"{index + 1}. {question_text}\n答：{answer}")
+        all_selected_ids.extend(normalized_item["selected_option_ids"])
+        all_selected_labels.extend(normalized_item["selected_option_labels"])
+
+    compact_answer = str(payload.get("answer") or "").strip() or "\n".join(answer_lines).strip() or "继续"
+    return {
+        "answer": compact_answer,
+        "question_answers": normalized_items,
+        "selected_option_id": all_selected_ids[0] if all_selected_ids else "other",
+        "selected_option_ids": all_selected_ids or ["other"],
+        "selected_option_label": all_selected_labels[0] if all_selected_labels else ("其他" if any_other else compact_answer),
+        "selected_option_labels": all_selected_labels or (["其他"] if any_other else [compact_answer]),
+        "is_other": any_other,
+    }
+
+
+def _string_list(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _run_agent_tool_action(
@@ -1916,6 +2253,143 @@ def _append_tool_context(prompt_context: str, tool_context: str) -> str:
     if tool_context in prompt_context:
         return prompt_context
     return f"{prompt_context}\n\n{tool_context}" if prompt_context else tool_context
+
+
+def _empty_world_state() -> AgentWorldStatePayload:
+    return {
+        "known_paths": {},
+        "command_results": [],
+        "background_tasks": [],
+        "observations": [],
+        "failures": [],
+    }
+
+
+def _classify_initial_step_description(user_message: str) -> str:
+    text = user_message.lower()
+    if any(token in text for token in ["创建", "新建", "写入", "保存", "write"]):
+        return "确认目标与路径后写入文件"
+    if any(token in text for token in ["运行", "执行", "编译", "测试", "run", "test", "build"]):
+        return "执行命令并检查结果"
+    if any(token in text for token in ["读取", "查看", "搜索", "列出", "read", "list", "search"]):
+        return "读取本地信息并回答"
+    return "理解用户目标并选择下一步行动"
+
+
+def _infer_acceptance_criteria(user_message: str) -> list[str]:
+    criteria = ["最终回答必须基于真实上下文或工具结果。"]
+    text = user_message.lower()
+    if any(token in text for token in ["创建", "新建", "写入", "保存", "write"]):
+        criteria.append("如果需要落地文件，必须存在成功 write_file observation。")
+    if any(token in text for token in ["运行", "执行", "编译", "测试", "run", "test", "build"]):
+        criteria.append("如果需要运行结果，必须引用成功或失败的 exec/background observation。")
+    if any(token in text for token in ["读取", "查看", "搜索", "列出", "read", "list", "search"]):
+        criteria.append("如果回答本地文件内容，必须存在成功 read/list/search observation。")
+    if any(token in text for token in ["目录", "路径", "放在哪", "创建一个", "新建一个"]):
+        criteria.append("缺少目标路径或存在多个合理选择时，必须调用 request_user_input。")
+    return criteria
+
+
+def _world_state_from_observations(observations: list[AgentToolObservationPayload]) -> AgentWorldStatePayload:
+    world = _empty_world_state()
+    for observation in observations:
+        data = dict(observation.get("data") or {})
+        tool_name = str(observation.get("tool_name") or "")
+        compact = {
+            "tool_call_id": observation.get("tool_call_id", ""),
+            "tool_name": tool_name,
+            "ok": bool(observation.get("ok")),
+            "error_code": observation.get("error_code", ""),
+            "message": observation.get("message", ""),
+            "data": _compact_observation_data_for_world(data),
+        }
+        world["observations"].append(compact)
+        if not observation.get("ok"):
+            world["failures"].append(compact)
+        path = str(data.get("path") or data.get("relative_path") or "")
+        if path:
+            world["known_paths"][path] = {
+                "tool_name": tool_name,
+                "ok": bool(observation.get("ok")),
+                "exists": data.get("exists", True),
+                "size": data.get("size"),
+                "modified_at": data.get("modified_at", ""),
+            }
+        if tool_name == "exec_command":
+            world["command_results"].append(
+                {
+                    "command": data.get("command", ""),
+                    "cwd": data.get("cwd", ""),
+                    "exit_code": data.get("exit_code"),
+                    "ok": bool(observation.get("ok")),
+                    "timed_out": data.get("timed_out", False),
+                    "stdout_preview": str(data.get("stdout") or "")[:500],
+                    "stderr_preview": str(data.get("stderr") or "")[:500],
+                }
+            )
+        if tool_name in {"exec_command_background", "read_background_output", "kill_background_task", "list_background_tasks"}:
+            task_id = str(data.get("task_id") or "")
+            if task_id:
+                world["background_tasks"].append(
+                    {
+                        "task_id": task_id,
+                        "status": data.get("status", ""),
+                        "command": data.get("command", ""),
+                        "ok": bool(observation.get("ok")),
+                    }
+                )
+    return world
+
+
+def _compact_observation_data_for_world(data: dict) -> dict:
+    compact: dict = {}
+    for key in [
+        "path",
+        "relative_path",
+        "command",
+        "cwd",
+        "exit_code",
+        "status",
+        "task_id",
+        "count",
+        "truncated",
+        "full_view",
+    ]:
+        if key in data:
+            compact[key] = data[key]
+    return compact
+
+
+def _task_with_latest_observation(task: dict, observations: list[AgentToolObservationPayload]) -> AgentTaskPayload:
+    updated: AgentTaskPayload = dict(task)
+    steps = [dict(step) for step in updated.get("steps", [])]
+    if not steps:
+        steps = [{"id": "step-1", "description": "执行本轮任务", "status": "pending"}]
+    latest = observations[-1] if observations else None
+    if latest:
+        step = steps[0]
+        step["status"] = "completed" if latest.get("ok") else "failed"
+        step["tool_name"] = str(latest.get("tool_name") or "")
+        step["arguments"] = dict(latest.get("arguments") or {})
+        step["result_summary"] = _summarize_tool_observation(latest)
+        if not latest.get("ok"):
+            step["retry_count"] = int(step.get("retry_count") or 0) + 1
+        steps[0] = step
+        updated["current_step_id"] = str(step.get("id") or "step-1")
+    updated["steps"] = steps  # type: ignore[typeddict-item]
+    return updated
+
+
+def _verification_reason(state: MemoryChatGraphState, latest: dict) -> str:
+    if not latest:
+        return "尚未调用工具，交由 agent 决定下一步。"
+    if not latest.get("ok"):
+        return (
+            f"{latest.get('tool_name', 'tool')} 失败："
+            f"{latest.get('error_code', '')} {latest.get('message', '')}".strip()
+        )
+    criteria = (state.get("task") or {}).get("acceptance_criteria") or []
+    return "最近工具调用成功；下一轮 agent 必须对照验收条件决定继续执行或最终回答。验收条件：" + "；".join(criteria)
 
 
 def _turn_message(

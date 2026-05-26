@@ -84,7 +84,17 @@ export interface UserInputRequest {
   selection_mode: "single" | "multiple";
   allow_other: boolean;
   other_option: UserInputOption & { placeholder?: string };
+  questions?: UserInputQuestion[];
   step_index?: number;
+}
+
+export interface UserInputQuestion {
+  id: string;
+  question: string;
+  options: UserInputOption[];
+  selection_mode: "single" | "multiple";
+  allow_other: boolean;
+  other_placeholder: string;
 }
 
 export interface UserInputAnswer {
@@ -93,6 +103,18 @@ export interface UserInputAnswer {
   selected_option_ids: string[];
   answer: string;
   other_text?: string;
+  request_ids?: string[];
+  answers?: string[];
+  question_answers?: Array<{
+    question_id: string;
+    question: string;
+    answer: string;
+    selected_option_id: string;
+    selected_option_ids: string[];
+    selected_option_labels: string[];
+    other_text?: string;
+    is_other?: boolean;
+  }>;
 }
 
 /**
