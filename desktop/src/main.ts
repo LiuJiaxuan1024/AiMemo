@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import "./styles.css";
@@ -19,6 +20,9 @@ const ELF_CHAT_STREAM_URL = "http://127.0.0.1:8000/api/elf/chat/stream";
 const ELF_CHAT_RESUME_STREAM_URL = (turnId: number) =>
   `http://127.0.0.1:8000/api/elf/chat/turns/${turnId}/resume/stream`;
 const isLinuxElfWindow = navigator.userAgent.includes("Linux");
+const ELF_WINDOW_HEIGHT = 420;
+const ELF_COMPACT_WINDOW_WIDTH = 300;
+const ELF_CHOICE_WINDOW_WIDTH = 560;
 
 if (isLinuxElfWindow) {
   document.documentElement.classList.add("linux-elf-window");
@@ -40,6 +44,9 @@ let isElfChatRunning = false;
 let activeToolCallIds = new Set<string>();
 let toolProgressCount = 0;
 let choiceCloseTimer: number | null = null;
+let elfWindowMode: "compact" | "choice" | null = null;
+
+void setElfWindowMode("compact");
 
 elf?.addEventListener("pointerdown", (event) => {
   if (event.button !== 0) {
@@ -237,10 +244,12 @@ function hideChoicePanel() {
   choicePanel.setAttribute("aria-hidden", "true");
   choicePanel.onsubmit = null;
   choicePanel.replaceChildren();
+  void setElfWindowMode("compact");
 }
 
 function closeChoicePanelWithAnimation(onClosed: () => void) {
   if (!choicePanel) {
+    void setElfWindowMode("compact");
     onClosed();
     return;
   }
@@ -255,8 +264,22 @@ function closeChoicePanelWithAnimation(onClosed: () => void) {
     choicePanel.classList.remove("closing");
     choicePanel.replaceChildren();
     choiceCloseTimer = null;
+    void setElfWindowMode("compact");
     onClosed();
   }, 190);
+}
+
+async function setElfWindowMode(mode: "compact" | "choice") {
+  if (isLinuxElfWindow || elfWindowMode === mode) {
+    return;
+  }
+  elfWindowMode = mode;
+  const width = mode === "choice" ? ELF_CHOICE_WINDOW_WIDTH : ELF_COMPACT_WINDOW_WIDTH;
+  try {
+    await currentWindow.setSize(new LogicalSize(width, ELF_WINDOW_HEIGHT));
+  } catch {
+    // Older desktop permission/config states may reject resizing; the elf still remains usable.
+  }
 }
 
 function endPointerInteraction() {
@@ -580,6 +603,7 @@ function showChoicePanel(request: UserInputRequest): Promise<UserInputAnswer> {
 
     hideElfMenu();
     hideChatPanel();
+    void setElfWindowMode("choice");
     if (choiceCloseTimer !== null) {
       window.clearTimeout(choiceCloseTimer);
       choiceCloseTimer = null;

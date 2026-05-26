@@ -23,6 +23,7 @@ html.linux-elf-window body {
 
 #app {
   align-items: end;
+  background: transparent;
   box-sizing: border-box;
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr);
