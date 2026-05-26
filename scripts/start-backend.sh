@@ -38,12 +38,12 @@ find_python312() {
   for candidate in \
     "/opt/homebrew/opt/python@3.12/bin/python3.12" \
     "/usr/local/opt/python@3.12/bin/python3.12"; do
-    if python_is_312 "$candidate"; then
+    if [[ "$(uname -s)" == "Darwin" ]] && python_is_312 "$candidate"; then
       echo "$candidate"
       return 0
     fi
   done
-  if command -v brew >/dev/null 2>&1; then
+  if [[ "$(uname -s)" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
     candidate="$(brew --prefix python@3.12 2>/dev/null || true)"
     if [[ -n "$candidate" ]] && python_is_312 "$candidate/bin/python3.12"; then
       echo "$candidate/bin/python3.12"
@@ -66,18 +66,25 @@ cd "$BACKEND_DIR"
 if ! python_is_312 "$VENV_PYTHON"; then
   PYTHON312="$(find_python312 || true)"
   if [[ -z "$PYTHON312" ]]; then
+    platform="$(uname -s)"
+    install_hint=""
+    case "$platform" in
+      Darwin)
+        install_hint=$'  macOS:         brew install python@3.12\n\nIf Python 3.12 is installed but not linked, add it to PATH or use the Homebrew\npath directly:\n  export PATH="/opt/homebrew/opt/python@3.12/bin:$PATH"'
+        ;;
+      Linux)
+        install_hint=$'  Ubuntu/Debian: sudo apt install python3.12 python3.12-venv\n  Fedora:        sudo dnf install python3.12'
+        ;;
+      *)
+        install_hint=$'  Install Python 3.12 from your platform package manager, then rerun this script.'
+        ;;
+    esac
     cat >&2 <<'EOF'
 Python 3.12 is required, but it was not found.
 
 Install it first, then rerun this script. Examples:
-  Ubuntu/Debian: sudo apt install python3.12 python3.12-venv
-  Fedora:        sudo dnf install python3.12
-  macOS:         brew install python@3.12
-
-If Python 3.12 is installed but not linked, add it to PATH or use the Homebrew
-path directly:
-  export PATH="/opt/homebrew/opt/python@3.12/bin:$PATH"
 EOF
+    printf '%s\n' "$install_hint" >&2
     exit 1
   fi
 
