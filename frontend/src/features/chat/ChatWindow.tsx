@@ -40,6 +40,8 @@ export function ChatWindow() {
   const [input, setInput] = useState("");
   const [selectedGraph, setSelectedGraph] = useState<ChatTurnGraph | null>(null);
   const [isGraphLoading, setIsGraphLoading] = useState(false);
+  const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const selectedGraphRef = useRef<ChatTurnGraph | null>(null);
 
@@ -102,8 +104,20 @@ export function ChatWindow() {
   }, []);
 
   useEffect(() => {
+    if (!shouldAutoScroll) {
+      return;
+    }
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [scrollAnchor]);
+  }, [scrollAnchor, shouldAutoScroll]);
+
+  const updateAutoScrollIntent = useCallback(() => {
+    const list = messageListRef.current;
+    if (!list) {
+      return;
+    }
+    const distanceToBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
+    setShouldAutoScroll(distanceToBottom < 96);
+  }, []);
 
   useEffect(() => {
     selectedGraphRef.current = selectedGraph;
@@ -233,12 +247,14 @@ export function ChatWindow() {
     const conversation = await createConversation();
     setConversations((current) => [conversation, ...current]);
     setActiveConversation(conversation);
+    setShouldAutoScroll(true);
     streamingStore.patch(conversation.id, { loaded: true });
     setSelectedGraph(null);
   }
 
   async function handleSelectConversation(conversation: Conversation) {
     setActiveConversation(conversation);
+    setShouldAutoScroll(true);
     setSelectedGraph(null);
     // 切到正在 streaming 的会话不会重新拉 listMessages，view 已经包含最新 messages；
     // 第一次切入未加载的会话才会执行 fetch + active-turns 探测。
@@ -298,6 +314,7 @@ export function ChatWindow() {
 
     const conversationId = activeConversationId;
     const content = input.trim();
+    setShouldAutoScroll(true);
     const optimisticUserId = -Date.now();
     const optimisticAssistantId = optimisticUserId - 1;
     const optimisticUser: DraftAssistantMessage = {
@@ -390,6 +407,7 @@ export function ChatWindow() {
       return;
     }
     const conversationId = activeConversationId;
+    setShouldAutoScroll(true);
     const controller = new AbortController();
     streamingStore.update(conversationId, (current) => ({
       ...current,
@@ -490,8 +508,10 @@ export function ChatWindow() {
 
         <MessageList
           endRef={messagesEndRef}
+          listRef={messageListRef}
           messages={messages}
           onOpenGraph={handleOpenGraph}
+          onScroll={updateAutoScrollIntent}
           onSubmitUserInput={handleUserInputAnswer}
           thoughts={thoughts}
         />

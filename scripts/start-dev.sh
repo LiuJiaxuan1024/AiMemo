@@ -141,6 +141,11 @@ cleanup() {
 trap cleanup INT TERM EXIT
 
 sleep 2
+if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+  wait "$BACKEND_PID" || true
+  echo "AiMemo backend failed to start. Fix the backend error above, then rerun ./scripts/start-dev.sh." >&2
+  exit 1
+fi
 "$SCRIPT_DIR/start-frontend.sh" $START_ARGS &
 FRONTEND_PID=$!
 

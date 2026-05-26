@@ -18,7 +18,9 @@ import type {
 
 interface MessageListProps {
   endRef: RefObject<HTMLDivElement | null>;
+  listRef?: RefObject<HTMLDivElement | null>;
   messages: DraftAssistantMessage[];
+  onScroll?: () => void;
   onOpenGraph: (message: DraftAssistantMessage) => void;
   onSubmitUserInput: (message: DraftAssistantMessage, answer: UserInputAnswer) => void;
   thoughts?: ChatThought[];
@@ -26,13 +28,15 @@ interface MessageListProps {
 
 export function MessageList({
   endRef,
+  listRef,
   messages,
+  onScroll,
   onOpenGraph,
   onSubmitUserInput,
   thoughts = [],
 }: MessageListProps) {
   return (
-    <div className="chat-message-list">
+    <div className="chat-message-list" onScroll={onScroll} ref={listRef}>
       {messages.length === 0 ? (
         <EmptyState className="chat-empty">向 AiMemo 提一个关于笔记或记忆的问题</EmptyState>
       ) : null}

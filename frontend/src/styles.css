@@ -1879,12 +1879,14 @@ textarea {
   display: flex;
   gap: 8px;
   max-width: min(760px, 82%);
+  min-width: 0;
   padding: 11px 12px;
 }
 
 .chat-message-content {
   display: grid;
   gap: 8px;
+  max-width: 100%;
   min-width: 0;
 }
 
@@ -2322,6 +2324,9 @@ textarea {
   display: grid;
   gap: 4px;
   margin: 6px 0;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
   padding: 8px 10px;
   font-size: 12px;
 }
@@ -2332,6 +2337,7 @@ textarea {
   display: inline-flex;
   font-weight: 600;
   gap: 6px;
+  min-width: 0;
 }
 
 .chat-tool-card__icon {
@@ -2345,14 +2351,19 @@ textarea {
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
   font-size: 11px;
   margin: 0;
-  overflow: hidden;
+  max-width: 100%;
+  min-width: 0;
+  overflow: auto;
   padding: 4px 6px;
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
 .chat-tool-card__summary {
   color: #64748b;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .chat-tool-card--failed {
@@ -2412,18 +2423,24 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .chat-segment {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .chat-segment__tools {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .chat-segment-thoughts {
@@ -2637,6 +2654,7 @@ textarea {
 
 .markdown-message {
   line-height: 1.7;
+  max-width: 100%;
   min-width: 0;
   overflow-wrap: anywhere;
 }
@@ -2729,8 +2747,9 @@ textarea {
   display: block;
   margin: 10px 0 12px;
   max-width: 100%;
+  min-width: 0;
   overflow: auto;
-  width: max-content;
+  width: 100%;
 }
 
 .markdown-message th,
