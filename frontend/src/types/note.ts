@@ -18,11 +18,18 @@ export interface NoteListItem {
 
 export interface Note extends NoteListItem {
   content: string;
+  content_markdown: string;
+  content_blocks: string;
+  content_format: "markdown" | "blocknote" | string;
+  content_version: number;
 }
 
 export interface CreateNoteInput {
   title?: string;
   content: string;
+  content_markdown?: string;
+  content_blocks?: string;
+  content_format?: "markdown" | "blocknote";
   summary?: string;
   tags?: string[];
 }
@@ -30,4 +37,7 @@ export interface CreateNoteInput {
 export interface UpdateNoteInput {
   title?: string;
   content?: string;
+  content_markdown?: string;
+  content_blocks?: string;
+  content_format?: "markdown" | "blocknote";
 }

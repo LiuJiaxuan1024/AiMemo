@@ -42,6 +42,24 @@ def test_create_note_returns_immediately_with_pending_job(session):
     assert all(note.content_hash in str(job.payload) for job in jobs)
 
 
+def test_create_note_dual_stores_markdown_and_blocks(session):
+    note = create_note(
+        session,
+        NoteCreate(
+            content_markdown="## 标题\n\n正文",
+            content_blocks='[{"type":"heading","content":"标题"}]',
+            content_format="blocknote",
+        ),
+    )
+
+    assert note.content == "## 标题\n\n正文"
+    assert note.content_markdown == "## 标题\n\n正文"
+    assert note.content_blocks == '[{"type":"heading","content":"标题"}]'
+    assert note.content_format == "blocknote"
+    assert note.content_version == 1
+    assert note.content_hash == build_note_content_hash("## 标题\n\n正文")
+
+
 def test_update_note_rebuilds_current_content_version_jobs_and_clears_chunks(session):
     note = create_note(session, NoteCreate(content="旧内容。"))
     old_hash = note.content_hash
@@ -74,6 +92,26 @@ def test_update_note_rebuilds_current_content_version_jobs_and_clears_chunks(ses
         f"{JobType.NOTE_METADATA.value}:note:{note.id}:content:{updated.content_hash}",
         f"{JobType.NOTE_EMBEDDING.value}:note:{note.id}:content:{updated.content_hash}",
     ]
+
+
+def test_update_note_dual_store_fields_without_rebuild_when_markdown_same(session):
+    note = create_note(session, NoteCreate(content="同一份 Markdown。"))
+
+    updated = update_note(
+        session,
+        note.id,
+        NoteUpdate(
+            content_markdown="同一份 Markdown。",
+            content_blocks='[{"type":"paragraph"}]',
+            content_format="blocknote",
+        ),
+    )
+
+    assert updated.content == "同一份 Markdown。"
+    assert updated.content_markdown == "同一份 Markdown。"
+    assert updated.content_blocks == '[{"type":"paragraph"}]'
+    assert updated.content_format == "blocknote"
+    assert updated.content_version == 1
 
 
 def test_delete_restore_and_hard_delete_note(session):

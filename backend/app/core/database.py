@@ -67,6 +67,10 @@ def migrate_existing_sqlite_schema() -> None:
             Note.__tablename__,
             {
                 "title_source": "VARCHAR(24) DEFAULT 'fallback'",
+                "content_markdown": "TEXT DEFAULT ''",
+                "content_blocks": "TEXT DEFAULT ''",
+                "content_format": "VARCHAR(24) DEFAULT 'markdown'",
+                "content_version": "INTEGER DEFAULT 1",
                 "content_hash": "VARCHAR(64) DEFAULT ''",
                 "status": "VARCHAR(24) DEFAULT 'active'",
                 "processing_status": "VARCHAR(24) DEFAULT 'completed'",
@@ -78,6 +82,7 @@ def migrate_existing_sqlite_schema() -> None:
                 "deleted_at": "DATETIME",
             },
         )
+        _backfill_note_content_markdown(Note.__tablename__)
         _backfill_note_content_hash(Note.__tablename__)
 
     if Job.__tablename__ in table_names:
@@ -155,3 +160,18 @@ def _backfill_note_content_hash(table_name: str) -> None:
                 text(f"UPDATE {table_name} SET content_hash = :hash WHERE id = :id"),
                 {"hash": content_hash(str(content or "").strip()), "id": note_id},
             )
+
+
+def _backfill_note_content_markdown(table_name: str) -> None:
+    """为旧数据库补 Markdown 副本，保持 content 兼容字段不变。"""
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                f"""
+                UPDATE {table_name}
+                SET content_markdown = content
+                WHERE content_markdown = '' OR content_markdown IS NULL
+                """
+            )
+        )

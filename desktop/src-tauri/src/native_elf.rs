@@ -928,7 +928,7 @@ fn draw_bubble(context: &Context, width: i32, text: &str) {
         .expect("failed to stroke native elf bubble tail");
 
     context.select_font_face(
-        "Sans",
+        "Noto Sans CJK SC, Source Han Sans SC, WenQuanYi Micro Hei, Microsoft YaHei, Sans",
         gdk::cairo::FontSlant::Normal,
         gdk::cairo::FontWeight::Normal,
     );

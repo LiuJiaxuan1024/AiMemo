@@ -12,6 +12,10 @@ class Note(SQLModel, table=True):
     title: str = Field(default="", index=True, max_length=200)
     title_source: str = Field(default="fallback", index=True, max_length=24)
     content: str
+    content_markdown: str = ""
+    content_blocks: str = ""
+    content_format: str = Field(default="markdown", index=True, max_length=24)
+    content_version: int = Field(default=1, index=True)
     content_hash: str = Field(default="", index=True, max_length=64)
     summary: str = ""
     tags: str = ""

@@ -32,10 +32,15 @@ def _fallback_title(content: str) -> str:
 
 
 def _to_note_read(note: Note) -> NoteRead:
+    markdown = _note_markdown(note)
     return NoteRead(
         id=note.id or 0,
         title=note.title,
-        content=note.content,
+        content=markdown,
+        content_markdown=markdown,
+        content_blocks=note.content_blocks or "",
+        content_format=note.content_format or "markdown",
+        content_version=note.content_version or 1,
         content_hash=note.content_hash,
         summary=note.summary,
         tags=_decode_tags(note.tags),
@@ -78,17 +83,22 @@ def create_note(session: Session, payload: NoteCreate) -> NoteRead:
     dedupe_key 带 content_hash，确保用户快速修改后，新旧任务不会互相覆盖。
     """
 
-    normalized_content = _normalize_content(payload.content)
+    normalized_content = _normalize_content(_payload_markdown(payload.content_markdown, payload.content))
     user_title = payload.title.strip()
     title = user_title or _fallback_title(normalized_content)
     summary = payload.summary.strip()
     tags = payload.tags
+    content_format = _normalize_content_format(payload.content_format)
     note_hash = build_note_content_hash(normalized_content)
 
     note = Note(
         title=title,
         title_source="user" if user_title else "fallback",
         content=normalized_content,
+        content_markdown=normalized_content,
+        content_blocks=payload.content_blocks.strip(),
+        content_format=content_format,
+        content_version=1,
         content_hash=note_hash,
         summary=summary,
         tags=_encode_tags(tags),
@@ -148,19 +158,26 @@ def update_note(session: Session, note_id: int, payload: NoteUpdate) -> NoteRead
         note.title = user_title or _fallback_title(note.content)
         note.title_source = "user" if user_title else "fallback"
 
-    if "content" in payload.model_fields_set:
-        if payload.content is None:
-            raise _bad_request("content cannot be null.")
-        next_content = _normalize_content(payload.content)
+    markdown_touched = "content" in payload.model_fields_set or "content_markdown" in payload.model_fields_set
+    if markdown_touched:
+        next_content = _normalize_content(_payload_markdown(payload.content_markdown, payload.content))
         next_hash = build_note_content_hash(next_content)
         content_changed = next_hash != note.content_hash
         note.content = next_content
+        note.content_markdown = next_content
         note.content_hash = next_hash
         if note.title_source != "user":
             note.title = _fallback_title(next_content)
             note.title_source = "fallback"
 
+    if "content_blocks" in payload.model_fields_set:
+        note.content_blocks = payload.content_blocks or ""
+
+    if "content_format" in payload.model_fields_set:
+        note.content_format = _normalize_content_format(payload.content_format or "markdown")
+
     if content_changed:
+        note.content_version = (note.content_version or 1) + 1
         _reset_ai_fields_for_rebuild(note)
         _delete_note_chunks_and_vectors(session, note.id or 0)
         enqueue_note_processing_jobs(session, note)
@@ -310,6 +327,24 @@ def _normalize_content(content: str) -> str:
     normalized = content.strip()
     if not normalized:
         raise _bad_request("content cannot be empty.")
+    return normalized
+
+
+def _payload_markdown(content_markdown: str | None, legacy_content: str | None) -> str:
+    content = content_markdown if content_markdown is not None else legacy_content
+    if content is None:
+        raise _bad_request("content_markdown or content is required.")
+    return content
+
+
+def _note_markdown(note: Note) -> str:
+    return (note.content_markdown or note.content or "").strip()
+
+
+def _normalize_content_format(content_format: str) -> str:
+    normalized = content_format.strip().lower() or "markdown"
+    if normalized not in {"markdown", "blocknote"}:
+        raise _bad_request("Invalid content format.")
     return normalized
 
 

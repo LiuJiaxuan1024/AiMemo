@@ -1,8 +1,9 @@
 import { FormEvent, useEffect, useState } from "react";
-import { ArchiveX, Pencil, RotateCcw, Save, Trash2, X } from "lucide-react";
+import { ArchiveX, CalendarDays, FileText, Pencil, RotateCcw, Save, Tags, Trash2, X } from "lucide-react";
 
-import { Badge, Button, EmptyState } from "../../shared/ui";
-import type { Note } from "../../types/note";
+import { Badge, Button, EmptyState, MarkdownView } from "../../shared/ui";
+import type { Note, UpdateNoteInput } from "../../types/note";
+import { LazyMarkdownEditor } from "./LazyMarkdownEditor";
 import { formatNoteDate } from "./noteUtils";
 
 interface NoteDetailProps {
@@ -11,7 +12,7 @@ interface NoteDetailProps {
   onDelete: (note: Note) => void;
   onHardDelete: (note: Note) => void;
   onRestore: (note: Note) => void;
-  onUpdate: (note: Note, input: { title: string; content: string }) => void;
+  onUpdate: (note: Note, input: UpdateNoteInput) => void;
 }
 
 /**
@@ -29,12 +30,14 @@ export function NoteDetail({
   const [isEditing, setIsEditing] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [contentDraft, setContentDraft] = useState("");
+  const [contentBlocksDraft, setContentBlocksDraft] = useState("");
 
   useEffect(() => {
     setIsEditing(false);
     setTitleDraft(note?.title ?? "");
-    setContentDraft(note?.content ?? "");
-  }, [note?.id, note?.title, note?.content]);
+    setContentDraft(note?.content_markdown ?? note?.content ?? "");
+    setContentBlocksDraft(note?.content_blocks ?? "");
+  }, [note?.id, note?.title, note?.content, note?.content_markdown, note?.content_blocks]);
 
   if (!note) {
     return (
@@ -43,6 +46,10 @@ export function NoteDetail({
       </article>
     );
   }
+  const characterCount = note.content.trim().length;
+  const paragraphCount = note.content.split(/\n{2,}/).filter((item) => item.trim()).length;
+  const isProcessing = note.processing_status === "pending" || note.processing_status === "processing";
+  const isEmbedding = note.embedding_status === "pending" || note.embedding_status === "processing";
 
   function submitEdit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -52,46 +59,30 @@ export function NoteDetail({
     onUpdate(note, {
       title: titleDraft,
       content: contentDraft,
+      content_markdown: contentDraft,
+      content_blocks: contentBlocksDraft,
+      content_format: "blocknote",
     });
     setIsEditing(false);
   }
 
   return (
     <article className="note-detail">
-      <header>
+      <header className="note-detail-header">
         <div>
           <h2>{note.title}</h2>
-          {note.tags.length > 0 ? (
-            <div className="tag-row">
-              {note.tags.map((tag) => (
-                <span className="tag" key={tag}>
-                  {tag}
-                </span>
-              ))}
-            </div>
-          ) : null}
-          {note.processing_status === "pending" || note.processing_status === "processing" ? (
-            <Badge className="detail-badge" tone="warning">
-              AI 整理中
-            </Badge>
-          ) : null}
-          {note.processing_status === "failed" ? (
-            <Badge className="detail-badge" tone="danger">
-              AI 整理失败{note.processing_error ? `：${note.processing_error}` : ""}
-            </Badge>
-          ) : null}
-          {note.embedding_status === "pending" || note.embedding_status === "processing" ? (
-            <Badge className="detail-badge" tone="success">
-              建立记忆中
-            </Badge>
-          ) : null}
-          {note.embedding_status === "failed" ? (
-            <Badge className="detail-badge" tone="danger">
-              建立记忆失败{note.embedding_error ? `：${note.embedding_error}` : ""}
-            </Badge>
-          ) : null}
+          <div className="note-meta-row">
+            <span>
+              <CalendarDays aria-hidden="true" size={14} />
+              更新于 {formatNoteDate(note.updated_at)}
+            </span>
+            <span>
+              <FileText aria-hidden="true" size={14} />
+              {characterCount} 字 / {paragraphCount || 1} 段
+            </span>
+          </div>
         </div>
-        <time>{formatNoteDate(note.updated_at)}</time>
+        <time>{formatNoteDate(note.created_at)}</time>
       </header>
       <div className="note-detail-actions">
         {note.status === "active" ? (
@@ -118,6 +109,30 @@ export function NoteDetail({
           </>
         )}
       </div>
+      <section className="note-health-grid" aria-label="笔记处理状态">
+        <div className={isProcessing ? "running" : ""}>
+          <span>AI 整理</span>
+          {note.processing_status === "failed" ? (
+            <Badge tone="danger">失败</Badge>
+          ) : isProcessing ? (
+            <Badge tone="warning">进行中</Badge>
+          ) : (
+            <Badge tone="success">已完成</Badge>
+          )}
+          {note.processing_error ? <small>{note.processing_error}</small> : null}
+        </div>
+        <div className={isEmbedding ? "running" : ""}>
+          <span>记忆索引</span>
+          {note.embedding_status === "failed" ? (
+            <Badge tone="danger">失败</Badge>
+          ) : isEmbedding ? (
+            <Badge tone="warning">进行中</Badge>
+          ) : (
+            <Badge tone="success">已完成</Badge>
+          )}
+          {note.embedding_error ? <small>{note.embedding_error}</small> : null}
+        </div>
+      </section>
       {isEditing ? (
         <form className="note-edit-form" onSubmit={submitEdit}>
           <input
@@ -125,10 +140,15 @@ export function NoteDetail({
             onChange={(event) => setTitleDraft(event.target.value)}
             value={titleDraft}
           />
-          <textarea
-            aria-label="编辑笔记内容"
-            onChange={(event) => setContentDraft(event.target.value)}
-            value={contentDraft}
+          <LazyMarkdownEditor
+            blocksJson={contentBlocksDraft}
+            className="note-edit-block-editor"
+            markdown={contentDraft}
+            onChange={(value) => {
+              setContentDraft(value.markdown);
+              setContentBlocksDraft(value.blocksJson);
+            }}
+            placeholder="继续写这条笔记..."
           />
           <div className="note-detail-actions">
             <Button disabled={isMutating || !contentDraft.trim()} size="sm" type="submit">
@@ -142,8 +162,27 @@ export function NoteDetail({
           </div>
         </form>
       ) : null}
-      {note.summary ? <section className="summary-block">{note.summary}</section> : null}
-      {!isEditing ? <p>{note.content}</p> : null}
+      {note.tags.length > 0 ? (
+        <div className="tag-row">
+          <Tags aria-hidden="true" size={15} />
+          {note.tags.map((tag) => (
+            <span className="tag" key={tag}>
+              {tag}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {note.summary ? (
+        <section className="summary-block">
+          <strong>摘要</strong>
+          <p>{note.summary}</p>
+        </section>
+      ) : null}
+      {!isEditing ? (
+        <section className="note-content-reader">
+          <MarkdownView className="note-markdown" content={note.content} />
+        </section>
+      ) : null}
     </article>
   );
 }

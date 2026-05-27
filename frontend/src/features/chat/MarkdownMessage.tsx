@@ -1,6 +1,4 @@
-import ReactMarkdown from "react-markdown";
-import rehypeSanitize from "rehype-sanitize";
-import remarkGfm from "remark-gfm";
+import { MarkdownView } from "../../shared/ui";
 
 interface MarkdownMessageProps {
   content: string;
@@ -8,17 +6,5 @@ interface MarkdownMessageProps {
 }
 
 export function MarkdownMessage({ content, fallback = "" }: MarkdownMessageProps) {
-  const value = content || fallback;
-
-  if (!value) {
-    return null;
-  }
-
-  return (
-    <div className="markdown-message">
-      <ReactMarkdown rehypePlugins={[rehypeSanitize]} remarkPlugins={[remarkGfm]}>
-        {value}
-      </ReactMarkdown>
-    </div>
-  );
+  return <MarkdownView content={content} fallback={fallback} />;
 }

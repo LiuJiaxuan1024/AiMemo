@@ -2,8 +2,8 @@
   color: #1d2433;
   background: #f6f7f9;
   font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    sans-serif;
+    system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -322,6 +322,12 @@ textarea {
   overflow: hidden;
 }
 
+.memo-page.app-shell {
+  background: #f5f7fb;
+  grid-template-columns: 348px minmax(0, 1fr);
+  padding: 0;
+}
+
 .sidebar {
   background: #ffffff;
   border-right: 1px solid #d9dde5;
@@ -337,7 +343,35 @@ textarea {
   align-items: center;
   display: flex;
   gap: 12px;
-  margin-bottom: 24px;
+  margin-bottom: 18px;
+}
+
+.note-stat-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 14px;
+}
+
+.note-stat-grid span {
+  background: #f8fafc;
+  border: 1px solid #e6e9ef;
+  border-radius: 8px;
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 9px 10px;
+}
+
+.note-stat-grid strong {
+  color: #1d2433;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.note-stat-grid small {
+  color: #667085;
+  font-size: 12px;
 }
 
 .sidebar-tabs {
@@ -391,6 +425,52 @@ textarea {
   margin: 4px 0 0;
 }
 
+.note-search {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #cbd2e1;
+  border-radius: 8px;
+  color: #667085;
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+  min-height: 40px;
+  padding: 0 11px;
+}
+
+.note-search:focus-within {
+  border-color: #1f6feb;
+  box-shadow: 0 0 0 3px #dbeafe;
+}
+
+.note-search input {
+  background: transparent;
+  border: 0;
+  color: #1d2433;
+  flex: 1;
+  min-width: 0;
+  outline: none;
+}
+
+.note-sort-row {
+  align-items: center;
+  color: #667085;
+  display: flex;
+  font-size: 13px;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.note-sort-row select {
+  background: #ffffff;
+  border: 1px solid #cbd2e1;
+  border-radius: 7px;
+  color: #344054;
+  min-height: 32px;
+  outline: none;
+  padding: 0 8px;
+}
+
 .note-list {
   display: flex;
   flex-direction: column;
@@ -401,8 +481,8 @@ textarea {
 }
 
 .note-item {
-  background: transparent;
-  border: 1px solid transparent;
+  background: #ffffff;
+  border: 1px solid #edf0f5;
   border-radius: 8px;
   color: #1d2433;
   cursor: pointer;
@@ -419,11 +499,28 @@ textarea {
   border-color: #bfdbfe;
 }
 
-.note-item span {
+.note-item > span:first-child {
   font-weight: 650;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.note-item-badges,
+.note-item-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.note-item-tags small {
+  background: #f8fafc;
+  border: 1px solid #e6e9ef;
+  border-radius: 999px;
+  color: #475467;
+  font-size: 11px;
+  padding: 2px 7px;
 }
 
 .note-item em {
@@ -440,7 +537,7 @@ textarea {
   margin-top: 10px;
 }
 
-.note-item small {
+.note-item-date {
   color: #667085;
 }
 
@@ -455,12 +552,46 @@ textarea {
   padding: 24px;
 }
 
-.memo-page {
-  padding: 0;
+.memo-workspace {
+  grid-template-rows: minmax(0, 1fr);
+  padding: 22px;
 }
 
-.memo-workspace {
+.memo-workspace-panel {
+  display: grid;
+  gap: 16px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.memo-workspace-panel--compose {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.memo-workspace-panel--reader {
   grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.memo-reader-header {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #dfe4ee;
+  border-radius: 8px;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  padding: 14px 16px;
+}
+
+.memo-reader-header strong {
+  color: #1d2433;
+  display: block;
+  font-size: 15px;
+}
+
+.memo-reader-header p {
+  color: #667085;
+  margin: 4px 0 0;
 }
 
 .workspace > .ui-segmented-tabs {
@@ -472,14 +603,51 @@ textarea {
 .note-detail,
 .elf-panel {
   background: #ffffff;
-  border: 1px solid #d9dde5;
+  border: 1px solid #dfe4ee;
   border-radius: 8px;
 }
 
 .composer {
   display: grid;
-  gap: 12px;
-  padding: 16px;
+  gap: 14px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  padding: 18px;
+}
+
+.composer-header {
+  align-items: start;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.composer-header h2 {
+  font-size: 18px;
+  margin: 4px 0 0;
+}
+
+.composer-header small {
+  color: #667085;
+  white-space: nowrap;
+}
+
+.composer-kicker {
+  align-items: center;
+  color: #1f6feb;
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 700;
+  gap: 6px;
+}
+
+.composer-fields {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 10px;
+  min-height: 0;
 }
 
 .composer input,
@@ -498,8 +666,76 @@ textarea {
 }
 
 .composer textarea {
-  min-height: 120px;
+  min-height: 300px;
   resize: vertical;
+}
+
+.note-block-editor {
+  --bn-font-family:
+    system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif;
+  border: 1px solid #cbd2e1;
+  border-radius: 8px;
+  display: block;
+  font-family:
+    system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.note-block-editor:focus-within {
+  border-color: #1f6feb;
+  box-shadow: 0 0 0 3px #dbeafe;
+}
+
+.note-block-editor .bn-container,
+.note-block-editor .bn-root,
+.note-block-editor .bn-editor {
+  height: 100%;
+  min-height: 0;
+  width: 100%;
+}
+
+.note-block-editor .bn-editor {
+  border-radius: 0;
+  padding: 18px 20px 32px;
+}
+
+.note-block-editor .bn-block-content[data-content-type="codeBlock"] {
+  background: #111827;
+  border: 1px solid #243044;
+}
+
+.note-block-editor .bn-block-content[data-content-type="codeBlock"] > pre {
+  padding: 34px 18px 18px;
+}
+
+.note-block-editor .bn-block-content[data-content-type="codeBlock"] > div > select {
+  background: #1f2937;
+  border: 1px solid #374151;
+  border-radius: 6px;
+  color: #dbeafe;
+  opacity: 1;
+  padding: 2px 22px 2px 8px;
+  top: 8px;
+}
+
+.note-block-editor .bn-side-menu {
+  margin-left: -6px;
+}
+
+.composer-editor {
+  height: 100%;
+  min-height: 0;
+}
+
+.note-block-editor--loading {
+  align-items: center;
+  color: #667085;
+  display: flex;
+  justify-content: center;
+  min-height: 260px;
 }
 
 .composer-actions {
@@ -509,20 +745,10 @@ textarea {
   gap: 12px;
 }
 
-.composer button {
-  background: #1f6feb;
-  border: 0;
-  border-radius: 6px;
-  color: #ffffff;
-  cursor: pointer;
-  font-weight: 650;
-  min-height: 40px;
-  padding: 0 16px;
-}
-
-.composer button:disabled {
-  cursor: wait;
-  opacity: 0.7;
+.composer-hint {
+  color: #667085;
+  font-size: 13px;
+  margin: 0;
 }
 
 .recycle-hint {
@@ -546,11 +772,11 @@ textarea {
 .note-detail {
   min-height: 0;
   overflow: auto;
-  padding: 24px;
+  padding: 26px;
 }
 
-.note-detail header {
-  align-items: baseline;
+.note-detail-header {
+  align-items: start;
   border-bottom: 1px solid #e6e9ef;
   display: flex;
   justify-content: space-between;
@@ -560,8 +786,23 @@ textarea {
 }
 
 .note-detail h2 {
-  font-size: 24px;
+  font-size: 28px;
+  line-height: 1.2;
   margin: 0;
+}
+
+.note-meta-row {
+  color: #667085;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.note-meta-row span {
+  align-items: center;
+  display: inline-flex;
+  gap: 5px;
 }
 
 .note-detail-actions {
@@ -612,11 +853,18 @@ textarea {
   resize: vertical;
 }
 
+.note-edit-block-editor,
+.note-edit-block-editor .bn-editor {
+  min-height: 260px;
+}
+
 .tag-row {
+  align-items: center;
+  color: #667085;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-top: 10px;
+  margin-bottom: 16px;
 }
 
 .tag {
@@ -630,13 +878,23 @@ textarea {
 }
 
 .summary-block {
-  background: #f8fafc;
-  border: 1px solid #e6e9ef;
+  background: #f7fbff;
+  border: 1px solid #dbeafe;
   border-radius: 8px;
   color: #344054;
   line-height: 1.7;
   margin-bottom: 18px;
-  padding: 12px 14px;
+  padding: 14px 16px;
+}
+
+.summary-block strong {
+  color: #1849a9;
+  display: block;
+  margin-bottom: 6px;
+}
+
+.summary-block p {
+  margin: 0;
 }
 
 .note-detail time {
@@ -644,10 +902,77 @@ textarea {
   white-space: nowrap;
 }
 
-.note-detail p {
-  line-height: 1.8;
-  margin: 0;
-  white-space: pre-wrap;
+.note-content-reader {
+  background: #ffffff;
+  border-top: 1px solid #eef1f6;
+  padding-top: 18px;
+}
+
+.note-markdown {
+  color: #1d2433;
+  font-size: 15px;
+}
+
+.note-markdown h1 {
+  font-size: 26px;
+}
+
+.note-markdown h2 {
+  border-bottom: 1px solid #eef1f6;
+  font-size: 22px;
+  padding-bottom: 6px;
+}
+
+.note-markdown h3 {
+  font-size: 18px;
+}
+
+.note-markdown p {
+  line-height: 1.85;
+}
+
+.note-markdown blockquote {
+  background: #f7fbff;
+  border-left-color: #60a5fa;
+  border-radius: 0 8px 8px 0;
+  padding: 8px 12px;
+}
+
+.note-markdown table {
+  font-size: 14px;
+}
+
+.note-health-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 16px;
+}
+
+.note-health-grid > div {
+  background: #f8fafc;
+  border: 1px solid #e6e9ef;
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px;
+}
+
+.note-health-grid > div.running {
+  background: #fffaf0;
+  border-color: #fedf89;
+}
+
+.note-health-grid span {
+  color: #344054;
+  font-weight: 700;
+}
+
+.note-health-grid small {
+  color: #667085;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .empty-state {
@@ -4091,14 +4416,41 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .memo-page.app-shell {
+    grid-template-columns: 1fr;
+  }
+
   .sidebar {
     border-bottom: 1px solid #d9dde5;
     border-right: 0;
     max-height: 260px;
   }
 
+  .memo-page .sidebar {
+    max-height: 390px;
+  }
+
   .workspace {
     padding: 16px;
+  }
+
+  .memo-reader-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .composer-actions,
+  .note-detail-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .note-detail-actions {
+    justify-content: flex-start;
+  }
+
+  .note-health-grid {
+    grid-template-columns: 1fr;
   }
 
   .chat-shell {
