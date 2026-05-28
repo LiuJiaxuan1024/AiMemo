@@ -2,14 +2,22 @@
 set -euo pipefail
 
 SKIP_INSTALL=0
+HOST="${AIMEMO_HOST:-127.0.0.1}"
+PORT="${AIMEMO_BACKEND_PORT:-8000}"
 for arg in "$@"; do
   case "$arg" in
     --skip-install)
       SKIP_INSTALL=1
       ;;
+    --host=*)
+      HOST="${arg#--host=}"
+      ;;
+    --port=*)
+      PORT="${arg#--port=}"
+      ;;
     *)
       echo "Unknown argument: $arg" >&2
-      echo "Usage: ./scripts/start-backend.sh [--skip-install]" >&2
+      echo "Usage: ./scripts/start-backend.sh [--skip-install] [--host=127.0.0.1] [--port=8000]" >&2
       exit 1
       ;;
   esac
@@ -19,6 +27,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BACKEND_DIR="$REPO_ROOT/backend"
 VENV_PYTHON="$BACKEND_DIR/.venv/bin/python"
+source "$SCRIPT_DIR/dev-utils.sh"
+
+ACTUAL_PORT="$(find_available_port "$HOST" "$PORT")"
+print_port_fallback "Backend" "$PORT" "$ACTUAL_PORT"
+PORT="$ACTUAL_PORT"
 
 python_is_312() {
   local python_exe="$1"
@@ -108,6 +121,6 @@ if [[ "$SKIP_INSTALL" -eq 0 ]]; then
   "$VENV_PYTHON" -m pip install -e ".[dev]"
 fi
 
-echo "Starting AiMemo gateway at http://127.0.0.1:8000 ..."
-echo "AiMemo app will be available at http://127.0.0.1:8000/app after frontend build."
-"$VENV_PYTHON" -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+echo "Starting AiMemo gateway at http://$HOST:$PORT ..."
+echo "AiMemo app will be available at http://$HOST:$PORT/app after frontend build."
+"$VENV_PYTHON" -m uvicorn app.main:app --host "$HOST" --port "$PORT"

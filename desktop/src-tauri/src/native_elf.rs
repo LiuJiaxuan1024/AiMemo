@@ -24,10 +24,6 @@ const CHOICE_HEIGHT: i32 = 380;
 const CHOICE_GAP: i32 = 10;
 const WINDOW_PADDING: i32 = 8;
 const ALPHA_THRESHOLD: u8 = 12;
-const WORKSHOP_URL: &str = "http://127.0.0.1:8000/app/workshop/jobs";
-const ELF_CHAT_URL: &str = "http://127.0.0.1:8000/api/elf/chat/stream";
-const ELF_CHAT_RESUME_URL_PREFIX: &str = "http://127.0.0.1:8000/api/elf/chat/turns";
-const ELF_EVENTS_URL: &str = "http://127.0.0.1:8000/api/elf/events";
 const DEFAULT_EXPRESSION: &str = "01_idle_soft.png";
 
 #[derive(Debug)]
@@ -1064,8 +1060,18 @@ fn union_pixbuf_alpha_runs(region: &Region, pixbuf: &Pixbuf, offset_x: i32, offs
     }
 }
 
+fn aimemo_backend_url() -> String {
+    std::env::var("AIMEMO_BACKEND_URL").unwrap_or_else(|_| String::from("http://127.0.0.1:8000"))
+}
+
+fn aimemo_url(path: &str) -> String {
+    format!("{}{}", aimemo_backend_url(), path)
+}
+
 fn open_workshop() {
-    let _ = Command::new("xdg-open").arg(WORKSHOP_URL).spawn();
+    let _ = Command::new("xdg-open")
+        .arg(aimemo_url("/app/workshop/jobs"))
+        .spawn();
 }
 
 fn send_elf_chat(
@@ -1076,7 +1082,7 @@ fn send_elf_chat(
         .timeout(std::time::Duration::from_secs(90))
         .build()?;
     let response = client
-        .post(ELF_CHAT_URL)
+        .post(aimemo_url("/api/elf/chat/stream"))
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(serde_json::json!({ "message": message }).to_string())
         .send()?;
@@ -1098,10 +1104,10 @@ fn resolve_elf_chat_response(
         ParsedSseOutcome::Interrupted(interrupt) => {
             let answer = request_native_user_input(sender, interrupt.request)?;
             let response = client
-                .post(format!(
-                    "{ELF_CHAT_RESUME_URL_PREFIX}/{}/resume/stream",
+                .post(aimemo_url(&format!(
+                    "/api/elf/chat/turns/{}/resume/stream",
                     interrupt.turn_id
-                ))
+                )))
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .body(user_input_answer_to_json(&answer).to_string())
                 .send()?;
@@ -1350,7 +1356,8 @@ fn start_event_polling(sender: glib::Sender<NativeUiMessage>) {
         loop {
             if let Ok(response) = client
                 .get(format!(
-                    "{ELF_EVENTS_URL}?after_id={last_event_id}&limit=20"
+                    "{}?after_id={last_event_id}&limit=20",
+                    aimemo_url("/api/elf/events")
                 ))
                 .send()
             {

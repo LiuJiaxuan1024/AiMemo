@@ -242,7 +242,8 @@ export function applyChatStreamEvent(conversationId: number, event: ChatStreamEv
   if (event.event === "interrupt") {
     streamingStore.update(conversationId, (current) => {
       const messages = current.messages.map((message) =>
-        message.isStreaming && message.role === "assistant"
+        (message.isStreaming && message.role === "assistant") ||
+        (message.role === "assistant" && message.turn_id === event.data.turn_id)
           ? {
               ...message,
               isStreaming: false,

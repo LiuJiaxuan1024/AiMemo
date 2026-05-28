@@ -12,6 +12,58 @@ $desktopDir = Join-Path $repoRoot "desktop"
 $stopScript = Join-Path $PSScriptRoot "stop-dev.ps1"
 $frontendDir = Join-Path $repoRoot "frontend"
 
+function Test-PortAvailable {
+  param(
+    [string]$HostName,
+    [int]$Port
+  )
+
+  $listener = $null
+  try {
+    $address = [System.Net.IPAddress]::Parse($HostName)
+    $listener = [System.Net.Sockets.TcpListener]::new($address, $Port)
+    $listener.Start()
+    return $true
+  }
+  catch {
+    return $false
+  }
+  finally {
+    if ($listener) {
+      $listener.Stop()
+    }
+  }
+}
+
+function Find-AvailablePort {
+  param(
+    [string]$HostName,
+    [int]$PreferredPort,
+    [int]$MaxAttempts = 100
+  )
+
+  $port = $PreferredPort
+  for ($i = 0; $i -lt $MaxAttempts; $i++) {
+    if (Test-PortAvailable -HostName $HostName -Port $port) {
+      return $port
+    }
+    $port++
+  }
+  throw "Could not find a free port starting at $PreferredPort for $HostName."
+}
+
+function Write-PortFallback {
+  param(
+    [string]$Name,
+    [int]$PreferredPort,
+    [int]$ActualPort
+  )
+
+  if ($PreferredPort -ne $ActualPort) {
+    Write-Host "$Name port $PreferredPort is busy; using $ActualPort instead."
+  }
+}
+
 function Test-PathIsNewerThan {
   param(
     [string]$Path,
@@ -37,7 +89,7 @@ function Ensure-FrontendDistForBackendApp {
   $indexHtml = Join-Path $frontendDir "dist\index.html"
   $nodeModules = Join-Path $frontendDir "node_modules"
 
-  # The backend-hosted product entry uses frontend/dist through http://127.0.0.1:8000/app.
+  # The backend-hosted product entry uses frontend/dist through /app on the selected backend port.
   # Vite on 5173 is hot-reloaded, but /app on 8000 will stay stale unless dist is rebuilt.
   $shouldBuild = -not (Test-Path $indexHtml)
   $stalePath = $null
@@ -91,15 +143,36 @@ function Ensure-FrontendDistForBackendApp {
 & $stopScript
 Ensure-FrontendDistForBackendApp
 
+$hostName = if ($env:AIMEMO_HOST) { $env:AIMEMO_HOST } else { "127.0.0.1" }
+$preferredBackendPort = if ($env:AIMEMO_BACKEND_PORT) { [int]$env:AIMEMO_BACKEND_PORT } else { 8000 }
+$preferredFrontendPort = if ($env:AIMEMO_FRONTEND_PORT) { [int]$env:AIMEMO_FRONTEND_PORT } else { 5173 }
+$preferredDesktopPort = if ($env:AIMEMO_DESKTOP_PORT) { [int]$env:AIMEMO_DESKTOP_PORT } else { 1420 }
+$backendPort = Find-AvailablePort -HostName $hostName -PreferredPort $preferredBackendPort
+$frontendPort = Find-AvailablePort -HostName $hostName -PreferredPort $preferredFrontendPort
+$desktopPort = Find-AvailablePort -HostName $hostName -PreferredPort $preferredDesktopPort
+$env:AIMEMO_HOST = $hostName
+$env:AIMEMO_BACKEND_PORT = [string]$backendPort
+$env:AIMEMO_FRONTEND_PORT = [string]$frontendPort
+$env:AIMEMO_DESKTOP_PORT = [string]$desktopPort
+$env:AIMEMO_BACKEND_URL = "http://${hostName}:$backendPort"
+$env:VITE_API_BASE_URL = $env:AIMEMO_BACKEND_URL
+$env:VITE_AIMEMO_BACKEND_URL = $env:AIMEMO_BACKEND_URL
+
 Write-Host "Starting AiMemo backend, frontend, and Memo Elf..."
-Write-Host "Backend:  http://127.0.0.1:8000"
-Write-Host "Frontend: http://127.0.0.1:5173/app/"
+Write-PortFallback -Name "Backend" -PreferredPort $preferredBackendPort -ActualPort $backendPort
+Write-PortFallback -Name "Frontend" -PreferredPort $preferredFrontendPort -ActualPort $frontendPort
+if (-not $NoDesktop) {
+  Write-PortFallback -Name "Memo Elf webview" -PreferredPort $preferredDesktopPort -ActualPort $desktopPort
+}
+Write-Host "Backend:  http://${hostName}:$backendPort"
+Write-Host "Frontend: http://${hostName}:$frontendPort/app/"
+Write-Host "Product:  http://${hostName}:$backendPort/app/"
 if (-not $NoDesktop) {
   Write-Host "Memo Elf: Tauri desktop window"
 }
 
-$backendArgs = @("-NoExit", "-ExecutionPolicy", "Bypass", "-File", $backendScript)
-$frontendArgs = @("-NoExit", "-ExecutionPolicy", "Bypass", "-File", $frontendScript)
+$backendArgs = @("-NoExit", "-ExecutionPolicy", "Bypass", "-File", $backendScript, "-HostName", $hostName, "-Port", $backendPort)
+$frontendArgs = @("-NoExit", "-ExecutionPolicy", "Bypass", "-File", $frontendScript, "-HostName", $hostName, "-Port", $frontendPort, "-BackendPort", $backendPort)
 if ($SkipInstall) {
   $backendArgs += "-SkipInstall"
   $frontendArgs += "-SkipInstall"

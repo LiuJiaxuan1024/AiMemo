@@ -80,7 +80,7 @@ export function MessageList({
                 ) : null}
                 {isAssistant && message.pending_interrupt ? (
                   <UserInputInterruptCard
-                    disabled={message.status !== "interrupted"}
+                    disabled={message.isStreaming === true}
                     message={message}
                     request={message.pending_interrupt}
                     onSubmit={onSubmitUserInput}

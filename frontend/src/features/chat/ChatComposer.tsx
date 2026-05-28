@@ -16,13 +16,15 @@ export function ChatComposer({ input, isSending, onInputChange, onSubmit }: Chat
     <form className="chat-input-bar" onSubmit={onSubmit}>
       <TextareaAutosize
         aria-label="发送消息"
-        disabled={isSending}
         maxRows={6}
         minRows={1}
         onChange={(event) => onInputChange(event.target.value)}
         onKeyDown={(event) => {
           if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
+            if (isSending) {
+              return;
+            }
             event.currentTarget.form?.requestSubmit();
           }
         }}

@@ -6,6 +6,6 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: "127.0.0.1",
-    port: 5173,
+    port: Number(process.env.AIMEMO_FRONTEND_PORT ?? 5173),
   },
 });

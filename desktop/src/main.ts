@@ -15,10 +15,11 @@ const chatInput = document.querySelector<HTMLTextAreaElement>("#chat-input");
 const chatSendButton = document.querySelector<HTMLButtonElement>("#chat-send");
 const choicePanel = document.querySelector<HTMLFormElement>("#choice-panel");
 const currentWindow = getCurrentWindow();
-const ELF_EVENTS_URL = "http://127.0.0.1:8000/api/elf/events";
-const ELF_CHAT_STREAM_URL = "http://127.0.0.1:8000/api/elf/chat/stream";
+const AIMEMO_BACKEND_URL = import.meta.env.VITE_AIMEMO_BACKEND_URL ?? "http://127.0.0.1:8000";
+const ELF_EVENTS_URL = `${AIMEMO_BACKEND_URL}/api/elf/events`;
+const ELF_CHAT_STREAM_URL = `${AIMEMO_BACKEND_URL}/api/elf/chat/stream`;
 const ELF_CHAT_RESUME_STREAM_URL = (turnId: number) =>
-  `http://127.0.0.1:8000/api/elf/chat/turns/${turnId}/resume/stream`;
+  `${AIMEMO_BACKEND_URL}/api/elf/chat/turns/${turnId}/resume/stream`;
 const isLinuxElfWindow = navigator.userAgent.includes("Linux");
 const ELF_WINDOW_HEIGHT = 420;
 const ELF_COMPACT_WINDOW_WIDTH = 300;

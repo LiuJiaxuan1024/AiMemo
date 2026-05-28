@@ -21,6 +21,7 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/dev-utils.sh"
 
 warn_linux_file_watch_limit() {
   [[ "$(uname -s)" == "Linux" ]] || return 0
@@ -76,7 +77,7 @@ ensure_frontend_dist_for_backend_app() {
   local index_html="$frontend_dir/dist/index.html"
   local stale_marker=""
 
-  # Linux 桌宠和后端统一入口会打开 http://127.0.0.1:8000/app，
+  # Linux 桌宠和后端统一入口会打开后端实际端口上的 /app，
   # 这个入口读取的是 frontend/dist，而不是 Vite 的 5173 开发产物。
   # 因此开发脚本需要在源码更新后刷新 dist，避免用户看到旧版前端。
   if [[ -f "$index_html" ]]; then
@@ -119,19 +120,40 @@ warn_linux_file_watch_limit
 warn_invalid_proxy_scheme
 ensure_frontend_dist_for_backend_app
 
+HOST="${AIMEMO_HOST:-127.0.0.1}"
+PREFERRED_BACKEND_PORT="${AIMEMO_BACKEND_PORT:-8000}"
+PREFERRED_FRONTEND_PORT="${AIMEMO_FRONTEND_PORT:-5173}"
+PREFERRED_DESKTOP_PORT="${AIMEMO_DESKTOP_PORT:-1420}"
+BACKEND_PORT="$(find_available_port "$HOST" "$PREFERRED_BACKEND_PORT")"
+FRONTEND_PORT="$(find_available_port "$HOST" "$PREFERRED_FRONTEND_PORT")"
+DESKTOP_PORT="$(find_available_port "$HOST" "$PREFERRED_DESKTOP_PORT")"
+export AIMEMO_HOST="$HOST"
+export AIMEMO_BACKEND_PORT="$BACKEND_PORT"
+export AIMEMO_FRONTEND_PORT="$FRONTEND_PORT"
+export AIMEMO_DESKTOP_PORT="$DESKTOP_PORT"
+export AIMEMO_BACKEND_URL="${AIMEMO_BACKEND_URL:-http://$HOST:$BACKEND_PORT}"
+export VITE_API_BASE_URL="${VITE_API_BASE_URL:-$AIMEMO_BACKEND_URL}"
+export VITE_AIMEMO_BACKEND_URL="${VITE_AIMEMO_BACKEND_URL:-$AIMEMO_BACKEND_URL}"
+
 START_ARGS=""
 if [[ "$SKIP_INSTALL" -eq 1 ]]; then
   START_ARGS="--skip-install"
 fi
 
 echo "Starting AiMemo backend, frontend, and Memo Elf..."
-echo "Backend:  http://127.0.0.1:8000"
-echo "Frontend: http://127.0.0.1:5173/app/"
+print_port_fallback "Backend" "$PREFERRED_BACKEND_PORT" "$BACKEND_PORT"
+print_port_fallback "Frontend" "$PREFERRED_FRONTEND_PORT" "$FRONTEND_PORT"
+if [[ "$NO_DESKTOP" -eq 0 && "$(uname -s)" != "Linux" ]]; then
+  print_port_fallback "Memo Elf webview" "$PREFERRED_DESKTOP_PORT" "$DESKTOP_PORT"
+fi
+echo "Backend:  http://$HOST:$BACKEND_PORT"
+echo "Frontend: http://$HOST:$FRONTEND_PORT/app/"
+echo "Product:  http://$HOST:$BACKEND_PORT/app/"
 if [[ "$NO_DESKTOP" -eq 0 ]]; then
   echo "Memo Elf: Tauri desktop window"
 fi
 
-"$SCRIPT_DIR/start-backend.sh" $START_ARGS &
+"$SCRIPT_DIR/start-backend.sh" $START_ARGS --host="$HOST" --port="$BACKEND_PORT" &
 BACKEND_PID=$!
 
 cleanup() {
@@ -146,7 +168,7 @@ if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
   echo "AiMemo backend failed to start. Fix the backend error above, then rerun ./scripts/start-dev.sh." >&2
   exit 1
 fi
-"$SCRIPT_DIR/start-frontend.sh" $START_ARGS &
+"$SCRIPT_DIR/start-frontend.sh" $START_ARGS --host="$HOST" --port="$FRONTEND_PORT" --backend-port="$BACKEND_PORT" &
 FRONTEND_PID=$!
 
 if [[ "$NO_DESKTOP" -eq 0 ]]; then

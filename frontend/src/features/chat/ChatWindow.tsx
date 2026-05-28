@@ -184,6 +184,31 @@ export function ChatWindow() {
                   : message,
               ),
             );
+            if (
+              item.assistant_message &&
+              !streamingStore
+                .peek(conversationId)
+                ?.messages.some(
+                  (message) =>
+                    message.turn_id === item.turn_id || message.id === item.assistant_message?.id,
+                )
+            ) {
+              streamingStore.updateMessages(conversationId, (messages) => {
+                const next = [...messages];
+                if (item.user_message && !next.some((message) => message.id === item.user_message?.id)) {
+                  next.push({ ...item.user_message, conversation_id: conversationId });
+                }
+                next.push({
+                  ...item.assistant_message!,
+                  conversation_id: conversationId,
+                  turn_id: item.turn_id,
+                  status: "interrupted",
+                  isStreaming: false,
+                  pending_interrupt: item.pending_interrupt ?? null,
+                });
+                return next;
+              });
+            }
           }
           continue;
         }

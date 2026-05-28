@@ -1,6 +1,8 @@
 param(
   [switch]$SkipInstall,
-  [switch]$NoReload
+  [switch]$NoReload,
+  [string]$HostName = $(if ($env:AIMEMO_HOST) { $env:AIMEMO_HOST } else { "127.0.0.1" }),
+  [int]$Port = $(if ($env:AIMEMO_BACKEND_PORT) { [int]$env:AIMEMO_BACKEND_PORT } else { 8000 })
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,6 +10,29 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $backendDir = Join-Path $repoRoot "backend"
 $venvPython = Join-Path $backendDir ".venv\Scripts\python.exe"
+
+function Test-PortAvailable {
+  param([string]$HostName, [int]$Port)
+  $listener = $null
+  try {
+    $address = [System.Net.IPAddress]::Parse($HostName)
+    $listener = [System.Net.Sockets.TcpListener]::new($address, $Port)
+    $listener.Start()
+    return $true
+  }
+  catch {
+    return $false
+  }
+  finally {
+    if ($listener) {
+      $listener.Stop()
+    }
+  }
+}
+
+while (-not (Test-PortAvailable -HostName $HostName -Port $Port)) {
+  $Port++
+}
 
 function Test-Python312 {
   param([string]$PythonExe)
@@ -71,9 +96,9 @@ if (-not $SkipInstall) {
   & $venvPython -m pip install -e ".[dev]"
 }
 
-Write-Host "Starting AiMemo gateway at http://127.0.0.1:8000 ..."
-Write-Host "AiMemo app will be available at http://127.0.0.1:8000/app after frontend build."
-$uvicornArgs = @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000")
+Write-Host "Starting AiMemo gateway at http://${HostName}:$Port ..."
+Write-Host "AiMemo app will be available at http://${HostName}:$Port/app after frontend build."
+$uvicornArgs = @("-m", "uvicorn", "app.main:app", "--host", $HostName, "--port", "$Port")
 if (-not $NoReload) {
   # Development startup should pick up Python source edits without requiring a full script restart.
   $uvicornArgs += "--reload"

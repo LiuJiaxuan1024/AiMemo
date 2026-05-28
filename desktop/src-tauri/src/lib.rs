@@ -1,9 +1,14 @@
 use std::time::Duration;
 
+fn aimemo_backend_url() -> String {
+    std::env::var("AIMEMO_BACKEND_URL").unwrap_or_else(|_| String::from("http://127.0.0.1:8000"))
+}
+
 #[tauri::command]
 fn open_aimemo(app: tauri::AppHandle) -> Result<(), String> {
+    let url = format!("{}/app/memo", aimemo_backend_url());
     tauri_plugin_opener::OpenerExt::opener(&app)
-        .open_url("http://127.0.0.1:8000/app/memo", None::<&str>)
+        .open_url(url, None::<&str>)
         .map_err(|error| error.to_string())
 }
 
@@ -18,7 +23,7 @@ fn check_backend_health() -> bool {
     };
 
     client
-        .get("http://127.0.0.1:8000/api/health")
+        .get(format!("{}/api/health", aimemo_backend_url()))
         .send()
         .map(|response| response.status().is_success())
         .unwrap_or(false)

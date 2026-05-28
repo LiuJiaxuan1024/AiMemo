@@ -163,10 +163,7 @@ Stop-PowerShellDevWindows
 Stop-DesktopDevProcessTree
 Start-Sleep -Milliseconds 300
 
-# Fallback cleanup for manually started or previously crashed processes.
-Stop-PortProcess -Port 8000 -Name "backend"
-Stop-PortProcess -Port 5173 -Name "frontend"
-Stop-PortProcess -Port 1420 -Name "desktop webview"
+# Fallback cleanup for manually started or previously crashed AiMemo processes.
 Stop-ProcessesByPath -Path $desktopExe -Name "Memo Elf desktop"
 Stop-NodeProcessesInRepo
 

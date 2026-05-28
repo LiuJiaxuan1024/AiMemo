@@ -27,11 +27,9 @@ stop_matching_processes() {
   fi
 }
 
-stop_port_processes 8000 "backend"
-stop_port_processes 5173 "frontend"
-stop_port_processes 1420 "desktop webview"
 stop_matching_processes "$DESKTOP_EXE" "Memo Elf desktop"
 stop_matching_processes "$REPO_ROOT.*npm run dev" "AiMemo npm dev processes"
 stop_matching_processes "$REPO_ROOT.*uvicorn app.main:app" "AiMemo backend processes"
+stop_matching_processes "$REPO_ROOT.*vite.*--host 127.0.0.1" "AiMemo Vite dev processes"
 
 echo "AiMemo dev services stopped."
