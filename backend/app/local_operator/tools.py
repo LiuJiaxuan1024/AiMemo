@@ -19,6 +19,7 @@ from app.local_operator.schemas import (
     KillBackgroundTaskInput,
     ListBackgroundTasksInput,
     ListDirInput,
+    ReadDocumentInput,
     ReadBackgroundOutputInput,
     ReadFileInput,
     SearchFilesInput,
@@ -130,6 +131,17 @@ def create_read_tools(
                 end_line=end_line,
                 max_bytes=max_bytes,
             ),
+        )
+
+    @tool(args_schema=ReadDocumentInput)
+    def read_document(path: str, max_chars: int = 80000) -> str:
+        """解析授权 workspace 内的 PDF 或 DOCX 文档，返回提取出的文本。"""
+
+        args = {"path": path, "max_chars": max_chars}
+        return run_with_audit(
+            "read_document",
+            args,
+            lambda: filesystem.read_document(path, max_chars=max_chars),
         )
 
     @tool(args_schema=SearchFilesInput)
@@ -360,6 +372,7 @@ def create_read_tools(
     return {
         "list_dir": list_dir,
         "read_file": read_file,
+        "read_document": read_document,
         "search_files": search_files,
         "search_text": search_text,
         "get_file_info": get_file_info,

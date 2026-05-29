@@ -51,6 +51,11 @@ class ReadFileInput(BaseModel):
     max_bytes: int = Field(default=65536, description="最大返回字节数，上限由系统策略限制。")
 
 
+class ReadDocumentInput(BaseModel):
+    path: str = Field(description="要解析的 PDF 或 DOCX 文档路径，必须位于授权 workspace 内。必须是绝对路径，例如 /home/user/report.pdf。")
+    max_chars: int = Field(default=80000, description="最多返回的解析文本字符数，上限 200000。")
+
+
 class WriteFileInput(BaseModel):
     path: str = Field(description="要写入的文件路径，必须位于授权 workspace 内。必须是绝对路径，例如 E:\\demo\\main.py 或 /home/user/demo/main.py。")
     content: str = Field(description="要写入文件的完整内容。该工具会整文件写入。")

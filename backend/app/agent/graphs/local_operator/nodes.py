@@ -29,6 +29,7 @@ ReadPlanner = Callable[[str], LocalOperatorAction | None]
 READ_TOOL_NAMES = {
     "list_dir",
     "read_file",
+    "read_document",
     "search_files",
     "search_text",
     "get_file_info",
@@ -378,6 +379,12 @@ def _rule_plan_action(user_input: str, *, workspace_roots: list[str]) -> LocalOp
             "arguments": {"path": path or "."},
             "reason": "用户要求查看文件或目录信息。",
         }
+    if _looks_like_document_path(path):
+        return {
+            "tool_name": "read_document",
+            "arguments": {"path": path or ".", "max_chars": 80_000},
+            "reason": "用户要求读取 PDF/DOCX 等文档文件。",
+        }
     return {
         "tool_name": "read_file",
         "arguments": {"path": path or ".", "start_line": None, "end_line": None, "max_bytes": 65536},
@@ -387,7 +394,24 @@ def _rule_plan_action(user_input: str, *, workspace_roots: list[str]) -> LocalOp
 
 def _looks_like_rule_read_request(text: str) -> bool:
     action_keywords = ["读取", "读一下", "打开", "看看文件", "查看文件", "列出", "搜索", "查找", "grep", "list"]
-    object_keywords = ["文件", "目录", "文件夹", "路径", ".py", ".ts", ".tsx", ".md", ".txt", ".json"]
+    object_keywords = [
+        "文件",
+        "目录",
+        "文件夹",
+        "路径",
+        "文档",
+        "PDF",
+        "pdf",
+        "docx",
+        ".py",
+        ".ts",
+        ".tsx",
+        ".md",
+        ".txt",
+        ".json",
+        ".pdf",
+        ".docx",
+    ]
     return (
         any(keyword in text for keyword in action_keywords)
         and any(keyword in text for keyword in object_keywords)
@@ -443,6 +467,10 @@ def _looks_like_local_operator_candidate(text: str) -> bool:
         "路径",
         "代码",
         "源码",
+        "文档",
+        "PDF",
+        "pdf",
+        "docx",
         "执行命令",
         "运行命令",
         "测试",
@@ -542,6 +570,7 @@ def _build_local_operator_planner_prompt(user_input: str) -> str:
         "规划 write_file 必须非常保守：只有用户明确要求创建/写入/覆盖本地文件，并给出目标路径和内容时才允许。\n\n"
         "能力说明：\n"
         "- 你可以规划读取本机文件系统中的文件或目录，包括用户给出的绝对路径。\n"
+        "- PDF/DOCX 这类文档文件必须用 read_document；源码、Markdown、JSON、TXT 等普通文本才用 read_file。\n"
         "- 你可以规划写入授权 workspace 内的普通文本文件；写入已有文件时必须设置 overwrite=true，工具会要求先 read_file 完整读取该文件。\n"
         "- 如果已有文件太大导致 read_file 无法单次完整读取，不能自行绕过读前写保护；只有工具结果已经证明默认完整读取卡住了任务，且用户已通过结构化升级确认授权未完整读取也直接覆盖时，才可设置 confirmed_overwrite_without_read=true。\n"
         "- write_file 的 content 必须是用户明确给出的正文，或用户明确要求你生成且你已经能在本节点中完整生成的正文。\n"
@@ -554,6 +583,7 @@ def _build_local_operator_planner_prompt(user_input: str) -> str:
         "可用工具：\n"
         "- list_dir(path, max_entries, include_hidden): 列目录。\n"
         "- read_file(path, start_line, end_line, max_bytes): 读取文本文件。\n"
+        "- read_document(path, max_chars): 解析 PDF 或 DOCX 文档并返回提取文本；不用于写前读保护。\n"
         "- search_files(root, pattern, max_results, include_hidden): 按文件名搜索。\n"
         "- search_text(root, query, include_glob, max_results, context_lines): 搜索文本内容。\n"
         "- get_file_info(path): 查看文件或目录是否存在、大小、修改时间。\n\n"
@@ -569,7 +599,7 @@ def _build_local_operator_planner_prompt(user_input: str) -> str:
         "- 如果用户没有给具体路径，但问的是当前项目/这个仓库/当前工作区，用 path/root = \".\"。\n"
         "- 如果用户问的是当前电脑/本机/Home/用户目录里有没有某个项目或文件，优先用 search_files，root = \"~\"。\n"
         "- 如果只是确认当前项目是否存在，优先用 get_file_info，path = \".\"。\n"
-        "- 如果用户给出明确文件路径，优先用 read_file；如果给出明确目录路径，优先用 list_dir 或 get_file_info。\n"
+        "- 如果用户给出明确文件路径，普通文本优先用 read_file；PDF/DOCX 优先用 read_document；如果给出明确目录路径，优先用 list_dir 或 get_file_info。\n"
         "- 不要自己编造未出现的绝对路径；但用户明确给出的绝对路径可以原样传给工具。\n"
         "- 用户要求创建项目、新建文件或写一组代码但**没有明确指定目标目录**时，"
         "不要默认在当前工作区下规划写入；应设置 needs_tool=false，让最终回答先反问用户应该用哪个目录。\n\n"
@@ -611,6 +641,11 @@ def _normalize_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> dict
             "start_line": arguments.get("start_line"),
             "end_line": arguments.get("end_line"),
             "max_bytes": int(arguments.get("max_bytes") or 65536),
+        }
+    if tool_name == "read_document":
+        return {
+            "path": _clean_tool_path(str(arguments.get("path") or ".")),
+            "max_chars": int(arguments.get("max_chars") or 80_000),
         }
     if tool_name == "search_files":
         return {
@@ -745,6 +780,11 @@ def _extract_path(text: str) -> str:
     return _clean_tool_path(match.group(1)) if match else ""
 
 
+def _looks_like_document_path(path: str) -> bool:
+    lowered = path.lower()
+    return lowered.endswith(".pdf") or lowered.endswith(".docx") or lowered.endswith(".doc")
+
+
 def _clean_tool_path(path: str) -> str:
     """清理路径两端常见的 Markdown/中文标点包裹符。"""
 
@@ -803,6 +843,15 @@ def _observation_to_lines(observation: LocalOperatorObservation) -> list[str]:
             f"- 已读取 `{data.get('relative_path')}` 第 {data.get('line_start')}-{data.get('line_end')} 行：",
             "```text",
             str(data.get("numbered_content") or data.get("content") or ""),
+            "```",
+        ]
+    if tool_name == "read_document":
+        page_count = data.get("page_count")
+        page_text = f"，页数={page_count}" if page_count is not None else ""
+        return [
+            f"- 已解析文档 `{data.get('relative_path')}`，类型={data.get('document_type')}{page_text}，字符数={data.get('char_count')}，truncated={data.get('truncated')}：",
+            "```text",
+            str(data.get("content") or ""),
             "```",
         ]
     if tool_name == "list_dir":

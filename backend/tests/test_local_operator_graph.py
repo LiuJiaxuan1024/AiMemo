@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import os
 import time
 
@@ -8,12 +9,14 @@ from sqlmodel import select
 from app.agent.graphs.memory_chat.nodes import _configured_local_operator_workspace_roots
 from app.agent.graphs.memory_chat.nodes import _default_local_operator_workspace_roots
 from app.agent.graphs.local_operator.nodes import _build_local_operator_planner_prompt
+from app.agent.graphs.local_operator.nodes import _rule_plan_action
 from app.agent.graphs.local_operator.graph import get_local_operator_graph_mermaid
 from app.agent.graphs.local_operator.graph import run_local_operator_graph
 from app.core.config import settings
 from app.local_operator.filesystem import LocalFilesystemService
 from app.local_operator.command import LocalCommandExecutor
 from app.local_operator.policy import LocalOperatorPolicy
+from app.local_operator.tools import create_read_tools
 from app.models.agent_operation import AgentOperation
 
 
@@ -106,6 +109,114 @@ def test_read_file_blocks_dangerous_device_path(tmp_path: Path):
     assert result.ok is False
     assert result.error_code == "DEVICE_PATH_BLOCKED"
     assert result.blocked is True
+
+
+def test_read_document_extracts_docx_text(tmp_path: Path):
+    from docx import Document
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    document = Document()
+    document.add_paragraph("项目背景")
+    document.add_paragraph("AiMemo 需要读取 DOCX 文档。")
+    document.save(workspace / "brief.docx")
+    service = LocalFilesystemService(LocalOperatorPolicy.from_roots([str(workspace)]))
+
+    result = service.read_document("brief.docx")
+
+    assert result.ok is True
+    assert result.data["document_type"] == "docx"
+    assert result.data["relative_path"] == "brief.docx"
+    assert "项目背景" in result.data["content"]
+    assert "DOCX 文档" in result.data["content"]
+
+
+def test_read_document_extracts_pdf_text(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "sample.pdf").write_bytes(
+        b"%PDF-1.4\n"
+        b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
+        b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n"
+        b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj\n"
+        b"4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n"
+        b"5 0 obj << /Length 44 >> stream\n"
+        b"BT /F1 24 Tf 100 700 Td (Hello AiMemo PDF) Tj ET\n"
+        b"endstream endobj\n"
+        b"xref\n0 6\n0000000000 65535 f \n0000000009 00000 n \n"
+        b"trailer << /Size 6 /Root 1 0 R >>\nstartxref\n405\n%%EOF\n"
+    )
+    service = LocalFilesystemService(LocalOperatorPolicy.from_roots([str(workspace)]))
+
+    result = service.read_document("sample.pdf")
+
+    assert result.ok is True
+    assert result.data["document_type"] == "pdf"
+    assert result.data["page_count"] == 1
+    assert "Hello AiMemo PDF" in result.data["content"]
+
+
+def test_read_document_rejects_legacy_doc(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "old.doc").write_bytes(b"not really a doc")
+    service = LocalFilesystemService(LocalOperatorPolicy.from_roots([str(workspace)]))
+
+    result = service.read_document("old.doc")
+
+    assert result.ok is False
+    assert result.error_code == "UNSUPPORTED_DOCUMENT_TYPE"
+    assert result.blocked is True
+
+
+def test_read_document_uses_same_sensitive_path_guard(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".env").write_text("SECRET=1", encoding="utf-8")
+    service = LocalFilesystemService(LocalOperatorPolicy.from_roots([str(workspace)]))
+
+    result = service.read_document(".env")
+
+    assert result.ok is False
+    assert result.error_code == "SENSITIVE_FILE_BLOCKED"
+    assert result.blocked is True
+
+
+def test_read_document_tool_writes_audit(session, session_factory, tmp_path: Path):
+    from docx import Document
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    document = Document()
+    document.add_paragraph("审计测试")
+    document.save(workspace / "audit.docx")
+    tools = create_read_tools(
+        session_factory=session_factory,
+        policy=LocalOperatorPolicy.from_roots([str(workspace)]),
+        conversation_id=101,
+        turn_id=202,
+    )
+
+    payload = json.loads(tools["read_document"].invoke({"path": "audit.docx"}))
+
+    operations = session.exec(select(AgentOperation).where(AgentOperation.conversation_id == 101)).all()
+    assert payload["ok"] is True
+    assert "审计测试" in payload["data"]["content"]
+    assert len(operations) == 1
+    assert operations[0].tool_name == "read_document"
+    assert operations[0].operation_type == "read"
+    assert operations[0].status == "completed"
+
+
+def test_rule_planner_uses_read_document_for_pdf_and_docx():
+    pdf_action = _rule_plan_action("帮我读取 /tmp/report.pdf", workspace_roots=["."])
+    docx_action = _rule_plan_action("查看文件 /tmp/brief.docx", workspace_roots=["."])
+
+    assert pdf_action is not None
+    assert pdf_action["tool_name"] == "read_document"
+    assert docx_action is not None
+    assert docx_action["tool_name"] == "read_document"
 
 
 @pytest.mark.skipif(not str(Path.home()).startswith(str(Path.home().anchor)), reason="requires normal home path")

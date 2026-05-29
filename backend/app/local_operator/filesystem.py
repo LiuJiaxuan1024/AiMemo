@@ -144,6 +144,17 @@ class LocalFilesystemService:
             },
         )
 
+    def read_document(self, path: str, *, max_chars: int = 80_000) -> ToolResult:
+        """解析授权 workspace 内的 PDF/DOCX 文档为文本。"""
+
+        try:
+            resolved = self._resolve_existing(path)
+        except LocalFilesystemError as exc:
+            return _error("read_document", exc.error_code, exc.message, blocked=_is_policy_block(exc.error_code))
+        from app.local_operator.document_reader import read_document
+
+        return read_document(resolved, self.policy, max_chars=max_chars)
+
     def search_files(
         self,
         root: str,

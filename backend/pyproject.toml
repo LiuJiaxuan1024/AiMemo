@@ -12,6 +12,8 @@ dependencies = [
   "sqlmodel>=0.0.22",
   "uvicorn[standard]>=0.30.0",
   "pydantic-settings>=2.4.0",
+  "pypdf>=5.1.0",
+  "python-docx>=1.1.2",
 ]
 
 [project.optional-dependencies]
