@@ -7,6 +7,7 @@ Workshop 是当前调试 Ai 记 job、graph、checkpoint 执行状态和管理 L
 ```text
 /app/workshop/jobs
 /app/workshop/memories
+/app/workshop/voice
 ```
 
 ## 交互
@@ -14,6 +15,7 @@ Workshop 是当前调试 Ai 记 job、graph、checkpoint 执行状态和管理 L
 - `/app/workshop/jobs` 会轮询后台任务列表。
 - 选择某个 job 后，会读取对应 LangGraph 流程图。
 - `/app/workshop/memories` 会读取长期记忆列表，支持筛选、编辑、停用、重新启用和删除停用记忆。
+- `/app/workshop/voice` 是语音工坊，支持声线管理、试听、文字声音设计和精灵语音模式开关。
 
 ## 当前显示内容
 
@@ -25,6 +27,7 @@ Workshop 是当前调试 Ai 记 job、graph、checkpoint 执行状态和管理 L
 - checkpoint 中的下一步节点
 - 生效 / 停用长期记忆
 - 长期记忆 category / content / summary / importance / confidence / status
+- Voice Profile 列表、默认声线、远端 voice_id、试听和声音设计结果
 
 ## 文件结构
 
@@ -40,6 +43,14 @@ frontend/src/features/jobs/
 frontend/src/features/memories/
   MemoryPanel.tsx
   memoriesApi.ts
+  types.ts
+
+frontend/src/features/voice/
+  VoiceWorkshop.tsx
+  VoiceDesignPanel.tsx
+  VoiceProfileList.tsx
+  VoiceProfileDetail.tsx
+  voiceApi.ts
   types.ts
 ```
 

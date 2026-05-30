@@ -95,6 +95,12 @@ API 文档:     http://127.0.0.1:8000/docs
 桌面精灵:     Memo Elf Tauri 透明窗口
 ```
 
+语音工坊入口：
+
+```text
+http://127.0.0.1:8000/app/workshop/voice
+```
+
 一键脚本会在启动前刷新后端托管入口使用的前端产物：
 `http://127.0.0.1:8000/app` 读取的是 `frontend/dist`，不是 Vite 的
 `5173` 开发产物。脚本会检查 `dist/index.html` 是否缺失或比前端源码旧，
@@ -269,6 +275,7 @@ http://127.0.0.1:5173/app/
 /app/chat
 /app/workshop/jobs
 /app/workshop/memories
+/app/workshop/voice
 ```
 
 后续依赖已经装好时，可以跳过安装：
@@ -426,7 +433,24 @@ http://127.0.0.1:8000/api/health
 
 ### 精灵没有显示或连接失败
 
-当前推荐使用桌面外置精灵。确认后端健康检查正常，并确认桌面端监听：
+当前推荐使用桌面外置精灵。确认后端健康检查正常，并确认 `config.json5` 中：
+
+```json5
+"elf": {
+  "enabled": true,
+}
+```
+
+桌面精灵启动后会读取：
+
+```text
+GET /api/config/runtime
+```
+
+如果该接口暂时不可用，桌面精灵会等待并重试；只有接口明确返回 `elf.enabled=false`
+时才会保持隐藏。
+
+确认桌面端监听：
 
 ```text
 http://127.0.0.1:1420
@@ -439,9 +463,22 @@ http://127.0.0.1:1420
 .\scripts\start-dev.ps1
 ```
 
-浏览器内精灵默认关闭，因为主精灵已经迁移到桌面外置窗口。需要调试旧 Web 精灵时，可以临时设置：
+浏览器内精灵也受 `config.json5` 的 `elf.enabled` 控制。`false` 时 Web 不挂载精灵，但仍保留精灵工坊侧边入口。
 
-```powershell
-$env:VITE_ENABLE_WEB_ELF="true"
-.\scripts\start-frontend.ps1
+旧版 `VITE_ENABLE_WEB_ELF` 只作为历史开发开关保留，不再绕过运行时配置。
+
+### 语音工坊或语音对话不可用
+
+确认 `.env` 中配置了：
+
+```text
+DASHSCOPE_API_KEY=你的百炼 API Key
 ```
+
+确认 `config.json5` 中 `voice.enabled=true`，并进入：
+
+```text
+/app/workshop/voice
+```
+
+语音工坊使用阿里百炼远程 ASR、TTS 和 Voice Design，不需要安装 SenseVoice、VoxCPM2、CUDA 或本地 wrapper。

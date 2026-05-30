@@ -29,6 +29,12 @@ frontend/src/features/chat/
 发送用户消息
 通过 SSE 接收 graph 节点事件
 通过 answer_delta 增量展示 AI 回复
+按 step_index 分段展示回答、thought 和工具调用
+固定工具调用链高度，超出后滚动
+生成中可中断本轮回答
+右键删除已完成消息分支
+选中 assistant 回答片段后发起局部追问
+片段追问右侧栏、放大悬浮窗和片段内继续追问
 AI 回复落库后替换本地临时消息
 点击 AI 回复右侧“图”按钮查看本轮 graph
 ```
@@ -60,6 +66,49 @@ done
 error
   显示错误信息。
 ```
+
+新增事件数据会按 `step_index` 进入 `segments`，前端用同一条时间线展示：
+
+```text
+thought
+answer_delta
+tool_invocation
+```
+
+这样工具调用和文本不会脱节，长工具链也不会把消息无限撑高。
+
+## 片段追问
+
+用户选中 assistant 回答中的文本后，前端会在鼠标附近显示“追问片段”悬浮操作。提交后发送一条结构化消息：
+
+```json
+{
+  "type": "segment_followup",
+  "segment_id": "hash_or_null",
+  "original_text": "被选中的原文",
+  "user_question": "针对该片段的问题"
+}
+```
+
+运行时智能体会把它视为局部追问，而不是新的全局问题。片段追问的展示规则：
+
+```text
+同一个片段对应一个片段卡片。
+片段卡片里可以有多轮追问。
+已追问片段会在原回答中标记，点击标记打开右侧栏并定位卡片。
+只有放大悬浮窗内支持继续追问和查看该片段追问的 graph。
+右侧栏是浮层，不挤压主聊天气泡。
+```
+
+## 中断和删除
+
+生成中回答可以调用：
+
+```text
+POST /api/conversations/{conversation_id}/turns/{turn_id}/cancel
+```
+
+已完成消息可通过右键菜单删除该消息分支；删除会同步清理相关上下文，避免后续对话继续引用被删除内容。
 
 注意：后端会过滤内部 LLM token。比如 L3 planner 产生的 JSON token 不会进入
 `answer_delta`，避免用户看到内部规划内容。

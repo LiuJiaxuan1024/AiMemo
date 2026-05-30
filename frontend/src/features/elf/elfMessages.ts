@@ -22,4 +22,4 @@ export function describeJobWork(job: Job | undefined): string {
   return "处理后台任务";
 }
 
-export const ELF_IDLE_MESSAGE = "我在这里，需要时可以点我看看后台。";
+export const ELF_IDLE_MESSAGE = "";

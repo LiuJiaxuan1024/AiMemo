@@ -1,3 +1,5 @@
+import json
+
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlmodel import Session
@@ -17,7 +19,9 @@ from app.services.chat_service import (
     stream_conversation_chat_resume_events,
     stream_existing_turn_events,
 )
+from app.services import chat_turn_buffer
 from app.services.chat_turn_service import (
+    cancel_chat_turn,
     get_chat_turn_graph_by_message,
     get_chat_turn_graph_by_turn,
     get_chat_turn_state_history,
@@ -34,7 +38,11 @@ def run_conversation_chat_api(
     payload: ChatRequest,
 ) -> ChatResponse:
     # 该接口是 memory_chat_graph 的 HTTP 入口：保存用户消息、生成回答、保存 AI 消息。
-    return run_conversation_chat(conversation_id, message=payload.message)
+    return run_conversation_chat(
+        conversation_id,
+        message=payload.message,
+        parent_message_id=payload.parent_message_id,
+    )
 
 
 @router.post("/{conversation_id}/chat/stream")
@@ -44,7 +52,11 @@ def stream_conversation_chat_api(
 ) -> StreamingResponse:
     # SSE 入口：前端通过它获得 graph 节点进度、回答增量和最终消息落库结果。
     return StreamingResponse(
-        stream_conversation_chat_events(conversation_id, message=payload.message),
+        stream_conversation_chat_events(
+            conversation_id,
+            message=payload.message,
+            parent_message_id=payload.parent_message_id,
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -112,6 +124,23 @@ def list_active_turns_api(
     # 用户切走再回到该会话时调用：拿到目前还在跑的 turn 列表，
     # 用其中的 turn_id 订阅 /turns/{turn_id}/events/stream 把后续 SSE 接回来。
     return list_active_chat_turns(session, conversation_id=conversation_id)
+
+
+@router.post("/{conversation_id}/turns/{turn_id}/cancel")
+def cancel_turn_api(
+    conversation_id: int,
+    turn_id: int,
+    session: Session = Depends(get_session),
+) -> dict[str, str]:
+    reason = "用户中断了本轮生成。"
+    cancel_chat_turn(session, conversation_id=conversation_id, turn_id=turn_id, reason=reason)
+    buffer = chat_turn_buffer.get(turn_id)
+    if buffer is not None:
+        buffer.append(
+            f"event: error\ndata: {json.dumps({'turn_id': turn_id, 'message': reason}, ensure_ascii=False)}\n\n"
+        )
+        buffer.mark_done()
+    return {"status": "cancelled"}
 
 
 @router.get("/{conversation_id}/turns/{turn_id}/events/stream")

@@ -235,6 +235,55 @@ def fail_chat_turn(
     session.commit()
 
 
+def cancel_chat_turn(
+    session: Session,
+    *,
+    conversation_id: int,
+    turn_id: int,
+    reason: str = "用户中断了本轮生成。",
+) -> ChatTurn:
+    """把正在生成的 turn 标记为 cancelled。"""
+
+    turn = _get_turn_or_404(session, turn_id)
+    if turn.conversation_id != conversation_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat turn not found")
+    if turn.status not in {"running", "interrupted"}:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Chat turn is not running")
+
+    node_statuses = _decode_json_object(turn.node_statuses)
+    for node_name, node_status in list(node_statuses.items()):
+        if node_status == "running":
+            node_statuses[node_name] = "failed"
+        elif node_status == "pending":
+            node_statuses[node_name] = "skipped"
+    payload = _decode_json_any(turn.debug_payload, fallback={})
+    if not isinstance(payload, dict):
+        payload = {}
+    payload.setdefault("diagnostics", []).append(
+        {
+            "code": "CHAT_TURN_CANCELLED_BY_USER",
+            "message": reason,
+        }
+    )
+
+    turn.status = "cancelled"
+    turn.node_statuses = json.dumps(node_statuses, ensure_ascii=False)
+    turn.debug_payload = json.dumps(payload, ensure_ascii=False)
+    turn.error = reason
+    turn.updated_at = utc_now()
+    session.add(turn)
+
+    assistant = session.get(ChatMessage, turn.assistant_message_id)
+    if assistant is not None and assistant.status == "streaming":
+        assistant.status = "failed"
+        assistant.updated_at = utc_now()
+        session.add(assistant)
+
+    session.commit()
+    session.refresh(turn)
+    return turn
+
+
 def list_active_chat_turns(
     session: Session,
     *,

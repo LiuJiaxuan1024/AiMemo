@@ -25,6 +25,7 @@ frontend/src/
 - `/app/chat`：Memory Chat Graph 对话、流式输出和单轮 graph 调试。
 - `/app/workshop/jobs`：后台任务和 Job Graph。
 - `/app/workshop/memories`：长期记忆管理。
+- `/app/workshop/voice`：语音工坊、声线管理、试听、文字声音设计和精灵语音模式开关。
 
 `/app` 会自动进入 `/app/memo`，`/app/workshop` 会进入 `/app/workshop/jobs`。
 后端会为任意 `/app/*` 路径回退到前端 `index.html`，因此刷新子页面不会 404。
@@ -37,6 +38,7 @@ frontend/src/
 - [精灵助手](./elf-assistant.md)
 - [精灵事件总线](./elf-event-bus.md)
 - [原创精灵设计](./elf-character-design.md)
+- [语音工坊第一版设计](../desktop/voice-workshop-design.md)
 
 ## API 地址
 
@@ -45,6 +47,14 @@ frontend/src/
 ```text
 /api/*
 ```
+
+运行时配置读取：
+
+```text
+GET /api/config/runtime
+```
+
+`elf.enabled=false` 时 `JobDrawer` 不挂载 Web 精灵组件，只保留打开精灵工坊的侧边入口。
 
 产品入口由后端统一提供：
 

@@ -45,6 +45,8 @@ class TurnBuffer:
 
     def append(self, event: str) -> None:
         with self.cond:
+            if self.done:
+                return
             self.events.append(event)
             self.cond.notify_all()
 

@@ -10,6 +10,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _PROJECT_CONFIG = None
 
 
+def _read_project_config() -> dict[str, Any]:
+    for candidate in _config_candidates():
+        if not candidate.exists():
+            continue
+        try:
+            return json.loads(_strip_json5_syntax(candidate.read_text(encoding="utf-8")))
+        except Exception:
+            # 配置文件不应让导入阶段崩掉；具体问题可在启动日志/后续配置检查中再暴露。
+            return {}
+    return {}
+
+
 def _load_project_config() -> dict[str, Any]:
     """读取仓库根目录的 config.json5。
 
@@ -21,17 +33,7 @@ def _load_project_config() -> dict[str, Any]:
     if _PROJECT_CONFIG is not None:
         return _PROJECT_CONFIG
 
-    for candidate in _config_candidates():
-        if not candidate.exists():
-            continue
-        try:
-            _PROJECT_CONFIG = json.loads(_strip_json5_syntax(candidate.read_text(encoding="utf-8")))
-            return _PROJECT_CONFIG
-        except Exception:
-            # 配置文件不应让导入阶段崩掉；具体问题可在启动日志/后续配置检查中再暴露。
-            _PROJECT_CONFIG = {}
-            return _PROJECT_CONFIG
-    _PROJECT_CONFIG = {}
+    _PROJECT_CONFIG = _read_project_config()
     return _PROJECT_CONFIG
 
 
@@ -46,7 +48,11 @@ def _config_candidates() -> list[Path]:
 
 
 def _config_value(path: str, default: Any) -> Any:
-    value: Any = _load_project_config()
+    return get_project_config_value(path, default)
+
+
+def get_project_config_value(path: str, default: Any, *, reload: bool = False) -> Any:
+    value: Any = _read_project_config() if reload else _load_project_config()
     for part in path.split("."):
         if not isinstance(value, dict) or part not in value:
             return default
@@ -114,6 +120,7 @@ class Settings(BaseSettings):
     # 启动时是否清理所有已终止的后台命令任务（exited / failed / killed / orphaned / unknown）。
     # 子进程是 detached 的，结束后不会自动从 DB 里消失；开启此项可让重启自动收尾旧任务的日志和记录。
     background_task_cleanup_on_startup: bool = True
+    elf_enabled: bool = bool(_config_value("elf.enabled", True))
     local_operator_exec_default_timeout_ms: int = int(
         _config_value("local_operator.exec_command.default_timeout_ms", 180_000)
     )
@@ -126,6 +133,23 @@ class Settings(BaseSettings):
     local_operator_exec_max_output_bytes: int = int(
         _config_value("local_operator.exec_command.max_output_bytes", 256 * 1024)
     )
+    voice_enabled: bool = bool(_config_value("voice.enabled", True))
+    voice_asr_provider: str = str(_config_value("voice.asr_provider", "aliyun_dashscope"))
+    voice_tts_provider: str = str(_config_value("voice.tts_provider", "aliyun_dashscope"))
+    voice_design_provider: str = str(_config_value("voice.voice_design_provider", "aliyun_dashscope"))
+    voice_max_audio_mb: int = int(_config_value("voice.max_audio_mb", 20))
+    voice_language: str = str(_config_value("voice.language", "auto"))
+    voice_aliyun_base_url: str = str(_config_value("voice.aliyun.base_url", "https://dashscope.aliyuncs.com"))
+    voice_aliyun_asr_model: str = str(_config_value("voice.aliyun.asr_model", "qwen3-asr-flash"))
+    voice_aliyun_tts_model: str = str(_config_value("voice.aliyun.tts_model", "qwen3-tts-instruct-flash"))
+    voice_aliyun_voice_design_model: str = str(
+        _config_value("voice.aliyun.voice_design_model", "qwen-voice-design")
+    )
+    voice_aliyun_voice_design_target_model: str = str(
+        _config_value("voice.aliyun.voice_design_target_model", "qwen3-tts-vd-2026-01-26")
+    )
+    voice_aliyun_sample_rate: int = int(_config_value("voice.aliyun.sample_rate", 48_000))
+    voice_aliyun_timeout_seconds: int = int(_config_value("voice.aliyun.timeout_seconds", 120))
     dashscope_api_key: str = ""
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     dashscope_embedding_model: str = "text-embedding-v4"

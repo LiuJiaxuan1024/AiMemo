@@ -26,6 +26,10 @@ AiMemo Memory Skill
 Local Operator
   面向未来的本地电脑操作能力。
   当前已接入主对话工具循环，支持受控 read / write / exec，以及后台服务任务管理。
+
+Voice Studio
+  精灵语音能力与声线工坊。
+  当前采用阿里百炼 / DashScope 远程 ASR、TTS 和 Voice Design，不再默认下载或部署本地语音模型。
 ```
 
 换句话说：
@@ -45,16 +49,22 @@ Local Operator
 ```text
 桌面外置精灵助手
 桌面精灵气泡对话与多表情切换
+桌面精灵运行时开关（config.json5: elf.enabled）
 后端精灵事件中心
 Tauri 桌面精灵壳
 打开 AiMemo 主页面
 结构化选项卡确认（request_user_input）
+桌面精灵长按语音输入、ASR 转文本
+精灵气泡 TTS 播放与语音对话模式
+语音工坊：声线列表、试听、文字声音设计、默认声线切换
 笔记创建与本地 SQLite 存储
 笔记标题 / 摘要 / 标签自动整理
 笔记 chunk 分片与 embedding 入库
 基于 sqlite-vec 的本地向量检索
 Memory Chat Graph 对话
 流式回答输出
+片段追问 / 局部追问
+消息分段展示、工具调用链展示、对话中断和消息分支删除
 上下文金字塔构建
 长期记忆提取、启用、停用和编辑
 LangGraph checkpoint 持久化
@@ -117,6 +127,7 @@ frontend/
       jobs/      精灵工坊和任务可视化
       memories/  长期记忆管理
       notes/     笔记列表、编辑器、详情
+      voice/     语音工坊和声线管理
     shared/      通用 UI 和 QueryClient
 
 desktop/
@@ -143,7 +154,7 @@ cd AiMemo
 
 ### 2. 准备环境变量
 
-复制示例配置，并填入自己的阿里百炼 API Key：
+复制示例配置，并填入自己的阿里百炼 API Key。聊天、embedding、远程 ASR/TTS/Voice Design 默认复用同一套 Key：
 
 ```powershell
 Copy-Item .env.example .env
@@ -161,6 +172,23 @@ nano .env
 
 ```text
 DASHSCOPE_API_KEY=你的百炼 API Key
+```
+
+仓库根目录的 `config.json5` 保存可提交的项目级开关。常用项：
+
+```json5
+{
+  "elf": {
+    // false 时不加载 Web/桌面精灵；精灵工坊页面仍可访问。
+    "enabled": true,
+  },
+  "voice": {
+    "enabled": true,
+    "asr_provider": "aliyun_dashscope",
+    "tts_provider": "aliyun_dashscope",
+    "voice_design_provider": "aliyun_dashscope",
+  },
+}
 ```
 
 ### 3. 一键开发启动
@@ -297,6 +325,13 @@ Linux / macOS：
 http://127.0.0.1:5173/app/
 ```
 
+语音工坊：
+
+```text
+http://127.0.0.1:8000/app/workshop/voice
+http://127.0.0.1:5173/app/workshop/voice
+```
+
 ### 6. 验证
 
 启动后，桌面精灵会出现。你可以先打开 AiMemo 创建一条笔记。如果后端和模型配置正常，稍等片刻后会看到：
@@ -306,6 +341,7 @@ http://127.0.0.1:5173/app/
 笔记摘要 / 标签生成
 笔记进入向量化任务
 进入工坊查看后台任务状态
+进入语音工坊创建 / 试听 / 激活声线
 精灵或对话窗口可以基于记忆回答问题
 ```
 
@@ -417,6 +453,8 @@ npm run build
 - [流程图](./docs/architecture/flows.md)
 - [Memo Elf 桌面化架构](./docs/desktop/memo-elf-desktop-architecture.md)
 - [外置精灵聊天](./docs/desktop/elf-external-chat.md)
+- [阿里云远程语音能力接入设计](./docs/desktop/aliyun-voice-provider.md)
+- [语音工坊第一版设计](./docs/desktop/voice-workshop-design.md)
 - [Memory Chat Graph](./docs/agent/memory-chat-graph.md)
 - [Memory Chat Graph 设计草案](./docs/agent/memory-chat-graph-design.md)
 - [Local Operator Agent](./docs/agent/local-operator-agent.md)
@@ -424,6 +462,7 @@ npm run build
 - [本地任务系统](./docs/backend/jobs.md)
 - [向量存储](./docs/backend/vector-storage.md)
 - [精灵助手](./docs/frontend/elf-assistant.md)
+- [Chat Window](./docs/frontend/chat-window.md)
 - [精灵图片生成提示词模板](./docs/frontend/elf-image-prompts.md)
 - [前端体验优化报告](./docs/frontend/ui-optimization-report.md)
 

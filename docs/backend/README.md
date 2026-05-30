@@ -29,6 +29,9 @@ backend/app/
 - `app/services/note_service.py`: 封装笔记创建、列表和详情读取逻辑。
 - `app/api/notes.py`: 暴露笔记相关 API。
 - `app/api/health.py`: 暴露健康检查 API。
+- `app/api/app_config.py`: 暴露前端 / 桌面运行时配置。
+- `app/api/elf_voice.py`: 暴露桌面精灵语音模式、ASR 和 TTS 接口。
+- `app/api/voice_profiles.py`: 暴露语音工坊声线 CRUD、试听和声音设计接口。
 
 ## 数据库
 
@@ -49,6 +52,12 @@ backend/data/ai_note.db
 当前 `exec_command` 默认超时已从 30 秒提高到 180 秒，上限 600 秒。`pip install`、
 首次构建依赖等前台短命令可以直接使用这个默认值；长期运行的服务仍应走
 `exec_command_background`，避免阻塞 agent 主循环。
+
+`elf.enabled` 会通过 `GET /api/config/runtime` 被 Web 和桌面精灵读取。该接口每次读取最新
+`config.json5`，用于让用户在重启前端 / 桌面后快速切换是否加载精灵。
+
+语音模块默认走阿里百炼 / DashScope 远程能力，复用 `DASHSCOPE_API_KEY`，不再要求下载本地
+ASR / TTS 模型。
 
 ## 当前 Note 模型
 
@@ -77,3 +86,4 @@ notes
 - [长期记忆管理](./memories.md)
 - [向量存储](./vector-storage.md)
 - [向量检索](./vector-search.md)
+- [阿里云远程语音能力接入设计](../desktop/aliyun-voice-provider.md)

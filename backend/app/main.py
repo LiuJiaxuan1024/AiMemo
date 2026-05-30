@@ -1,15 +1,18 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.app_config import router as app_config_router
 from app.api.background_tasks import router as background_tasks_router
 from app.api.chat import router as chat_router
 from app.api.conversations import router as conversations_router
 from app.api.elf import router as elf_router
+from app.api.elf_voice import router as elf_voice_router
 from app.api.health import router as health_router
 from app.api.jobs import router as jobs_router
 from app.api.memories import router as memories_router
 from app.api.notes import router as notes_router
 from app.api.search import router as search_router
+from app.api.voice_profiles import router as voice_profiles_router
 from app.agent.model import warmup_agent_models
 from app.core.config import settings
 from app.core.database import create_db_and_tables
@@ -31,14 +34,17 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(health_router, prefix="/api")
+    app.include_router(app_config_router, prefix="/api")
     app.include_router(conversations_router, prefix="/api")
     app.include_router(chat_router, prefix="/api")
     app.include_router(elf_router, prefix="/api")
+    app.include_router(elf_voice_router, prefix="/api")
     app.include_router(notes_router, prefix="/api")
     app.include_router(memories_router, prefix="/api")
     app.include_router(jobs_router, prefix="/api")
     app.include_router(search_router, prefix="/api")
     app.include_router(background_tasks_router, prefix="/api")
+    app.include_router(voice_profiles_router, prefix="/api")
     mount_frontend_app(app)
 
     @app.on_event("startup")

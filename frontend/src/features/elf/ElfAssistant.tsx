@@ -327,7 +327,7 @@ export function ElfAssistant({
         type="button"
       />
 
-      {elfState.mood !== "idle" ? (
+      {elfState.mood !== "idle" && elfState.message ? (
         <div className="elf-assistant-bubble">
           {elfState.mood === "error" ? <AlertTriangle aria-hidden="true" size={15} /> : null}
           {elfState.mood === "working" || elfState.mood === "thinking" ? (

@@ -5,6 +5,7 @@ import type {
   ChatTurnGraph,
   ChatTurnStateHistory,
   Conversation,
+  SegmentFollowupRequest,
   UserInputAnswer,
 } from "./types";
 
@@ -48,6 +49,16 @@ export async function deleteConversation(conversationId: number): Promise<void> 
   }
 }
 
+export async function deleteMessageBranch(conversationId: number, messageId: number): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/conversations/${conversationId}/messages/${messageId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok && response.status !== 204) {
+    const message = await response.text();
+    throw new Error(message || `Request failed with status ${response.status}`);
+  }
+}
+
 export function listMessages(conversationId: number): Promise<ChatMessage[]> {
   return request<ChatMessage[]>(`/api/conversations/${conversationId}/messages`);
 }
@@ -77,10 +88,10 @@ export async function streamChat(
   conversationId: number,
   message: string,
   onEvent: (event: ChatStreamEvent) => void,
-  options: { signal?: AbortSignal } = {},
+  options: { parentMessageId?: number | null; signal?: AbortSignal } = {},
 ): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/api/conversations/${conversationId}/chat/stream`, {
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, parent_message_id: options.parentMessageId ?? null }),
     headers: {
       "Content-Type": "application/json",
     },
@@ -96,8 +107,26 @@ export async function streamChat(
   await consumeSseStream(response, onEvent);
 }
 
+export function serializeSegmentFollowupMessage(request: SegmentFollowupRequest): string {
+  return JSON.stringify({
+    type: "segment_followup",
+    segment_id: request.segment_id,
+    original_text: request.original_text,
+    user_question: request.user_question,
+    source_message_id: request.source_message_id,
+    position: request.position ?? null,
+  });
+}
+
 export function listActiveTurns(conversationId: number): Promise<ChatActiveTurnList> {
   return request<ChatActiveTurnList>(`/api/conversations/${conversationId}/active-turns`);
+}
+
+export function cancelTurn(conversationId: number, turnId: number): Promise<{ status: string }> {
+  return request<{ status: string }>(`/api/conversations/${conversationId}/turns/${turnId}/cancel`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
 }
 
 export async function streamTurnResume(

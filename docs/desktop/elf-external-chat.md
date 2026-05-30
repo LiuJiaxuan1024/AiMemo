@@ -284,7 +284,41 @@ desktop/src/styles.css
   调用 /api/elf/chat/stream。
 
 收到回答
-  等流结束后分气泡展示。
+  语音模式关闭时，等流结束后分气泡展示。
+  语音模式开启时，按气泡请求 TTS；拿到当前气泡音频后再显示并播放，下一条气泡提前缓存。
+```
+
+## 语音模式
+
+语音模式由语音工坊控制：
+
+```text
+GET /api/elf/voice/mode
+PUT /api/elf/voice/mode
+```
+
+开启后桌面精灵聊天面板出现“按住说话”按钮：
+
+```text
+pointerdown
+  申请麦克风，开始录音。
+
+pointerup
+  停止录音，POST /api/elf/voice/transcribe。
+
+识别成功
+  将文本直接发送给 /api/elf/chat/stream，不需要用户二次确认。
+
+回答气泡
+  POST /api/elf/voice/speak 获取音频并顺序播放。
+```
+
+节奏约束：
+
+```text
+一个气泡的音频播放完，才切换下一个气泡。
+播放时用户暂时不能继续发送或说话。
+接口失败时气泡仍可降级展示文本，并给出明确错误。
 ```
 
 ## 后续计划

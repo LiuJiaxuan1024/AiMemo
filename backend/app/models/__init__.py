@@ -7,6 +7,7 @@ from app.models.job import Job
 from app.models.long_term_memory import LongTermMemory
 from app.models.note import Note
 from app.models.note_chunk import NoteChunk
+from app.models.voice_profile import VoiceProfile
 
 __all__ = [
     "AgentOperation",
@@ -18,4 +19,5 @@ __all__ = [
     "LongTermMemory",
     "Note",
     "NoteChunk",
+    "VoiceProfile",
 ]

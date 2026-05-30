@@ -44,10 +44,15 @@ logger = logging.getLogger(__name__)
 SessionFactory = Callable[[], AbstractContextManager[Session]]
 
 
+class ChatTurnCancelled(RuntimeError):
+    """Raised inside a worker when the user has cancelled the turn."""
+
+
 def run_conversation_chat(
     conversation_id: int,
     *,
     message: str,
+    parent_message_id: int | None = None,
     session_factory: SessionFactory = session_scope,
     checkpoint_path: str | None = None,
 ) -> ChatResponse:
@@ -75,6 +80,7 @@ def run_conversation_chat(
         user_message=message,
         session_factory=session_factory,
         checkpoint_path=checkpoint_path or settings.langgraph_checkpoint_path,
+        parent_message_id=parent_message_id,
     )
     user_message_id = int(result["user_message_id"])
     assistant_message_id = int(result["assistant_message_id"])
@@ -127,6 +133,7 @@ def stream_conversation_chat_events(
     conversation_id: int,
     *,
     message: str,
+    parent_message_id: int | None = None,
     session_factory: SessionFactory = session_scope,
     checkpoint_path: str | None = None,
     emit_status_events: bool = True,
@@ -167,6 +174,7 @@ def stream_conversation_chat_events(
             session,
             conversation=conversation,
             user_content=message,
+            parent_message_id=parent_message_id,
         )
         turn = create_running_chat_turn(
             session,
@@ -230,6 +238,7 @@ def stream_conversation_chat_events(
             "answer_mode": answer_mode,
             "user_message_id": user_message_id,
             "assistant_message_id": assistant_message_id,
+            "parent_message_id": parent_message_id,
             "node_statuses": node_statuses,
             "debug_payload": debug_payload,
             "started_at": started_at,
@@ -313,6 +322,7 @@ def stream_conversation_chat_resume_events(
             "answer_mode": answer_mode,
             "user_message_id": user_message_id,
             "assistant_message_id": assistant_message_id,
+            "parent_message_id": None,
             "node_statuses": node_statuses,
             "debug_payload": debug_payload,
             "started_at": started_at,
@@ -358,6 +368,7 @@ def _run_turn_to_buffer(
     answer_mode: str,
     user_message_id: int,
     assistant_message_id: int,
+    parent_message_id: int | None,
     node_statuses: dict[str, str],
     debug_payload: dict,
     started_at: float,
@@ -393,9 +404,12 @@ def _run_turn_to_buffer(
             checkpoint_path=checkpoint_path,
             user_message_id=user_message_id,
             assistant_message_id=assistant_message_id,
+            parent_message_id=parent_message_id,
             answer_mode=answer_mode,
             resume_payload=resume_payload,
         ):
+            if _is_chat_turn_cancelled(session_factory, turn_id):
+                raise ChatTurnCancelled("用户中断了本轮生成。")
             if event["event"] == "node":
                 node_name = str(event["node"])
                 state = event.get("state") if isinstance(event.get("state"), dict) else {}
@@ -548,8 +562,16 @@ def _run_turn_to_buffer(
                     )
                 )
             elif event["event"] == "bubble_delta":
-                # 外置精灵气泡 JSON token 不直接发给普通 Web 聊天。
-                # 专用 /api/elf/chat/stream 会使用 answer_mode=elf_bubble 并在 done 中消费最终 bubbles。
+                if answer_mode == "elf_bubble":
+                    buffer.append(
+                        _sse(
+                            "bubble_delta",
+                            {
+                                "content": event.get("content", ""),
+                                "node": event.get("node", ""),
+                            },
+                        )
+                    )
                 continue
             elif event["event"] == "interrupt":
                 final_state = event.get("state") if isinstance(event.get("state"), dict) else {}
@@ -605,6 +627,9 @@ def _run_turn_to_buffer(
             elif event["event"] == "done":
                 final_state = event["state"]
                 _mark_debug_event(debug_payload, started_at, "graph_done")
+
+        if _is_chat_turn_cancelled(session_factory, turn_id):
+            raise ChatTurnCancelled("用户中断了本轮生成。")
 
         if final_state is None:
             raise RuntimeError("Memory chat graph finished without final state.")
@@ -698,6 +723,18 @@ def _run_turn_to_buffer(
         if answer_mode == "elf_bubble":
             done_payload["bubbles"] = elf_bubbles
         buffer.append(_sse("done", done_payload))
+    except ChatTurnCancelled as exc:
+        logger.info("chat turn %s cancelled", turn_id)
+        buffer.append(
+            _sse(
+                "error",
+                {
+                    "turn_id": turn_id,
+                    "message": str(exc),
+                    "node_statuses": node_statuses,
+                },
+            )
+        )
     except Exception as exc:
         logger.exception("chat turn %s worker crashed", turn_id)
         exception_detail = _build_exception_detail(exc)
@@ -774,6 +811,16 @@ def _sse(event: str, data: dict) -> str:
     """把事件编码为浏览器 EventSource/fetch 可读取的 SSE 文本。"""
 
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _is_chat_turn_cancelled(session_factory: SessionFactory, turn_id: int) -> bool:
+    try:
+        with session_factory() as session:
+            turn = session.get(ChatTurn, turn_id)
+            return turn is not None and turn.status == "cancelled"
+    except Exception:
+        logger.exception("failed to check cancellation for chat turn %s", turn_id)
+        return False
 
 
 def _normalize_interrupt_payload(raw_interrupt) -> dict:
@@ -1139,6 +1186,7 @@ def _create_streaming_message_pair(
     *,
     conversation: Conversation,
     user_content: str,
+    parent_message_id: int | None = None,
 ) -> tuple[ChatMessage, ChatMessage]:
     """在 graph 启动前创建本轮用户消息和 assistant 草稿。
 
@@ -1153,7 +1201,13 @@ def _create_streaming_message_pair(
 
     if conversation.id is None:
         raise RuntimeError("Conversation id is required before creating chat messages.")
-    parent_id = _latest_message_id(session, conversation.id)
+    parent_id = parent_message_id
+    if parent_id is None:
+        parent_id = _latest_message_id(session, conversation.id)
+    else:
+        parent = session.get(ChatMessage, parent_id)
+        if parent is None or parent.conversation_id != conversation.id:
+            raise ValueError("parent_message_id must reference a message in the same conversation.")
     user = ChatMessage(
         conversation_id=conversation.id,
         role="user",

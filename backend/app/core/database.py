@@ -16,6 +16,7 @@ from app.models import (
     LongTermMemory,
     Note,
     NoteChunk,
+    VoiceProfile,
 )
 from app.rag.hashing import content_hash
 
@@ -130,6 +131,21 @@ def migrate_existing_sqlite_schema() -> None:
             ChatTurn.__tablename__,
             {
                 "debug_payload": "TEXT DEFAULT '{}'",
+            },
+        )
+
+    if VoiceProfile.__tablename__ in table_names:
+        _add_missing_columns(
+            VoiceProfile.__tablename__,
+            {
+                "style_prompt": "TEXT DEFAULT ''",
+                "preview_text": "TEXT DEFAULT ''",
+                "language": "VARCHAR(24) DEFAULT 'auto'",
+                "speed": "FLOAT DEFAULT 1.0",
+                "energy": "FLOAT DEFAULT 1.0",
+                "emotion_bias": "TEXT DEFAULT '{}'",
+                "remote_target_model": "VARCHAR(120) DEFAULT ''",
+                "last_error": "TEXT DEFAULT ''",
             },
         )
 

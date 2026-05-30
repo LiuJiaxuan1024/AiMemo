@@ -148,6 +148,9 @@ export function applyChatStreamEvent(conversationId: number, event: ChatStreamEv
     const { turn_id, user_message, assistant_message, node_statuses } = event.data;
     streamingStore.update(conversationId, (current) => {
       const pending = current.pendingOptimisticIds;
+      const hiddenOptimistic = current.messages.find(
+        (message) => Boolean(pending) && message.id === pending?.assistantId && message.ui_hidden,
+      );
       const messages = current.messages
         .filter((message) => {
           if (!pending) {
@@ -156,8 +159,14 @@ export function applyChatStreamEvent(conversationId: number, event: ChatStreamEv
           return message.id !== pending.userId && message.id !== pending.assistantId;
         })
         .concat([
-          { ...user_message, conversation_id: conversationId },
-          { ...assistant_message, conversation_id: conversationId, turn_id, isStreaming: true },
+          { ...user_message, conversation_id: conversationId, ui_hidden: hiddenOptimistic?.ui_hidden },
+          {
+            ...assistant_message,
+            conversation_id: conversationId,
+            turn_id,
+            isStreaming: true,
+            ui_hidden: hiddenOptimistic?.ui_hidden,
+          },
         ]);
       return {
         ...current,
@@ -271,6 +280,10 @@ export function applyChatStreamEvent(conversationId: number, event: ChatStreamEv
         (message) => message.isStreaming && message.role === "assistant",
       );
       const segments = streamingAssistant?.segments;
+      const hidden = streamingAssistant?.ui_hidden;
+      const hiddenUser = current.messages.find(
+        (message) => message.role === "user" && message.id === user_message.id,
+      )?.ui_hidden;
       const messages = current.messages
         .filter(
           (message) =>
@@ -279,12 +292,13 @@ export function applyChatStreamEvent(conversationId: number, event: ChatStreamEv
             !(message.isStreaming && message.role === "assistant"),
         )
         .concat([
-          { ...user_message, conversation_id: conversationId },
+          { ...user_message, conversation_id: conversationId, ui_hidden: hiddenUser },
           {
             ...assistant_message,
             conversation_id: conversationId,
             thoughts,
             segments,
+            ui_hidden: hidden,
             pending_interrupt: null,
           },
         ]);

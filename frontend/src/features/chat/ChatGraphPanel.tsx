@@ -12,11 +12,12 @@ type DiffKind = "added" | "removed" | "changed" | "same";
 
 interface ChatGraphPanelProps {
   graph: ChatTurnGraph | null;
+  isClosing?: boolean;
   isLoading: boolean;
   onClose: () => void;
 }
 
-export function ChatGraphPanel({ graph, isLoading, onClose }: ChatGraphPanelProps) {
+export function ChatGraphPanel({ graph, isClosing = false, isLoading, onClose }: ChatGraphPanelProps) {
   const [activeTab, setActiveTab] = useState<DebugTab>("graph");
   const [selectedSubgraphNode, setSelectedSubgraphNode] = useState<string | null>(null);
   const [selectedStateNode, setSelectedStateNode] = useState<string | null>(null);
@@ -108,7 +109,7 @@ export function ChatGraphPanel({ graph, isLoading, onClose }: ChatGraphPanelProp
     <div
       aria-label="Graph 调试工作台"
       aria-modal="true"
-      className="chat-debug-workspace"
+      className={`chat-debug-workspace ${isClosing ? "chat-debug-workspace--closing" : ""}`}
       role="dialog"
     >
       <header className="chat-debug-workspace-header">
@@ -143,9 +144,9 @@ export function ChatGraphPanel({ graph, isLoading, onClose }: ChatGraphPanelProp
             性能 / 证据
           </TabButton>
         </nav>
-        <Button aria-label="关闭 Graph 调试" onClick={onClose} size="sm">
-          <X aria-hidden="true" size={16} />
-          关闭
+        <Button aria-label="收起 Graph 调试" onClick={onClose} size="sm">
+          <ChevronDown aria-hidden="true" size={16} />
+          收起
         </Button>
       </header>
 

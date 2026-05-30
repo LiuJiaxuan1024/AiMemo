@@ -9,6 +9,9 @@ venv/
 data/*.db
 data/*.db-*
 data/*.log
+data/models/
+data/venvs/
+desktop/src-tauri/.tauri-dev.override.json
 backend/data/*.db
 backend/data/*.db-*
 backend/data/*.log

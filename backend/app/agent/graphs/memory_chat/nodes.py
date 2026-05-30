@@ -223,6 +223,7 @@ def build_load_turn_state_node(
                 # 保留服务层预创建的消息 ID，最终 persist_messages 会更新这些草稿消息。
                 "user_message_id": int(state.get("user_message_id") or 0),
                 "assistant_message_id": int(state.get("assistant_message_id") or 0),
+                "parent_message_id": int(state.get("parent_message_id") or 0),
                 "graph_checkpoint_id": None,
                 "error": "",
             }
@@ -1441,7 +1442,11 @@ def build_persist_messages_node(session_factory: SessionFactory):
                     "assistant_message_id": existing_pair[1],
                 }
 
-            parent_id = _latest_message_id(session, conversation_id)
+            parent_id = int(state.get("parent_message_id") or 0) or _latest_message_id(session, conversation_id)
+            if parent_id is not None:
+                parent = session.get(ChatMessage, parent_id)
+                if parent is None or parent.conversation_id != conversation_id:
+                    raise ValueError("parent_message_id must reference a message in the same conversation.")
             user = ChatMessage(
                 conversation_id=conversation_id,
                 role="user",

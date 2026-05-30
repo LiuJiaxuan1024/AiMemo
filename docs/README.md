@@ -14,6 +14,7 @@
 8. [前后台任务边界](./agent/background-vs-foreground.md)
 9. [前端说明](./frontend/README.md)
 10. [Memo Elf 桌面化架构](./desktop/memo-elf-desktop-architecture.md)
+11. [语音工坊第一版设计](./desktop/voice-workshop-design.md)
 
 ## 当前实现
 
@@ -35,6 +36,7 @@
 - [精灵事件中心](./backend/elf-events.md)
 - [向量存储](./backend/vector-storage.md)
 - [向量检索](./backend/vector-search.md)
+- [阿里云远程语音能力接入设计](./desktop/aliyun-voice-provider.md)
 
 ### Agent / Graph
 
@@ -67,6 +69,8 @@
 
 - [Memo Elf 桌面化架构](./desktop/memo-elf-desktop-architecture.md)
 - [外置精灵聊天](./desktop/elf-external-chat.md)
+- [阿里云远程语音能力接入设计](./desktop/aliyun-voice-provider.md)
+- [语音工坊第一版设计](./desktop/voice-workshop-design.md)
 
 ### API
 
@@ -77,6 +81,8 @@
 - [Conversations API](./api/conversations.md)
 - [Chat API](./api/chat.md)
 - [Memories API](./api/memories.md)
+- [Runtime Config API](./api/runtime-config.md)
+- [Voice API](./api/voice.md)
 
 ## 设计草案与历史报告
 

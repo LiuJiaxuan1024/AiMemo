@@ -16,6 +16,7 @@ from app.services.conversation_service import (
     append_message,
     create_conversation,
     delete_conversation,
+    delete_message_branch,
     get_conversation,
     list_messages,
 )
@@ -291,3 +292,76 @@ def test_delete_conversation_raises_404_for_missing_id(session):
     with pytest.raises(HTTPException) as exc_info:
         delete_conversation(session, 404)
     assert exc_info.value.status_code == 404
+
+
+def test_delete_message_branch_removes_turn_descendants_and_memories(session):
+    conversation = create_conversation(session, ConversationCreate(title="分支删除"))
+    user1 = append_message(session, conversation.id, ChatMessageCreate(role="user", content="问题1"))
+    assistant1 = append_message(
+        session,
+        conversation.id,
+        ChatMessageCreate(role="assistant", content="回答1"),
+    )
+    user2 = append_message(session, conversation.id, ChatMessageCreate(role="user", content="问题2"))
+    assistant2 = append_message(
+        session,
+        conversation.id,
+        ChatMessageCreate(role="assistant", content="回答2"),
+    )
+    turn1 = ChatTurn(
+        conversation_id=conversation.id,
+        thread_id=f"conversation:{conversation.id}",
+        user_message_id=user1.id,
+        assistant_message_id=assistant1.id,
+        status="completed",
+    )
+    turn2 = ChatTurn(
+        conversation_id=conversation.id,
+        thread_id=f"conversation:{conversation.id}",
+        user_message_id=user2.id,
+        assistant_message_id=assistant2.id,
+        status="completed",
+    )
+    memory = LongTermMemory(
+        level=4,
+        category="fact",
+        content="来自第二轮的记忆",
+        source_type="chat_message",
+        source_id=assistant2.id,
+        content_hash="branch-delete-memory",
+    )
+    session.add(turn1)
+    session.add(turn2)
+    session.add(memory)
+    session.commit()
+
+    delete_message_branch(session, conversation.id, assistant1.id)
+
+    assert list_messages(session, conversation.id) == []
+    assert session.exec(select(ChatTurn).where(ChatTurn.conversation_id == conversation.id)).all() == []
+    assert session.exec(select(LongTermMemory).where(LongTermMemory.source_id == assistant2.id)).all() == []
+
+
+def test_delete_message_branch_rejects_running_turn(session):
+    conversation = create_conversation(session, ConversationCreate(title="运行中"))
+    user = append_message(session, conversation.id, ChatMessageCreate(role="user", content="问题"))
+    assistant = append_message(
+        session,
+        conversation.id,
+        ChatMessageCreate(role="assistant", content="回答", parent_id=user.id, status="streaming"),
+    )
+    session.add(
+        ChatTurn(
+            conversation_id=conversation.id,
+            thread_id=f"conversation:{conversation.id}",
+            user_message_id=user.id,
+            assistant_message_id=assistant.id,
+            status="running",
+        )
+    )
+    session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        delete_message_branch(session, conversation.id, assistant.id)
+
+    assert exc_info.value.status_code == 409

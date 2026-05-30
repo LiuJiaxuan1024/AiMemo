@@ -135,6 +135,7 @@ def run_memory_chat_graph(
     interrupt_after: list[str] | None = None,
     user_message_id: int | None = None,
     assistant_message_id: int | None = None,
+    parent_message_id: int | None = None,
     answer_mode: str = "text",
 ) -> MemoryChatGraphState:
     """执行一轮记忆对话。
@@ -166,6 +167,7 @@ def run_memory_chat_graph(
             answer_mode=answer_mode,
             user_message_id=user_message_id,
             assistant_message_id=assistant_message_id,
+            parent_message_id=parent_message_id,
         )
         result = app.invoke(
             graph_input,
@@ -196,6 +198,7 @@ def stream_memory_chat_graph(
     bubble_answer_generator: ElfBubbleAnswerGenerator | None = None,
     user_message_id: int | None = None,
     assistant_message_id: int | None = None,
+    parent_message_id: int | None = None,
     answer_mode: str = "text",
     resume_payload: dict | None = None,
 ):
@@ -235,6 +238,7 @@ def stream_memory_chat_graph(
                 answer_mode=answer_mode,
                 user_message_id=user_message_id,
                 assistant_message_id=assistant_message_id,
+                parent_message_id=parent_message_id,
             )
         latest_state: MemoryChatGraphState = {}
         for stream_item in app.stream(
@@ -348,6 +352,7 @@ def _resolve_graph_input_for_turn(
     answer_mode: str,
     user_message_id: int | None,
     assistant_message_id: int | None,
+    parent_message_id: int | None,
 ) -> MemoryChatGraphState | None:
     """判断本次调用是恢复旧 graph，还是新用户输入要开启新一轮。
 
@@ -365,6 +370,7 @@ def _resolve_graph_input_for_turn(
         "answer_mode": answer_mode,  # type: ignore[typeddict-item]
         "user_message_id": user_message_id or 0,
         "assistant_message_id": assistant_message_id or 0,
+        "parent_message_id": parent_message_id or 0,
     }
     if not snapshot.next:
         return next_input
@@ -426,6 +432,7 @@ def _expire_stale_checkpoint(
             "answer_mode": next_input.get("answer_mode"),
             "user_message_id": next_input.get("user_message_id"),
             "assistant_message_id": next_input.get("assistant_message_id"),
+            "parent_message_id": next_input.get("parent_message_id"),
         },
         as_node="persist_messages",
     )

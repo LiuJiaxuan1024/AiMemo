@@ -23,6 +23,11 @@ const WorkshopMemoriesPage = lazy(() =>
     default: module.WorkshopMemoriesPage,
   })),
 );
+const WorkshopVoicePage = lazy(() =>
+  import("./pages/workshop/WorkshopVoicePage").then((module) => ({
+    default: module.WorkshopVoicePage,
+  })),
+);
 
 function withPageSuspense(element: ReactNode) {
   return <Suspense fallback={<div className="module-loading">正在加载模块...</div>}>{element}</Suspense>;
@@ -43,6 +48,7 @@ const router = createBrowserRouter([
           { index: true, element: <Navigate to="/app/workshop/jobs" replace /> },
           { path: "jobs", element: withPageSuspense(<WorkshopJobsPage />) },
           { path: "memories", element: withPageSuspense(<WorkshopMemoriesPage />) },
+          { path: "voice", element: withPageSuspense(<WorkshopVoicePage />) },
         ],
       },
       { path: "*", element: <Navigate to="/app/memo" replace /> },

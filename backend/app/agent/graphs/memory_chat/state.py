@@ -194,5 +194,6 @@ class MemoryChatGraphState(TypedDict, total=False):
     # 非流式调用可以不传这两个字段，persist_messages 会按旧路径创建消息。
     user_message_id: int
     assistant_message_id: int
+    parent_message_id: int
     graph_checkpoint_id: str | None
     error: str

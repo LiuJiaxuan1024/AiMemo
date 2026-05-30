@@ -40,6 +40,8 @@ export interface ChatMessageWithTurn extends ChatMessage {
   isStreaming?: boolean;
   thoughts?: ChatThought[];
   segments?: MessageSegment[];
+  followupThreads?: SegmentFollowupThread[];
+  ui_hidden?: boolean;
 }
 
 export type DraftAssistantMessage = ChatMessageWithTurn;
@@ -127,6 +129,35 @@ export interface MessageSegment {
   step_index: number;
   text: string;
   tools: ToolInvocation[];
+}
+
+export interface SegmentFollowup {
+  followup_id: string;
+  user_question: string;
+  assistant_answer?: string;
+  status: "pending" | "answered" | "failed";
+  timestamp: string;
+}
+
+export interface SegmentFollowupThread {
+  segment_id: string;
+  original_text: string;
+  position: {
+    start: number;
+    end: number;
+  } | null;
+  followups: SegmentFollowup[];
+}
+
+export interface SegmentFollowupRequest {
+  source_message_id: number;
+  segment_id: string | null;
+  original_text: string;
+  user_question: string;
+  position?: {
+    start: number;
+    end: number;
+  } | null;
 }
 
 export interface ChatResponse {

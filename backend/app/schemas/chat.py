@@ -10,6 +10,7 @@ class ChatRequest(BaseModel):
     """发送给 memory_chat_graph 的用户输入。"""
 
     message: str = Field(min_length=1)
+    parent_message_id: int | None = None
 
 
 class ChatResumeRequest(BaseModel):

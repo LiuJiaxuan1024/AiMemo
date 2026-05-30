@@ -6,13 +6,13 @@ import { ElfAssistant } from "../elf/ElfAssistant";
 import { countActiveJobs, countFailedJobs } from "../elf/elfState";
 import { MemoryPanel } from "../memories/MemoryPanel";
 import { Button, EmptyState, PanelHeader, SegmentedTabs } from "../../shared/ui";
+import { getRuntimeConfig } from "../../shared/runtimeConfig";
 import { getJobGraph, listJobs } from "./jobsApi";
 import { JobDetail } from "./JobDetail";
 import { JobList } from "./JobList";
 import type { Job } from "./types";
 
 const ACTIVE_STATUSES = new Set(["pending", "running"]);
-const ENABLE_WEB_ELF = import.meta.env.VITE_ENABLE_WEB_ELF === "true";
 type DrawerTab = "jobs" | "memories";
 const JobGraphView = lazy(() =>
   import("./JobGraphView").then((module) => ({ default: module.JobGraphView })),
@@ -35,6 +35,13 @@ export function JobDrawer() {
   });
 
   const jobs = jobsQuery.data ?? [];
+  const runtimeConfigQuery = useQuery({
+    queryKey: ["runtime_config"],
+    queryFn: getRuntimeConfig,
+    refetchInterval: (query) => (query.state.error ? 3000 : false),
+    staleTime: 0,
+  });
+  const isElfEnabled = runtimeConfigQuery.data?.elf.enabled === true;
   const activeCount = useMemo(() => countActiveJobs(jobs), [jobs]);
   const failedCount = useMemo(() => countFailedJobs(jobs), [jobs]);
   const selectedJobId = selectedJob?.id ?? null;
@@ -66,7 +73,7 @@ export function JobDrawer() {
 
   return (
     <>
-      {ENABLE_WEB_ELF ? (
+      {isElfEnabled ? (
         <ElfAssistant
           activeCount={activeCount}
           failedCount={failedCount}
@@ -77,7 +84,7 @@ export function JobDrawer() {
       ) : null}
 
       <aside className={isOpen ? "job-drawer open" : "job-drawer"}>
-      {!ENABLE_WEB_ELF ? (
+      {!isElfEnabled ? (
         <button
           aria-label={isOpen ? "收起精灵工坊" : "打开精灵工坊"}
           className="job-drawer-handle"

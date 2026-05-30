@@ -131,6 +131,73 @@ def append_message(
     return _to_chat_message_read(message)
 
 
+def delete_message_branch(
+    session: Session,
+    conversation_id: int,
+    message_id: int,
+) -> None:
+    """删除某条消息所在 turn 及其后续依赖消息。
+
+    线性聊天里后续消息会把上一条消息作为 parent；如果只删中间一轮，
+    后面的回答仍然携带已删除上下文的影响。这里按 parent 链删除分支，
+    保证 UI 和后续上下文一致。
+    """
+
+    conversation = _get_conversation_or_404(session, conversation_id)
+    message = session.get(ChatMessage, message_id)
+    if message is None or message.conversation_id != conversation_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+
+    root_message_id = _resolve_turn_root_message_id(session, conversation_id, message)
+    delete_ids = _collect_descendant_message_ids(session, conversation_id, root_message_id)
+
+    active_turns = session.exec(
+        select(ChatTurn).where(
+            ChatTurn.conversation_id == conversation_id,
+            ChatTurn.status.in_(["running", "interrupted"]),
+        )
+    ).all()
+    for turn in active_turns:
+        if turn.user_message_id in delete_ids or turn.assistant_message_id in delete_ids:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cannot delete a running or interrupted turn",
+            )
+
+    if delete_ids:
+        memories = session.exec(
+            select(LongTermMemory).where(
+                LongTermMemory.source_type == "chat_message",
+                LongTermMemory.source_id.in_(delete_ids),
+            )
+        ).all()
+        for memory in memories:
+            session.delete(memory)
+
+        turns = session.exec(
+            select(ChatTurn).where(ChatTurn.conversation_id == conversation_id)
+        ).all()
+        for turn in turns:
+            if turn.user_message_id in delete_ids or turn.assistant_message_id in delete_ids:
+                session.delete(turn)
+
+        messages = session.exec(
+            select(ChatMessage).where(
+                ChatMessage.conversation_id == conversation_id,
+                ChatMessage.id.in_(delete_ids),
+            )
+        ).all()
+        for item in messages:
+            session.delete(item)
+
+    if conversation.summary_message_id is not None and conversation.summary_message_id in delete_ids:
+        conversation.summary = ""
+        conversation.summary_message_id = None
+    conversation.updated_at = utc_now()
+    session.add(conversation)
+    session.commit()
+
+
 def delete_conversation(session: Session, conversation_id: int) -> None:
     """级联删除一个对话及其所有相关资源。
 
@@ -280,6 +347,54 @@ def _latest_message_id(session: Session, conversation_id: int) -> int | None:
         .order_by(desc(ChatMessage.created_at), desc(ChatMessage.id))
     ).first()
     return message.id if message else None
+
+
+def _resolve_turn_root_message_id(
+    session: Session,
+    conversation_id: int,
+    message: ChatMessage,
+) -> int:
+    turn = session.exec(
+        select(ChatTurn).where(
+            ChatTurn.conversation_id == conversation_id,
+            (ChatTurn.user_message_id == message.id)
+            | (ChatTurn.assistant_message_id == message.id),
+        )
+    ).first()
+    if turn and turn.user_message_id:
+        return int(turn.user_message_id)
+    if message.role == "assistant" and message.parent_id is not None:
+        parent = session.get(ChatMessage, message.parent_id)
+        if parent is not None and parent.conversation_id == conversation_id and parent.role == "user":
+            return int(parent.id or message.id or 0)
+    if message.id is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+    return int(message.id)
+
+
+def _collect_descendant_message_ids(
+    session: Session,
+    conversation_id: int,
+    root_message_id: int,
+) -> set[int]:
+    messages = session.exec(
+        select(ChatMessage).where(ChatMessage.conversation_id == conversation_id)
+    ).all()
+    children_by_parent: dict[int, list[int]] = {}
+    for message in messages:
+        if message.id is None or message.parent_id is None:
+            continue
+        children_by_parent.setdefault(message.parent_id, []).append(message.id)
+
+    result: set[int] = set()
+    stack = [root_message_id]
+    while stack:
+        current = stack.pop()
+        if current in result:
+            continue
+        result.add(current)
+        stack.extend(children_by_parent.get(current, []))
+    return result
 
 
 def _ensure_parent_message_belongs_to_conversation(

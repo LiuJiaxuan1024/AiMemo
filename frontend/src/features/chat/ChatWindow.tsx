@@ -1,19 +1,22 @@
 import { FormEvent, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  cancelTurn,
   createConversation,
   deleteConversation,
+  deleteMessageBranch,
   getTurnGraph,
   listActiveTurns,
   listConversations,
   listMessages,
   resumeInterruptedTurn,
+  serializeSegmentFollowupMessage,
   streamChat,
   streamTurnResume,
 } from "./chatApi";
 import { ChatComposer } from "./ChatComposer";
 import { ConversationList } from "./ConversationList";
-import { MessageList } from "./MessageList";
+import { MessageList, SegmentFollowupPanel } from "./MessageList";
 import {
   emitChatAnswerStartedElfEvent,
   emitChatDoneElfEvent,
@@ -27,6 +30,7 @@ import type {
   ChatTurnGraph,
   Conversation,
   DraftAssistantMessage,
+  SegmentFollowupRequest,
   UserInputAnswer,
 } from "./types";
 
@@ -40,10 +44,14 @@ export function ChatWindow() {
   const [input, setInput] = useState("");
   const [selectedGraph, setSelectedGraph] = useState<ChatTurnGraph | null>(null);
   const [isGraphLoading, setIsGraphLoading] = useState(false);
+  const [isGraphClosing, setIsGraphClosing] = useState(false);
+  const [activeFollowupSourceId, setActiveFollowupSourceId] = useState<number | null>(null);
+  const [activeFollowupSegmentId, setActiveFollowupSegmentId] = useState<string | null>(null);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const selectedGraphRef = useRef<ChatTurnGraph | null>(null);
+  const graphCloseTimerRef = useRef<number | null>(null);
 
   const activeConversationId = activeConversation?.id;
   const view = useConversationView(activeConversationId);
@@ -52,6 +60,10 @@ export function ChatWindow() {
   const thoughts = view?.thoughts ?? [];
   const isStreaming = view?.isStreaming ?? false;
   const error = view?.error ?? "";
+  const activeFollowupSource =
+    activeFollowupSourceId == null
+      ? null
+      : messages.find((message) => message.id === activeFollowupSourceId) ?? null;
 
   const runningNodes = useMemo(
     () =>
@@ -123,6 +135,15 @@ export function ChatWindow() {
     selectedGraphRef.current = selectedGraph;
   }, [selectedGraph]);
 
+  useEffect(
+    () => () => {
+      if (graphCloseTimerRef.current != null) {
+        window.clearTimeout(graphCloseTimerRef.current);
+      }
+    },
+    [],
+  );
+
   useEffect(() => {
     const graph = selectedGraphRef.current;
     if (!activeConversationId || !graph || graph.status !== "running") {
@@ -151,7 +172,7 @@ export function ChatWindow() {
       return;
     }
     streamingStore.patch(conversation.id, { loaded: true });
-    const messagesList = await listMessages(conversation.id);
+    const messagesList = hydrateSegmentFollowups(await listMessages(conversation.id));
     streamingStore.update(conversation.id, (current) => ({
       ...current,
       messages: messagesList as DraftAssistantMessage[],
@@ -337,22 +358,117 @@ export function ChatWindow() {
       return;
     }
 
-    const conversationId = activeConversationId;
-    const content = input.trim();
-    setShouldAutoScroll(true);
+    await submitChatMessage(activeConversationId, input.trim());
+  }
+
+  async function handleStopGeneration() {
+    if (!activeConversationId) {
+      return;
+    }
+    const slot = streamingStore.peek(activeConversationId);
+    const turnId = slot?.streamingTurnId;
+    if (slot?.abortController) {
+      try {
+        slot.abortController.abort();
+      } catch {
+        // 已经关闭的 fetch 不需要再处理。
+      }
+    }
+    streamingStore.update(activeConversationId, (current) => ({
+      ...current,
+      isStreaming: false,
+      streamingTurnId: null,
+      thoughts: [],
+      nodeStatuses: {},
+      abortController: null,
+      messages: current.messages.map((message) =>
+        message.isStreaming
+          ? { ...message, isStreaming: false, status: "failed" }
+          : message,
+      ),
+      error: "",
+    }));
+    if (!turnId) {
+      return;
+    }
+    try {
+      await cancelTurn(activeConversationId, turnId);
+      await refreshActiveMessages(activeConversationId);
+    } catch (currentError) {
+      setError(
+        activeConversationId,
+        currentError instanceof Error ? currentError.message : "中断生成失败",
+      );
+    }
+  }
+
+  async function handleDeleteMessage(message: DraftAssistantMessage) {
+    if (!activeConversationId || isStreaming || message.isStreaming) {
+      return;
+    }
+    try {
+      await deleteMessageBranch(activeConversationId, message.id);
+      await refreshActiveMessages(activeConversationId);
+      if (activeFollowupSourceId === message.id) {
+        setActiveFollowupSourceId(null);
+        setActiveFollowupSegmentId(null);
+      }
+      if (
+        selectedGraph?.assistant_message_id === message.id ||
+        selectedGraph?.user_message_id === message.id
+      ) {
+        setSelectedGraph(null);
+      }
+      await refreshConversations();
+    } catch (currentError) {
+      setError(
+        activeConversationId,
+        currentError instanceof Error ? currentError.message : "删除消息失败",
+      );
+    }
+  }
+
+  async function refreshActiveMessages(conversationId: number): Promise<void> {
+    const messagesList = hydrateSegmentFollowups(await listMessages(conversationId));
+    streamingStore.update(conversationId, (current) => ({
+      ...current,
+      messages: messagesList as DraftAssistantMessage[],
+      isStreaming: false,
+      streamingTurnId: null,
+      abortController: null,
+      pendingOptimisticIds: null,
+      thoughts: [],
+      nodeStatuses: {},
+    }));
+  }
+
+  async function submitChatMessage(
+    conversationId: number,
+    content: string,
+    options: {
+      displayContent?: string;
+      hidden?: boolean;
+      onDone?: (assistant: DraftAssistantMessage | null) => void;
+      parentMessageId?: number | null;
+    } = {},
+  ) {
+    if (!options.hidden) {
+      setShouldAutoScroll(true);
+    }
     const optimisticUserId = -Date.now();
     const optimisticAssistantId = optimisticUserId - 1;
     const optimisticUser: DraftAssistantMessage = {
       id: optimisticUserId,
       conversation_id: conversationId,
       role: "user",
-      content,
-      parent_id: messages.length > 0 ? messages[messages.length - 1].id : null,
+      content: options.displayContent ?? content,
+      parent_id: options.parentMessageId ?? (messages.length > 0 ? messages[messages.length - 1].id : null),
       checkpoint_id: null,
       status: "streaming",
       token_count: 0,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
+      ui_hidden: options.hidden,
     };
     const optimisticAssistant: DraftAssistantMessage = {
       ...optimisticUser,
@@ -361,6 +477,7 @@ export function ChatWindow() {
       content: "",
       parent_id: optimisticUserId,
       isStreaming: true,
+      ui_hidden: options.hidden,
     };
 
     const controller = new AbortController();
@@ -386,8 +503,15 @@ export function ChatWindow() {
         conversationId,
         content,
         (streamEvent) => dispatchStreamEvent(conversationId, streamEvent),
-        { signal: controller.signal },
+        { parentMessageId: options.parentMessageId, signal: controller.signal },
       );
+      if (options.onDone) {
+        const latest = streamingStore.peek(conversationId);
+        const latestAssistant = [...(latest?.messages ?? [])]
+          .reverse()
+          .find((message) => message.role === "assistant" && message.ui_hidden === options.hidden) ?? null;
+        options.onDone(latestAssistant);
+      }
       await refreshConversations();
     } catch (currentError) {
       if (!controller.signal.aborted) {
@@ -422,6 +546,60 @@ export function ChatWindow() {
       }
       scheduleConversationRefresh();
     }
+  }
+
+  async function handleSegmentFollowup(request: SegmentFollowupRequest) {
+    if (!activeConversationId || isStreaming) {
+      return;
+    }
+    setActiveFollowupSourceId(request.source_message_id);
+    const followupId = `f-${Date.now().toString(36)}`;
+    const segmentId = request.segment_id ?? createSegmentId(request.original_text);
+    setActiveFollowupSegmentId(segmentId);
+    const timestamp = new Date().toISOString();
+    const displayContent = `针对片段「${compactText(request.original_text, 48)}」追问：${request.user_question}`;
+
+    streamingStore.updateMessages(activeConversationId, (currentMessages) =>
+      currentMessages.map((message) =>
+        message.id === request.source_message_id
+          ? upsertFollowupThread(message, {
+              segment_id: segmentId,
+              original_text: request.original_text,
+              position: request.position ?? null,
+              followups: [
+                {
+                  followup_id: followupId,
+                  user_question: request.user_question,
+                  status: "pending",
+                  timestamp,
+                },
+              ],
+            })
+          : message,
+      ),
+    );
+
+    await submitChatMessage(
+      activeConversationId,
+      serializeSegmentFollowupMessage({
+        ...request,
+        segment_id: segmentId,
+      }),
+      {
+        displayContent,
+        hidden: true,
+        parentMessageId: request.source_message_id,
+        onDone: (assistant) => {
+          streamingStore.updateMessages(activeConversationId, (currentMessages) =>
+            currentMessages.map((message) =>
+              message.id === request.source_message_id
+                ? completeFollowup(message, segmentId, followupId, assistant?.content ?? "")
+                : message,
+            ),
+          );
+        },
+      },
+    );
   }
 
   async function handleUserInputAnswer(
@@ -493,6 +671,11 @@ export function ChatWindow() {
     if (!activeConversationId) {
       return;
     }
+    if (graphCloseTimerRef.current != null) {
+      window.clearTimeout(graphCloseTimerRef.current);
+      graphCloseTimerRef.current = null;
+    }
+    setIsGraphClosing(false);
     setIsGraphLoading(true);
     setSelectedGraph(null);
     setError(activeConversationId, "");
@@ -510,6 +693,24 @@ export function ChatWindow() {
     } finally {
       setIsGraphLoading(false);
     }
+  }
+
+  function handleCloseGraph() {
+    setIsGraphClosing(true);
+    setIsGraphLoading(false);
+    if (graphCloseTimerRef.current != null) {
+      window.clearTimeout(graphCloseTimerRef.current);
+    }
+    graphCloseTimerRef.current = window.setTimeout(() => {
+      setSelectedGraph(null);
+      setIsGraphClosing(false);
+      graphCloseTimerRef.current = null;
+    }, 220);
+  }
+
+  function handleOpenFollowups(message: DraftAssistantMessage, segmentId?: string | null) {
+    setActiveFollowupSourceId(message.id);
+    setActiveFollowupSegmentId(segmentId ?? null);
   }
 
   return (
@@ -531,15 +732,41 @@ export function ChatWindow() {
           {runningNodes.length > 0 ? <span>Graph: {runningNodes.join(", ")}</span> : null}
         </header>
 
-        <MessageList
-          endRef={messagesEndRef}
-          listRef={messageListRef}
-          messages={messages}
-          onOpenGraph={handleOpenGraph}
-          onScroll={updateAutoScrollIntent}
-          onSubmitUserInput={handleUserInputAnswer}
-          thoughts={thoughts}
-        />
+        <div className={`chat-dialogue-zone ${activeFollowupSource ? "chat-dialogue-zone--with-followups" : ""}`}>
+          <MessageList
+            activeFollowupSegmentId={activeFollowupSegmentId}
+            activeFollowupSourceId={activeFollowupSourceId}
+            endRef={messagesEndRef}
+            listRef={messageListRef}
+            messages={messages}
+            onOpenFollowups={handleOpenFollowups}
+            onOpenGraph={handleOpenGraph}
+            onDeleteMessage={handleDeleteMessage}
+            onScroll={updateAutoScrollIntent}
+            onSegmentFollowup={handleSegmentFollowup}
+            onStopGeneration={handleStopGeneration}
+            onSubmitUserInput={handleUserInputAnswer}
+            isStreaming={isStreaming}
+            thoughts={thoughts}
+          />
+          {activeFollowupSource ? (
+            <SegmentFollowupPanel
+              activeSegmentId={activeFollowupSegmentId}
+              messages={messages}
+              onClose={() => {
+                setActiveFollowupSourceId(null);
+                setActiveFollowupSegmentId(null);
+              }}
+              onOpenGraph={handleOpenGraph}
+              onDeleteMessage={handleDeleteMessage}
+              onOpenSegment={setActiveFollowupSegmentId}
+              onSegmentFollowup={handleSegmentFollowup}
+              onStopGeneration={handleStopGeneration}
+              sourceMessage={activeFollowupSource}
+              thoughts={thoughts}
+            />
+          ) : null}
+        </div>
 
         {error ? <p className="chat-error">{error}</p> : null}
 
@@ -547,11 +774,12 @@ export function ChatWindow() {
           input={input}
           isSending={isStreaming}
           onInputChange={setInput}
+          onStop={handleStopGeneration}
           onSubmit={handleSubmit}
         />
       </section>
 
-      {selectedGraph || isGraphLoading ? (
+      {selectedGraph || isGraphLoading || isGraphClosing ? (
         <Suspense
           fallback={
             <div className="chat-debug-workspace chat-debug-workspace--loading">
@@ -561,11 +789,139 @@ export function ChatWindow() {
         >
           <ChatGraphPanel
             graph={selectedGraph}
+            isClosing={isGraphClosing}
             isLoading={isGraphLoading}
-            onClose={() => setSelectedGraph(null)}
+            onClose={handleCloseGraph}
           />
         </Suspense>
       ) : null}
     </section>
   );
+}
+
+function upsertFollowupThread(
+  message: DraftAssistantMessage,
+  thread: NonNullable<DraftAssistantMessage["followupThreads"]>[number],
+): DraftAssistantMessage {
+  const threads = message.followupThreads ?? [];
+  const index = threads.findIndex((item) => item.segment_id === thread.segment_id);
+  if (index < 0) {
+    return { ...message, followupThreads: [...threads, thread] };
+  }
+  return {
+    ...message,
+    followupThreads: threads.map((item, itemIndex) =>
+      itemIndex === index
+        ? {
+            ...item,
+            followups: [...item.followups, ...thread.followups],
+          }
+        : item,
+    ),
+  };
+}
+
+function completeFollowup(
+  message: DraftAssistantMessage,
+  segmentId: string,
+  followupId: string,
+  answer: string,
+): DraftAssistantMessage {
+  const threads = message.followupThreads ?? [];
+  return {
+    ...message,
+    followupThreads: threads.map((thread) =>
+      thread.segment_id === segmentId
+        ? {
+            ...thread,
+            followups: thread.followups.map((followup) =>
+              followup.followup_id === followupId
+                ? {
+                    ...followup,
+                    assistant_answer: answer,
+                    status: answer.trim() ? "answered" : "failed",
+                  }
+                : followup,
+            ),
+          }
+        : thread,
+    ),
+  };
+}
+
+function createSegmentId(text: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `seg-${(hash >>> 0).toString(16)}`;
+}
+
+function compactText(text: string, maxLength: number): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized;
+}
+
+function hydrateSegmentFollowups(messages: DraftAssistantMessage[]): DraftAssistantMessage[] {
+  let nextMessages = messages.map((message) => ({ ...message }));
+  for (const message of nextMessages) {
+    if (message.role !== "user") {
+      continue;
+    }
+    const payload = parseSegmentFollowupPayload(message.content);
+    if (!payload) {
+      continue;
+    }
+    const segmentId = payload.segment_id ?? createSegmentId(payload.original_text);
+    const assistantAnswer = nextMessages.find(
+      (candidate) => candidate.role === "assistant" && candidate.parent_id === message.id,
+    );
+    nextMessages = nextMessages.map((candidate) => {
+      if (candidate.id === message.id || candidate.id === assistantAnswer?.id) {
+        return { ...candidate, ui_hidden: true };
+      }
+      if (candidate.id !== payload.source_message_id) {
+        return candidate;
+      }
+      return upsertFollowupThread(candidate, {
+        segment_id: segmentId,
+        original_text: payload.original_text,
+        position: payload.position ?? null,
+        followups: [
+          {
+            followup_id: `f-${message.id}`,
+            user_question: payload.user_question,
+            assistant_answer: assistantAnswer?.content,
+            status: assistantAnswer?.content ? "answered" : "failed",
+            timestamp: message.created_at,
+          },
+        ],
+      });
+    });
+  }
+  return nextMessages;
+}
+
+function parseSegmentFollowupPayload(content: string): SegmentFollowupRequest | null {
+  try {
+    const payload = JSON.parse(content) as Partial<SegmentFollowupRequest> & { type?: string };
+    if (
+      payload.type !== "segment_followup" ||
+      typeof payload.source_message_id !== "number" ||
+      typeof payload.original_text !== "string" ||
+      typeof payload.user_question !== "string"
+    ) {
+      return null;
+    }
+    return {
+      source_message_id: payload.source_message_id,
+      segment_id: typeof payload.segment_id === "string" ? payload.segment_id : null,
+      original_text: payload.original_text,
+      user_question: payload.user_question,
+      position: payload.position ?? null,
+    };
+  } catch {
+    return null;
+  }
 }

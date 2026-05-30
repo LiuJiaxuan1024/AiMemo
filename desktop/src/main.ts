@@ -13,17 +13,24 @@ const chatToggleButton = document.querySelector<HTMLButtonElement>("#chat-toggle
 const chatPanel = document.querySelector<HTMLFormElement>("#chat-panel");
 const chatInput = document.querySelector<HTMLTextAreaElement>("#chat-input");
 const chatSendButton = document.querySelector<HTMLButtonElement>("#chat-send");
+const voiceHoldButton = document.querySelector<HTMLButtonElement>("#voice-hold");
 const choicePanel = document.querySelector<HTMLFormElement>("#choice-panel");
 const currentWindow = getCurrentWindow();
 const AIMEMO_BACKEND_URL = import.meta.env.VITE_AIMEMO_BACKEND_URL ?? "http://127.0.0.1:8000";
 const ELF_EVENTS_URL = `${AIMEMO_BACKEND_URL}/api/elf/events`;
 const ELF_CHAT_STREAM_URL = `${AIMEMO_BACKEND_URL}/api/elf/chat/stream`;
+const ELF_VOICE_MODE_URL = `${AIMEMO_BACKEND_URL}/api/elf/voice/mode`;
+const ELF_VOICE_SPEAK_URL = `${AIMEMO_BACKEND_URL}/api/elf/voice/speak`;
+const ELF_VOICE_TRANSCRIBE_URL = `${AIMEMO_BACKEND_URL}/api/elf/voice/transcribe`;
+const RUNTIME_CONFIG_URL = `${AIMEMO_BACKEND_URL}/api/config/runtime`;
 const ELF_CHAT_RESUME_STREAM_URL = (turnId: number) =>
   `${AIMEMO_BACKEND_URL}/api/elf/chat/turns/${turnId}/resume/stream`;
 const isLinuxElfWindow = navigator.userAgent.includes("Linux");
 const ELF_WINDOW_HEIGHT = 420;
 const ELF_COMPACT_WINDOW_WIDTH = 300;
 const ELF_CHOICE_WINDOW_WIDTH = 560;
+const ELF_VOICE_REQUEST_TIMEOUT_MS = 45_000;
+const ELF_CONFIG_RETRY_MS = 1500;
 
 if (isLinuxElfWindow) {
   document.documentElement.classList.add("linux-elf-window");
@@ -42,10 +49,22 @@ let lastElfEventId = 0;
 let bubbleHideTimer: number | null = null;
 let bubbleSequenceTimer: number | null = null;
 let isElfChatRunning = false;
+let isElfSpeaking = false;
+let isElfVoiceModeEnabled = false;
+let isVoiceRecording = false;
+let mediaRecorder: MediaRecorder | null = null;
+let recordedAudioChunks: Blob[] = [];
 let activeToolCallIds = new Set<string>();
 let toolProgressCount = 0;
 let choiceCloseTimer: number | null = null;
 let elfWindowMode: "compact" | "choice" | null = null;
+let voiceQueue: QueuedVoiceBubble[] = [];
+let activeVoiceAudio: HTMLAudioElement | null = null;
+let activeVoiceUrl: string | null = null;
+let voicePlaybackGeneration = 0;
+let streamingBubbleJsonBuffer = "";
+let streamedBubbleCount = 0;
+let queuedVoiceBubbleTextKeys = new Set<string>();
 
 void setElfWindowMode("compact");
 
@@ -105,18 +124,43 @@ chatToggleButton?.addEventListener("click", () => {
 chatPanel?.addEventListener("submit", (event) => {
   event.preventDefault();
   const message = chatInput?.value.trim() ?? "";
-  if (!message || isElfChatRunning) {
+  if (!message || isElfBusy()) {
     return;
   }
   if (chatInput) {
     chatInput.value = "";
     autoResizeChatInput();
   }
-  streamElfChat(message).catch(() => {
-    setBubble("刚才没连上对话服务。");
+  streamElfChat(message, { voiceReply: isElfVoiceModeEnabled }).catch((error) => {
+    console.error("[memo-elf] chat stream failed", error);
+    setBubble(formatElfErrorBubble(error, "刚才没连上对话服务。"));
     clearBubbleAfter(4500);
   });
 });
+
+voiceHoldButton?.addEventListener("pointerdown", (event) => {
+  if (!isElfVoiceModeEnabled || isElfBusy() || isVoiceRecording) {
+    return;
+  }
+  event.preventDefault();
+  voiceHoldButton.setPointerCapture(event.pointerId);
+  startVoiceRecording().catch((error) => {
+    console.error("[memo-elf] microphone failed", error);
+    setBubble("麦克风暂时没连上，请检查浏览器/系统录音权限。");
+    clearBubbleAfter(4200);
+  });
+});
+
+voiceHoldButton?.addEventListener("pointerup", (event) => {
+  if (!isVoiceRecording) {
+    return;
+  }
+  event.preventDefault();
+  stopVoiceRecording();
+});
+
+voiceHoldButton?.addEventListener("pointercancel", stopVoiceRecording);
+voiceHoldButton?.addEventListener("lostpointercapture", stopVoiceRecording);
 
 chatInput?.addEventListener("input", () => {
   autoResizeChatInput();
@@ -141,26 +185,70 @@ window.addEventListener("pointerdown", (event) => {
   }
 });
 
-checkBackendHealth().catch(() => {
-  setBubble("后端还没连上。");
-});
-startElfEventPolling();
+void bootstrapElfDesktop();
+
+async function bootstrapElfDesktop() {
+  const enabled = await waitForElfEnabled();
+  if (enabled === false) {
+    await currentWindow.hide().catch(() => {});
+    return;
+  }
+
+  await currentWindow.show().catch(() => {});
+  checkBackendHealth().catch(() => {
+    setBubble("后端还没连上。");
+    clearBubbleAfter(3200);
+  });
+  startElfEventPolling();
+  startElfVoiceModePolling();
+}
+
+async function waitForElfEnabled(): Promise<boolean> {
+  while (true) {
+    const enabled = await fetchElfEnabled();
+    if (enabled !== null) {
+      return enabled;
+    }
+    await sleep(ELF_CONFIG_RETRY_MS);
+  }
+}
+
+async function fetchElfEnabled(): Promise<boolean | null> {
+  try {
+    const response = await fetch(RUNTIME_CONFIG_URL, { cache: "no-store" });
+    if (!response.ok) {
+      return null;
+    }
+    const payload = (await response.json()) as { elf?: { enabled?: boolean } };
+    return payload.elf?.enabled === true;
+  } catch {
+    return null;
+  }
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
 
 async function checkBackendHealth() {
   try {
     const isHealthy = await invoke<boolean>("check_backend_health");
     if (!isHealthy) {
       setBubble("后端还没准备好。");
+      clearBubbleAfter(3600);
       return;
     }
     setBubble("我在这里，点我打开 AiMemo。");
+    clearBubbleAfter(3200);
   } catch {
     setBubble("后端还没启动。");
+    clearBubbleAfter(3600);
   }
 }
 
 async function openAiMemo() {
   setBubble("我把 AiMemo 打开给你。");
+  clearBubbleAfter(2400);
   await invoke("open_aimemo");
 }
 
@@ -171,6 +259,84 @@ function setBubble(message: string) {
   }
 }
 
+class ElfClientError extends Error {
+  code: string;
+  status?: number;
+
+  constructor(code: string, message: string, status?: number) {
+    super(message);
+    this.name = "ElfClientError";
+    this.code = code;
+    this.status = status;
+  }
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = ELF_VOICE_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new ElfClientError("REQUEST_TIMEOUT", `请求超过 ${Math.round(timeoutMs / 1000)} 秒未返回。`);
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+async function responseError(response: Response, fallbackCode: string) {
+  const payload = await readErrorPayload(response);
+  const detail = payload && isRecord(payload.detail) ? (payload.detail as Record<string, unknown>) : payload;
+  const code = String((detail && detail.code) ?? fallbackCode);
+  const message = String((detail && detail.message) ?? response.statusText ?? "请求失败");
+  return new ElfClientError(code, message, response.status);
+}
+
+async function readErrorPayload(response: Response): Promise<Record<string, unknown> | null> {
+  try {
+    const text = await response.text();
+    if (!text.trim()) {
+      return null;
+    }
+    const parsed = JSON.parse(text) as unknown;
+    return isRecord(parsed) ? parsed : { message: text };
+  } catch {
+    return null;
+  }
+}
+
+function formatElfErrorBubble(error: unknown, fallback: string) {
+  if (error instanceof ElfClientError) {
+    if (error.code === "REQUEST_TIMEOUT") {
+      return `语音/对话接口超时：${error.message}`;
+    }
+    if (error.code.includes("ASR") || error.code.includes("TRANSCRIBE")) {
+      return `语音识别失败：${compactErrorMessage(error.message)}`;
+    }
+    if (error.code.includes("TTS") || error.code.includes("SPEAK") || error.code.includes("VOICE_PROFILE")) {
+      return `语音播放失败：${compactErrorMessage(error.message)}`;
+    }
+    if (error.code.includes("DASHSCOPE") || error.code.includes("VOICE")) {
+      return `语音接口失败：${compactErrorMessage(error.message)}`;
+    }
+    return `${fallback}（${error.status ?? "?"} ${error.code}）`;
+  }
+  if (error instanceof Error && error.message) {
+    return `${fallback}（${compactErrorMessage(error.message)}）`;
+  }
+  return fallback;
+}
+
+function compactErrorMessage(message: string) {
+  const normalized = message.replace(/\s+/g, " ").trim();
+  return normalized.length > 96 ? `${normalized.slice(0, 96)}...` : normalized;
+}
+
 function showChatBubble(part: ChatBubblePart, ttlMs = 5200) {
   setBubble(part.text);
   if (elf) {
@@ -179,6 +345,19 @@ function showChatBubble(part: ChatBubblePart, ttlMs = 5200) {
   }
   setElfExpression(expressionFromEmoji(part.emoji));
   clearBubbleAfter(ttlMs, { resetExpression: true });
+}
+
+function showVoiceBubble(part: ChatBubblePart) {
+  if (bubbleHideTimer !== null) {
+    window.clearTimeout(bubbleHideTimer);
+    bubbleHideTimer = null;
+  }
+  setBubble(part.text);
+  if (elf) {
+    elf.dataset.mood = moodFromEmoji(part.emoji);
+    elf.dataset.motion = motionFromEmoji(part.emoji);
+  }
+  setElfExpression(expressionFromEmoji(part.emoji));
 }
 
 function clearBubbleAfter(ttlMs = 4000, options: { resetExpression?: boolean } = {}) {
@@ -309,6 +488,117 @@ async function startElfEventPolling() {
   }, 1000);
 }
 
+async function startElfVoiceModePolling() {
+  await pollElfVoiceMode().catch(() => {
+    setElfVoiceMode(false);
+  });
+  window.setInterval(() => {
+    pollElfVoiceMode().catch(() => {
+      // 模式轮询失败时保持上一次状态，不刷屏。
+    });
+  }, 2500);
+}
+
+async function pollElfVoiceMode() {
+  const response = await fetch(ELF_VOICE_MODE_URL);
+  if (!response.ok) {
+    return;
+  }
+  const payload = (await response.json()) as { enabled?: boolean };
+  setElfVoiceMode(Boolean(payload.enabled));
+}
+
+function setElfVoiceMode(enabled: boolean) {
+  isElfVoiceModeEnabled = enabled;
+  chatPanel?.classList.toggle("voice-mode", enabled);
+  if (voiceHoldButton) {
+    voiceHoldButton.hidden = !enabled;
+    voiceHoldButton.disabled = isElfBusy() || !enabled;
+    voiceHoldButton.textContent = isVoiceRecording ? "松开发送" : "按住说话";
+  }
+}
+
+async function startVoiceRecording() {
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+    throw new Error("MediaRecorder is not available.");
+  }
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  recordedAudioChunks = [];
+  mediaRecorder = new MediaRecorder(stream);
+  mediaRecorder.ondataavailable = (event) => {
+    if (event.data.size > 0) {
+      recordedAudioChunks.push(event.data);
+    }
+  };
+  mediaRecorder.onstop = () => {
+    for (const track of stream.getTracks()) {
+      track.stop();
+    }
+    const chunks = recordedAudioChunks;
+    recordedAudioChunks = [];
+    void transcribeAndSendVoice(chunks);
+  };
+  isVoiceRecording = true;
+  voiceHoldButton?.classList.add("recording");
+  if (voiceHoldButton) {
+    voiceHoldButton.textContent = "松开发送";
+  }
+  setBubble("我在听，松开就发给我。");
+  mediaRecorder.start();
+}
+
+function stopVoiceRecording() {
+  if (!isVoiceRecording) {
+    return;
+  }
+  isVoiceRecording = false;
+  voiceHoldButton?.classList.remove("recording");
+  if (voiceHoldButton) {
+    voiceHoldButton.textContent = "正在识别...";
+  }
+  if (mediaRecorder && mediaRecorder.state !== "inactive") {
+    mediaRecorder.stop();
+  }
+}
+
+async function transcribeAndSendVoice(chunks: Blob[]) {
+  try {
+    if (!chunks.length) {
+      throw new Error("No audio recorded.");
+    }
+    const audioBlob = new Blob(chunks, { type: chunks[0]?.type || "audio/webm" });
+    const form = new FormData();
+    form.append("file", audioBlob, "elf-voice.webm");
+    const response = await fetchWithTimeout(ELF_VOICE_TRANSCRIBE_URL, {
+      body: form,
+      method: "POST",
+    });
+    if (!response.ok) {
+      throw await responseError(response, "VOICE_TRANSCRIBE_FAILED");
+    }
+    const payload = (await response.json()) as { text?: string };
+    const text = String(payload.text ?? "").trim();
+    if (!text) {
+      throw new ElfClientError("VOICE_TRANSCRIBE_EMPTY", "语音接口返回了空文本，可能是声音太短或环境噪声太大。");
+    }
+    if (chatInput) {
+      chatInput.value = text;
+      autoResizeChatInput();
+    }
+    setBubble(`我听到：${text}`);
+    await streamElfChat(text, { voiceReply: true });
+  } catch (error) {
+    console.error("[memo-elf] voice turn failed", error);
+    setBubble(formatElfErrorBubble(error, "这段语音我没听清，再按住说一次吧。"));
+    clearBubbleAfter(6200);
+  } finally {
+    mediaRecorder = null;
+    if (voiceHoldButton) {
+      voiceHoldButton.textContent = "按住说话";
+    }
+  }
+}
+
 async function pollElfEvents() {
   const response = await fetch(`${ELF_EVENTS_URL}?after_id=${lastElfEventId}&limit=20`);
   if (!response.ok) {
@@ -327,7 +617,7 @@ async function pollElfEvents() {
 }
 
 function applyElfEvent(event: ElfEvent) {
-  if (isElfChatRunning) {
+  if (isElfBusy()) {
     return;
   }
   if (event.message) {
@@ -345,13 +635,18 @@ function applyElfEvent(event: ElfEvent) {
   setElfExpression(expressionFromMood(event.mood));
 }
 
-async function streamElfChat(message: string) {
+async function streamElfChat(message: string, options: { voiceReply: boolean } = { voiceReply: false }) {
   isElfChatRunning = true;
+  isElfSpeaking = false;
   activeToolCallIds = new Set<string>();
   toolProgressCount = 0;
+  streamingBubbleJsonBuffer = "";
+  streamedBubbleCount = 0;
+  queuedVoiceBubbleTextKeys = new Set<string>();
   setChatInputEnabled(false);
   hideChatPanel();
   clearBubbleSequence();
+  clearVoicePlayback();
   showChatBubble({ text: "嗯，我听着。", emoji: "thinking" }, 2600);
 
   try {
@@ -364,27 +659,40 @@ async function streamElfChat(message: string) {
     });
 
     if (!response.ok || !response.body) {
-      throw new Error(`Elf chat failed with ${response.status}`);
+      throw await responseError(response, "ELF_CHAT_STREAM_FAILED");
     }
 
-    const result = await readElfChatStream(response);
+    const result = await readElfChatStream(response, { voiceReply: options.voiceReply });
 
     // 回答流结束后稍等片刻再切气泡，避免用户看到气泡在 token 级别闪烁。
+    const finalParts = result.bubbles.length > 0 ? result.bubbles : splitAnswerIntoBubbleParts(result.answer);
     window.setTimeout(() => {
-      playBubbleSequence(result.bubbles.length > 0 ? result.bubbles : splitAnswerIntoBubbleParts(result.answer));
       isElfChatRunning = false;
-      setChatInputEnabled(true);
-      hideChoicePanel();
+      if (!options.voiceReply) {
+        void playBubbleSequence(finalParts, { voiceReply: options.voiceReply });
+        return;
+      }
+      if (queuedVoiceBubbleTextKeys.size === 0) {
+        void playBubbleSequence(finalParts, { voiceReply: true });
+        return;
+      }
+      if (!isElfSpeaking && voiceQueue.length === 0) {
+        finishElfTurn();
+      }
     }, 650);
   } catch (error) {
     isElfChatRunning = false;
     activeToolCallIds = new Set<string>();
+    clearVoicePlayback();
     setChatInputEnabled(true);
     throw error;
   }
 }
 
-async function readElfChatStream(response: Response): Promise<ElfChatStreamResult> {
+async function readElfChatStream(
+  response: Response,
+  options: { voiceReply: boolean } = { voiceReply: false },
+): Promise<ElfChatStreamResult> {
   let answer = "";
   let bubbles: ChatBubblePart[] = [];
   const reader = response.body?.getReader();
@@ -400,6 +708,9 @@ async function readElfChatStream(response: Response): Promise<ElfChatStreamResul
     }
     if (event.event === "done" && Array.isArray(event.data.bubbles)) {
       bubbles = normalizeGraphBubbles(event.data.bubbles);
+    }
+    if (event.event === "bubble_delta" && options.voiceReply) {
+      enqueueCompleteStreamingBubbles(String(event.data.content ?? ""), { voiceReply: options.voiceReply });
     }
     if (event.event === "tool_invocation") {
       applyElfToolProgress(event.data);
@@ -446,6 +757,9 @@ async function readElfChatStream(response: Response): Promise<ElfChatStreamResul
 }
 
 function applyElfToolProgress(data: Record<string, unknown>) {
+  if (isElfSpeaking) {
+    return;
+  }
   const toolName = String(data.tool_name ?? "");
   if (!toolName) {
     return;
@@ -534,7 +848,7 @@ async function resumeElfChoice(event: ElfInterruptEvent): Promise<ElfChatStreamR
   if (!response.ok || !response.body) {
     throw new Error(`Elf chat resume failed with ${response.status}`);
   }
-  return readElfChatStream(response);
+  return readElfChatStream(response, { voiceReply: isElfVoiceModeEnabled });
 }
 
 function choiceAckText(answer: UserInputAnswer) {
@@ -868,17 +1182,38 @@ function normalizeGraphBubbles(rawBubbles: unknown[]): ChatBubblePart[] {
     .filter((part): part is ChatBubblePart => part !== null);
 }
 
-function playBubbleSequence(parts: ChatBubblePart[]) {
+async function playBubbleSequence(parts: ChatBubblePart[], options: { voiceReply: boolean } = { voiceReply: false }) {
   clearBubbleSequence();
+  stopCurrentVoicePlayback();
   if (parts.length === 0) {
     showChatBubble({ text: "我刚才有点走神了，再说一次好吗？", emoji: "confused" }, 5200);
+    finishElfTurn();
     return;
   }
 
+  if (!options.voiceReply) {
+    isElfSpeaking = false;
+    playTextBubbleSequence(parts);
+    return;
+  }
+
+  voicePlaybackGeneration += 1;
+  const generation = voicePlaybackGeneration;
+  voiceQueue = parts.map((part) => ({
+    part,
+    audioPromise: prefetchBubbleAudio(part),
+  }));
+  isElfSpeaking = true;
+  setChatInputEnabled(false);
+  await drainVoiceQueue(generation);
+}
+
+function playTextBubbleSequence(parts: ChatBubblePart[]) {
   let index = 0;
   const showNext = () => {
     const part = parts[index];
     if (!part) {
+      finishElfTurn();
       return;
     }
     const ttlMs = bubbleDurationMs(part.text);
@@ -890,6 +1225,7 @@ function playBubbleSequence(parts: ChatBubblePart[]) {
       bubbleSequenceTimer = window.setTimeout(() => {
         bubbleSequenceTimer = null;
         resetElfExpression();
+        finishElfTurn();
       }, ttlMs + 420);
     }
   };
@@ -901,6 +1237,249 @@ function clearBubbleSequence() {
     window.clearTimeout(bubbleSequenceTimer);
     bubbleSequenceTimer = null;
   }
+}
+
+function isElfBusy() {
+  return isElfChatRunning || isElfSpeaking;
+}
+
+function enqueueVoiceBubbles(parts: ChatBubblePart[], options: { voiceReply: boolean } = { voiceReply: false }) {
+  if (!options.voiceReply) {
+    return;
+  }
+  const normalizedParts = uniqueUnqueuedVoiceParts(parts);
+  if (normalizedParts.length === 0) {
+    if (!isElfSpeaking && !isElfChatRunning) {
+      finishElfTurn();
+    }
+    return;
+  }
+  voiceQueue.push(
+    ...normalizedParts.map((part) => ({
+      part,
+      audioPromise: prefetchBubbleAudio(part),
+    })),
+  );
+  if (isElfSpeaking) {
+    return;
+  }
+  isElfSpeaking = true;
+  setChatInputEnabled(false);
+  const generation = voicePlaybackGeneration;
+  void drainVoiceQueue(generation);
+}
+
+async function drainVoiceQueue(generation: number) {
+  let lastPart: ChatBubblePart | null = null;
+  while (voiceQueue.length > 0 && generation === voicePlaybackGeneration) {
+    const item = voiceQueue.shift();
+    if (!item) {
+      continue;
+    }
+    lastPart = item.part;
+    await playSingleBubble(item, generation);
+  }
+
+  if (generation !== voicePlaybackGeneration) {
+    return;
+  }
+  if (isElfChatRunning) {
+    isElfSpeaking = false;
+    return;
+  }
+  const tailDelayMs = lastPart ? Math.min(3200, Math.max(900, bubbleDurationMs(lastPart.text) * 0.35)) : 420;
+  bubbleSequenceTimer = window.setTimeout(() => {
+    bubbleSequenceTimer = null;
+    bubble?.classList.remove("visible");
+    resetElfExpression();
+    finishElfTurn();
+  }, tailDelayMs);
+}
+
+function enqueueCompleteStreamingBubbles(delta: string, options: { voiceReply: boolean } = { voiceReply: false }) {
+  if (!delta) {
+    return;
+  }
+  streamingBubbleJsonBuffer += delta;
+  const parts = parseStreamingBubbleParts(streamingBubbleJsonBuffer);
+  if (parts.length === 0) {
+    return;
+  }
+  streamedBubbleCount = parts.length;
+  enqueueVoiceBubbles(parts, options);
+}
+
+function uniqueUnqueuedVoiceParts(parts: ChatBubblePart[]) {
+  const uniqueParts: ChatBubblePart[] = [];
+  for (const part of parts) {
+    if (!part.text.trim()) {
+      continue;
+    }
+    const key = bubbleTextKey(part);
+    if (!key || queuedVoiceBubbleTextKeys.has(key)) {
+      continue;
+    }
+    queuedVoiceBubbleTextKeys.add(key);
+    uniqueParts.push(part);
+  }
+  return uniqueParts;
+}
+
+function bubbleTextKey(part: ChatBubblePart) {
+  return normalizeBubbleText(part.text);
+}
+
+function normalizeBubbleText(text: string) {
+  return text.replace(/\s+/g, "").trim();
+}
+
+function parseStreamingBubbleParts(raw: string): ChatBubblePart[] {
+  const parts: ChatBubblePart[] = [];
+  const pattern = /\{\s*"text"\s*:\s*"((?:\\.|[^"\\])*)"\s*,\s*"emoji"\s*:\s*"((?:\\.|[^"\\])*)"\s*\}/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(raw)) !== null) {
+    const text = decodeJsonString(match[1]);
+    if (!text.trim()) {
+      continue;
+    }
+    parts.push({
+      text,
+      emoji: normalizeEmoji(decodeJsonString(match[2])),
+    });
+  }
+  return parts;
+}
+
+function decodeJsonString(value: string) {
+  try {
+    return JSON.parse(`"${value}"`) as string;
+  } catch {
+    return value;
+  }
+}
+
+async function playSingleBubble(item: QueuedVoiceBubble, generation: number) {
+  const part = item.part;
+  const fallbackTtlMs = bubbleDurationMs(part.text);
+  try {
+    const audio = await item.audioPromise;
+    if (generation !== voicePlaybackGeneration) {
+      URL.revokeObjectURL(audio.url);
+      return;
+    }
+    showVoiceBubble(part);
+    await playAudioBlob(audio.url, audio.mediaType, generation);
+  } catch (error) {
+    console.error("[memo-elf] tts playback failed", error);
+    showVoiceBubble(part);
+    clearBubbleAfter(fallbackTtlMs, { resetExpression: true });
+    await waitForBubbleFallback(fallbackTtlMs, generation);
+  }
+}
+
+function prefetchBubbleAudio(part: ChatBubblePart): Promise<{ url: string; mediaType: string }> {
+  return fetchBubbleAudio(part);
+}
+
+async function fetchBubbleAudio(part: ChatBubblePart): Promise<{ url: string; mediaType: string }> {
+  const response = await fetchWithTimeout(ELF_VOICE_SPEAK_URL, {
+    body: JSON.stringify({
+      text: part.text,
+      emoji: part.emoji,
+    }),
+    headers: {
+      "Content-Type": "application/json",
+    },
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw await responseError(response, "ELF_VOICE_SPEAK_FAILED");
+  }
+  const blob = await response.blob();
+  return {
+    url: URL.createObjectURL(blob),
+    mediaType: blob.type || "audio/wav",
+  };
+}
+
+function playAudioBlob(url: string, _mediaType: string, generation: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const audio = new Audio();
+    activeVoiceAudio = audio;
+    activeVoiceUrl = url;
+    audio.preload = "auto";
+    audio.src = url;
+    const cleanup = () => {
+      audio.onended = null;
+      audio.onerror = null;
+      if (activeVoiceAudio === audio) {
+        activeVoiceAudio = null;
+      }
+      if (activeVoiceUrl === url) {
+        activeVoiceUrl = null;
+      }
+      URL.revokeObjectURL(url);
+    };
+    audio.onended = () => {
+      cleanup();
+      resolve();
+    };
+    audio.onerror = () => {
+      cleanup();
+      reject(new Error("Elf voice audio playback failed."));
+    };
+    if (generation !== voicePlaybackGeneration) {
+      cleanup();
+      resolve();
+      return;
+    }
+    audio.play().catch((error) => {
+      cleanup();
+      reject(error);
+    });
+  });
+}
+
+function waitForBubbleFallback(ttlMs: number, generation: number): Promise<void> {
+  return new Promise((resolve) => {
+    bubbleSequenceTimer = window.setTimeout(() => {
+      if (generation === voicePlaybackGeneration) {
+        bubbleSequenceTimer = null;
+      }
+      resolve();
+    }, ttlMs + 420);
+  });
+}
+
+function clearVoicePlayback() {
+  voicePlaybackGeneration += 1;
+  stopCurrentVoicePlayback();
+}
+
+function stopCurrentVoicePlayback() {
+  const pending = voiceQueue;
+  voiceQueue = [];
+  for (const item of pending) {
+    item.audioPromise.then((audio) => URL.revokeObjectURL(audio.url)).catch(() => {});
+  }
+  if (activeVoiceAudio) {
+    activeVoiceAudio.pause();
+    activeVoiceAudio.removeAttribute("src");
+    activeVoiceAudio.load();
+    activeVoiceAudio = null;
+  }
+  if (activeVoiceUrl) {
+    URL.revokeObjectURL(activeVoiceUrl);
+    activeVoiceUrl = null;
+  }
+  isElfSpeaking = false;
+}
+
+function finishElfTurn() {
+  isElfChatRunning = false;
+  isElfSpeaking = false;
+  setChatInputEnabled(true);
+  hideChoicePanel();
 }
 
 function splitAnswerIntoBubbleParts(answer: string): ChatBubblePart[] {
@@ -1232,6 +1811,9 @@ function setChatInputEnabled(enabled: boolean) {
   if (chatSendButton) {
     chatSendButton.disabled = !enabled;
   }
+  if (voiceHoldButton) {
+    voiceHoldButton.disabled = !enabled || !isElfVoiceModeEnabled;
+  }
 }
 
 function autoResizeChatInput() {
@@ -1371,4 +1953,9 @@ type ElfBubbleEmoji =
 interface ChatBubblePart {
   text: string;
   emoji: ElfBubbleEmoji;
+}
+
+interface QueuedVoiceBubble {
+  part: ChatBubblePart;
+  audioPromise: Promise<{ url: string; mediaType: string }>;
 }

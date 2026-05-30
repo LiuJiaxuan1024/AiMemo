@@ -119,3 +119,48 @@ npm run build
 cd backend
 .\.venv\Scripts\python.exe -m pytest -q
 ```
+
+## 运行时配置
+
+`config.json5` 用于保存可提交的项目级默认值，`.env` 和系统环境变量仍拥有更高优先级。
+
+当前前端和桌面精灵会通过运行时接口读取开关：
+
+```text
+GET /api/config/runtime
+```
+
+重点字段：
+
+```json5
+{
+  "elf": {
+    "enabled": true,
+  },
+  "voice": {
+    "enabled": true,
+    "asr_provider": "aliyun_dashscope",
+    "tts_provider": "aliyun_dashscope",
+    "voice_design_provider": "aliyun_dashscope",
+  },
+}
+```
+
+`elf.enabled=false` 时不加载 Web/桌面精灵，但不影响 `/app/workshop/*` 页面。
+桌面精灵启动时如果后端配置接口还没准备好，会等待并重试；只有明确读到 `false` 才保持隐藏。
+
+## 常用验证
+
+```powershell
+cd frontend
+npm run build
+```
+
+```powershell
+cd desktop
+npm run web:build
+```
+
+```powershell
+python -m pytest backend/tests/test_app_config_api.py backend/tests/test_elf_voice_api.py backend/tests/test_voice_profile_service.py -q
+```

@@ -113,37 +113,54 @@ export function NoteSidebar({
             {searchQuery ? "没有匹配的笔记" : mode === "active" ? "暂无笔记" : "最近删除为空"}
           </p>
         ) : null}
-        {notes.map((note) => (
-          <button
-            className={note.id === selectedNote?.id ? "note-item active" : "note-item"}
-            key={note.id}
-            onClick={() => onSelectNote(note.id)}
-            type="button"
-          >
-            <span>{note.title}</span>
-            <span className="note-item-badges">
-              {note.processing_status === "pending" || note.processing_status === "processing" ? (
-                <Badge tone="warning">AI 整理中</Badge>
-              ) : null}
-              {note.processing_status === "failed" ? (
-                <Badge tone="danger">AI 整理失败</Badge>
-              ) : null}
-              {note.embedding_status === "pending" || note.embedding_status === "processing" ? (
-                <Badge tone="success">建立记忆中</Badge>
-              ) : null}
-              {note.status === "deleted" ? <Badge tone="neutral">最近删除</Badge> : null}
-            </span>
-            {note.summary ? <em>{note.summary}</em> : null}
-            {note.tags.length > 0 ? (
-              <span className="note-item-tags">
-                {note.tags.slice(0, 3).map((tag) => (
-                  <small key={tag}>#{tag}</small>
-                ))}
+        {notes.map((note) => {
+          const hasBadges =
+            note.processing_status === "pending" ||
+            note.processing_status === "processing" ||
+            note.processing_status === "failed" ||
+            note.embedding_status === "pending" ||
+            note.embedding_status === "processing" ||
+            note.status === "deleted";
+
+          return (
+            <article className={note.id === selectedNote?.id ? "note-item active" : "note-item"} key={note.id}>
+              <button
+                aria-label={`打开笔记：${note.title}`}
+                className="note-item-hitbox"
+                onClick={() => onSelectNote(note.id)}
+                type="button"
+              />
+              <span className="note-item-content">
+                <span className="note-item-body">
+                  <span className="note-item-title">{note.title}</span>
+                  {hasBadges ? (
+                    <span className="note-item-badges">
+                      {note.processing_status === "pending" || note.processing_status === "processing" ? (
+                        <Badge tone="warning">AI 整理中</Badge>
+                      ) : null}
+                      {note.processing_status === "failed" ? (
+                        <Badge tone="danger">AI 整理失败</Badge>
+                      ) : null}
+                      {note.embedding_status === "pending" || note.embedding_status === "processing" ? (
+                        <Badge tone="success">建立记忆中</Badge>
+                      ) : null}
+                      {note.status === "deleted" ? <Badge tone="neutral">最近删除</Badge> : null}
+                    </span>
+                  ) : null}
+                  {note.summary ? <em className="note-item-summary">{note.summary}</em> : null}
+                  {note.tags.length > 0 ? (
+                    <span className="note-item-tags">
+                      {note.tags.slice(0, 3).map((tag) => (
+                        <small key={tag}>#{tag}</small>
+                      ))}
+                    </span>
+                  ) : null}
+                </span>
+                <span className="note-item-date">{formatNoteDate(note.updated_at)}</span>
               </span>
-            ) : null}
-            <small className="note-item-date">{formatNoteDate(note.updated_at)}</small>
-          </button>
-        ))}
+            </article>
+          );
+        })}
       </div>
     </aside>
   );

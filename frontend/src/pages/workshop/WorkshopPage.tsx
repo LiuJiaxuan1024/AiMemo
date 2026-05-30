@@ -1,4 +1,4 @@
-import { Brain, Hammer } from "lucide-react";
+import { Brain, Hammer, Volume2 } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
 
 import { PanelHeader } from "../../shared/ui";
@@ -19,6 +19,10 @@ export function WorkshopPage() {
         <NavLink to="/app/workshop/memories">
           <Brain aria-hidden="true" size={16} />
           记忆
+        </NavLink>
+        <NavLink to="/app/workshop/voice">
+          <Volume2 aria-hidden="true" size={16} />
+          语音
         </NavLink>
       </nav>
 

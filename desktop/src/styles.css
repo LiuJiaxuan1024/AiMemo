@@ -238,6 +238,10 @@ html.linux-elf-window .elf img {
   z-index: 8;
 }
 
+.chat-panel.voice-mode {
+  grid-template-columns: 1fr auto;
+}
+
 html.linux-elf-window .elf-menu,
 html.linux-elf-window .chat-panel {
   box-shadow: none;
@@ -285,6 +289,24 @@ html.linux-elf-window .chat-panel {
   font-size: 13px;
   font-weight: 650;
   padding: 9px 10px;
+}
+
+.chat-panel .voice-hold {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+  color: #1f2a44;
+  grid-column: 1 / -1;
+  touch-action: none;
+}
+
+.chat-panel .voice-hold.recording {
+  background: #fee2e2;
+  border-color: #fca5a5;
+  color: #991b1b;
+}
+
+.chat-panel .voice-hold[hidden] {
+  display: none;
 }
 
 .chat-panel button:disabled,

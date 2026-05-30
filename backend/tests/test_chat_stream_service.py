@@ -125,6 +125,99 @@ def test_stream_chat_creates_turn_and_messages_before_graph_finishes(
     assert debug_payload["nodes"]["build_l3_retrieved_memory"]["state"]["retrieval_query"] == "测试刷新恢复"
 
 
+def test_stream_chat_can_attach_turn_to_explicit_parent_message(
+    session,
+    session_factory,
+    tmp_path: Path,
+    monkeypatch,
+):
+    """片段追问这类隐藏 turn 应挂到被追问消息上，而不是会话最新消息上。"""
+
+    chat_turn_buffer.reset_for_tests()
+    conversation = create_conversation(session, ConversationCreate(title="片段追问父节点"))
+    source_user = ChatMessage(
+        conversation_id=conversation.id,
+        role="user",
+        content="第六轮问题",
+        status="completed",
+    )
+    session.add(source_user)
+    session.flush()
+    source = ChatMessage(
+        conversation_id=conversation.id,
+        role="assistant",
+        content="被追问的第六轮回答",
+        status="completed",
+        parent_id=source_user.id,
+    )
+    session.add(source)
+    session.flush()
+    later_user = ChatMessage(
+        conversation_id=conversation.id,
+        role="user",
+        content="第七轮问题",
+        status="completed",
+        parent_id=source.id,
+    )
+    session.add(later_user)
+    session.flush()
+    later = ChatMessage(
+        conversation_id=conversation.id,
+        role="assistant",
+        content="之后新建的第七轮回答",
+        status="completed",
+        parent_id=later_user.id,
+    )
+    session.add(later)
+    session.commit()
+    source_id = int(source.id or 0)
+    later_id = int(later.id or 0)
+
+    def fake_stream_memory_chat_graph(**kwargs):
+        user_message_id = int(kwargs["user_message_id"])
+        assistant_message_id = int(kwargs["assistant_message_id"])
+        yield {"event": "answer_delta", "node": "agent", "content": "片段追问回答", "metadata": {}}
+        yield {
+            "event": "done",
+            "node": "",
+            "state": {
+                "user_message_id": user_message_id,
+                "assistant_message_id": assistant_message_id,
+                "graph_checkpoint_id": "checkpoint-followup-parent",
+                "needs_retrieval": False,
+                "needs_query_rewrite": False,
+                "retrieval_query": "",
+                "retrieval_grade": "none",
+                "retrieval_grade_reason": "",
+                "retrieval_reason": "",
+                "retrieved_chunks": [],
+            },
+        }
+
+    monkeypatch.setattr(
+        "app.services.chat_service.stream_memory_chat_graph",
+        fake_stream_memory_chat_graph,
+    )
+
+    events = [
+        _parse_sse(event)
+        for event in stream_conversation_chat_events(
+            conversation.id,
+            message='{"type":"segment_followup","source_message_id":1,"original_text":"片段","user_question":"为什么？"}',
+            parent_message_id=source_id,
+            session_factory=session_factory,
+            checkpoint_path=str(tmp_path / "checkpoints.db"),
+        )
+    ]
+
+    user_message_id = events[0]["data"]["user_message"]["id"]
+    session.expire_all()
+    user = session.get(ChatMessage, user_message_id)
+    assert user is not None
+    assert user.parent_id == source_id
+    assert user.parent_id != later_id
+
+
 def test_chat_turn_graph_can_be_read_while_turn_is_running(session, session_factory):
     """运行中的 turn 也能通过 turn_id 打开 graph 调试视图。"""
 

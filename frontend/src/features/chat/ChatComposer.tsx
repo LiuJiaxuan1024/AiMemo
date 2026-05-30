@@ -1,4 +1,4 @@
-import { SendHorizontal } from "lucide-react";
+import { SendHorizontal, Square } from "lucide-react";
 import type { FormEvent } from "react";
 import TextareaAutosize from "react-textarea-autosize";
 
@@ -8,10 +8,11 @@ interface ChatComposerProps {
   input: string;
   isSending: boolean;
   onInputChange: (value: string) => void;
+  onStop?: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }
 
-export function ChatComposer({ input, isSending, onInputChange, onSubmit }: ChatComposerProps) {
+export function ChatComposer({ input, isSending, onInputChange, onStop, onSubmit }: ChatComposerProps) {
   return (
     <form className="chat-input-bar" onSubmit={onSubmit}>
       <TextareaAutosize
@@ -31,9 +32,15 @@ export function ChatComposer({ input, isSending, onInputChange, onSubmit }: Chat
         placeholder="问问你的笔记、计划、偏好，或直接闲聊..."
         value={input}
       />
-      <Button disabled={isSending || !input.trim()} size="lg" type="submit" variant="primary">
-        <SendHorizontal aria-hidden="true" size={17} />
-        {isSending ? "生成中" : "发送"}
+      <Button
+        disabled={!isSending && !input.trim()}
+        onClick={isSending ? onStop : undefined}
+        size="lg"
+        type={isSending ? "button" : "submit"}
+        variant="primary"
+      >
+        {isSending ? <Square aria-hidden="true" size={15} /> : <SendHorizontal aria-hidden="true" size={17} />}
+        {isSending ? "中断" : "发送"}
       </Button>
     </form>
   );

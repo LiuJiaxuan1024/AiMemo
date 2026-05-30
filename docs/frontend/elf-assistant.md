@@ -9,9 +9,11 @@
 当前已实现：
 
 - 桌面外置精灵窗口
+- `config.json5` 运行时开关：`elf.enabled=false` 时不加载 Web / 桌面精灵
 - 后端精灵事件中心
 - 精灵气泡消息
 - 精灵外部聊天
+- 精灵语音模式：长按说话、ASR 转文本、气泡 TTS 播放
 - 基于对话气泡的 emoji / 表情切换
 - 本地 PNG 表情切换
 - 轻量呼吸、眨眼、拖拽等 CSS 动作
@@ -23,9 +25,48 @@
 desktop/
 frontend/src/features/elf/
 backend/app/api/elf.py
+backend/app/api/app_config.py
+backend/app/api/elf_voice.py
 backend/app/services/elf_event_service.py
 backend/app/services/elf_chat_service.py
 ```
+
+## 运行时开关
+
+仓库根目录 `config.json5`：
+
+```json5
+"elf": {
+  "enabled": true,
+}
+```
+
+行为：
+
+```text
+true
+  Web 内精灵组件可以挂载，桌面精灵读取配置后显示窗口。
+
+false
+  Web 内精灵不挂载；桌面精灵明确读到 false 后保持隐藏。
+  精灵工坊页面、任务、记忆和语音工坊仍可访问。
+```
+
+前端读取：
+
+```text
+frontend/src/shared/runtimeConfig.ts
+frontend/src/features/jobs/JobDrawer.tsx
+```
+
+桌面读取：
+
+```text
+desktop/src/main.ts
+GET /api/config/runtime
+```
+
+桌面精灵不会把“后端未启动 / 配置接口暂时失败”当成关闭，而是等待并重试。
 
 ## 设计目标
 
