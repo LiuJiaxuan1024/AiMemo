@@ -1,4 +1,4 @@
-export type AppRoute = "memo" | "chat" | "workshop";
+export type AppRoute = "memo" | "chat" | "knowledge" | "workshop";
 
 export interface AppRouteItem {
   key: AppRoute;
@@ -9,6 +9,7 @@ export interface AppRouteItem {
 export const APP_ROUTES: AppRouteItem[] = [
   { key: "memo", label: "Ai 记", path: "/app/memo" },
   { key: "chat", label: "对话", path: "/app/chat" },
+  { key: "knowledge", label: "知库", path: "/app/knowledge" },
   { key: "workshop", label: "工坊", path: "/app/workshop" },
 ];
 
@@ -18,6 +19,9 @@ export function routeFromPath(pathname: string): AppRoute {
   }
   if (pathname.startsWith("/app/workshop")) {
     return "workshop";
+  }
+  if (pathname.startsWith("/app/knowledge")) {
+    return "knowledge";
   }
   return "memo";
 }

@@ -9,6 +9,7 @@ from app.api.elf import router as elf_router
 from app.api.elf_voice import router as elf_voice_router
 from app.api.health import router as health_router
 from app.api.jobs import router as jobs_router
+from app.api.knowledge import router as knowledge_router
 from app.api.memories import router as memories_router
 from app.api.notes import router as notes_router
 from app.api.search import router as search_router
@@ -40,6 +41,7 @@ def create_app() -> FastAPI:
     app.include_router(elf_router, prefix="/api")
     app.include_router(elf_voice_router, prefix="/api")
     app.include_router(notes_router, prefix="/api")
+    app.include_router(knowledge_router, prefix="/api")
     app.include_router(memories_router, prefix="/api")
     app.include_router(jobs_router, prefix="/api")
     app.include_router(search_router, prefix="/api")

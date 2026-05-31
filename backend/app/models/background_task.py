@@ -23,6 +23,9 @@ class BackgroundTask(SQLModel, table=True):
       - unknown   : 探活失败但不确定（保留位）
     """
 
+    # 详见 Note.__table_args__ 的注释。
+    __table_args__ = {"sqlite_autoincrement": True}
+
     id: int | None = Field(default=None, primary_key=True)
     task_id: str = Field(index=True, max_length=40)
     conversation_id: int | None = Field(default=None, index=True)

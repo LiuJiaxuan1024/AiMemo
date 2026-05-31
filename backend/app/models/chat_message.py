@@ -12,6 +12,9 @@ class ChatMessage(SQLModel, table=True):
     但真正展示、编辑、分支选择时仍需要依赖业务消息记录。
     """
 
+    # 详见 Note.__table_args__ 的注释。
+    __table_args__ = {"sqlite_autoincrement": True}
+
     id: int | None = Field(default=None, primary_key=True)
     conversation_id: int = Field(index=True)
     role: str = Field(index=True, max_length=24)

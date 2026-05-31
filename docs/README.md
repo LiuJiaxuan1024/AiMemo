@@ -7,14 +7,16 @@
 1. [安装与启动](./setup.md)
 2. [架构概览](./architecture/overview.md)
 3. [流程图](./architecture/flows.md)
-4. [本地任务系统](./backend/jobs.md)
-5. [Memory Chat Graph](./agent/memory-chat-graph.md)
-6. [长期记忆管理](./backend/memories.md)
-7. [Local Operator Agent](./agent/local-operator-agent.md)
-8. [前后台任务边界](./agent/background-vs-foreground.md)
-9. [前端说明](./frontend/README.md)
-10. [Memo Elf 桌面化架构](./desktop/memo-elf-desktop-architecture.md)
-11. [语音工坊第一版设计](./desktop/voice-workshop-design.md)
+4. [Memo 知库模块设计](./architecture/knowledge-base-module.md)
+5. [Memo 知库第一版工程设计](./architecture/knowledge-base-implementation-design.md)
+6. [本地任务系统](./backend/jobs.md)
+7. [Memory Chat Graph](./agent/memory-chat-graph.md)
+8. [长期记忆管理](./backend/memories.md)
+9. [Local Operator Agent](./agent/local-operator-agent.md)
+10. [前后台任务边界](./agent/background-vs-foreground.md)
+11. [前端说明](./frontend/README.md)
+12. [Memo Elf 桌面化架构](./desktop/memo-elf-desktop-architecture.md)
+13. [语音工坊第一版设计](./desktop/voice-workshop-design.md)
 
 ## 当前实现
 
@@ -22,6 +24,8 @@
 
 - [架构概览](./architecture/overview.md)
 - [流程图](./architecture/flows.md)
+- [Memo 知库模块设计](./architecture/knowledge-base-module.md)
+- [Memo 知库第一版工程设计](./architecture/knowledge-base-implementation-design.md)
 - [安装与启动](./setup.md)
 - [本地开发](./development.md)
 
@@ -80,6 +84,7 @@
 - [Search API](./api/search.md)
 - [Conversations API](./api/conversations.md)
 - [Chat API](./api/chat.md)
+- [Knowledge API](./api/knowledge.md)
 - [Memories API](./api/memories.md)
 - [Runtime Config API](./api/runtime-config.md)
 - [Voice API](./api/voice.md)

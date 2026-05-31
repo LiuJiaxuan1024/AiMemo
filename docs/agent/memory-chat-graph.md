@@ -27,12 +27,14 @@ flowchart TD
     Load --> Dispatch[dispatch_context_workers]
     Dispatch --> L4[build_l4_core_memory]
     Dispatch --> L3[build_l3_retrieved_memory]
+    Dispatch --> K3[build_l3_knowledge_context]
     Dispatch --> L2[build_l2_summary]
     Dispatch --> L1[build_l1_recent_messages]
     Dispatch --> L0[build_l0_current_input]
     Dispatch --> Window[build_current_conversation_window]
     L4 --> Merge[merge_prompt_context]
     L3 --> Merge
+    K3 --> Merge
     L2 --> Merge
     L1 --> Merge
     L0 --> Merge
@@ -76,6 +78,13 @@ build_l4_core_memory
 build_l3_retrieved_memory
   L3 内部完成 plan_l3_retrieval -> retrieve_notes -> grade_retrieval -> build layer。
   这是当前唯一可能调用检索规划 LLM 和 embedding API 的上下文 worker。
+
+build_l3_knowledge_context
+  读取当前 conversation 已挂载的知识空间，构建 L3 挂载知库上下文。
+  如果没有挂载知识空间，该节点只产出 no-scope 说明，不能全局检索。
+  如果已挂载，除非当前输入是非常明确的闲聊或客观常识问题，否则默认先在挂载范围内检索。
+  首轮结果进入 prompt_context；如果结果不足，agent 后续只能用 knowledge_search 在同一挂载范围内补检索。
+  prompt 中的 [K1]/[K2] 只用于内部定位 chunk，最终回答不要裸露输出这些编号。
 
 build_l2_summary
   读取 conversation.summary 构建对话摘要层。
@@ -196,11 +205,18 @@ retrieval_grade
 retrieval_grade_reason
 context_l4_layer
 context_l3_layer
+context_l3_knowledge_layer
 context_l2_layer
 context_conversation_window_layer
 context_l1_layer
 context_l0_layer
 prompt_context
+mounted_knowledge_spaces
+needs_knowledge_retrieval
+knowledge_retrieval_query
+knowledge_retrieval_reason
+knowledge_retrieved_chunks
+knowledge_retrieval_debug
 turn_messages
 tool_budget
 agent_decision

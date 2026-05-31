@@ -7,8 +7,10 @@ import {
   deleteMessageBranch,
   getTurnGraph,
   listActiveTurns,
+  listConversationKnowledgeMounts,
   listConversations,
   listMessages,
+  replaceConversationKnowledgeMounts,
   resumeInterruptedTurn,
   serializeSegmentFollowupMessage,
   streamChat,
@@ -16,6 +18,7 @@ import {
 } from "./chatApi";
 import { ChatComposer } from "./ChatComposer";
 import { ConversationList } from "./ConversationList";
+import { KnowledgeMountControl } from "./KnowledgeMountControl";
 import { MessageList, SegmentFollowupPanel } from "./MessageList";
 import {
   emitChatAnswerStartedElfEvent,
@@ -28,6 +31,7 @@ import { applyChatStreamEvent, streamingStore, useConversationView } from "./str
 import type {
   ChatStreamEvent,
   ChatTurnGraph,
+  ConversationKnowledgeMount,
   Conversation,
   DraftAssistantMessage,
   SegmentFollowupRequest,
@@ -43,6 +47,7 @@ export function ChatWindow() {
   const [activeConversation, setActiveConversation] = useState<Conversation | null>(null);
   const [input, setInput] = useState("");
   const [selectedGraph, setSelectedGraph] = useState<ChatTurnGraph | null>(null);
+  const [knowledgeMountsByConversation, setKnowledgeMountsByConversation] = useState<Record<number, ConversationKnowledgeMount[]>>({});
   const [isGraphLoading, setIsGraphLoading] = useState(false);
   const [isGraphClosing, setIsGraphClosing] = useState(false);
   const [activeFollowupSourceId, setActiveFollowupSourceId] = useState<number | null>(null);
@@ -54,6 +59,7 @@ export function ChatWindow() {
   const graphCloseTimerRef = useRef<number | null>(null);
 
   const activeConversationId = activeConversation?.id;
+  const activeKnowledgeMounts = activeConversationId ? knowledgeMountsByConversation[activeConversationId] ?? [] : [];
   const view = useConversationView(activeConversationId);
   const messages = view?.messages ?? [];
   const nodeStatuses = view?.nodeStatuses ?? {};
@@ -122,6 +128,18 @@ export function ChatWindow() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [scrollAnchor, shouldAutoScroll]);
 
+  useEffect(() => {
+    if (!activeConversationId) {
+      return;
+    }
+    refreshKnowledgeMounts(activeConversationId).catch((currentError: unknown) => {
+      setError(
+        activeConversationId,
+        currentError instanceof Error ? currentError.message : "读取知库挂载失败",
+      );
+    });
+  }, [activeConversationId, setError]);
+
   const updateAutoScrollIntent = useCallback(() => {
     const list = messageListRef.current;
     if (!list) {
@@ -169,6 +187,8 @@ export function ChatWindow() {
   async function ensureConversationLoaded(conversation: Conversation): Promise<void> {
     const existing = streamingStore.peek(conversation.id);
     if (existing?.loaded) {
+      await refreshKnowledgeMounts(conversation.id);
+      await attachActiveTurns(conversation.id);
       return;
     }
     streamingStore.patch(conversation.id, { loaded: true });
@@ -179,7 +199,16 @@ export function ChatWindow() {
       error: "",
     }));
     // 一并探测是否有正在跑的 turn；有就接上 SSE 重放 + 增量。
+    await refreshKnowledgeMounts(conversation.id);
     await attachActiveTurns(conversation.id);
+  }
+
+  async function refreshKnowledgeMounts(conversationId: number): Promise<void> {
+    const mounts = await listConversationKnowledgeMounts(conversationId);
+    setKnowledgeMountsByConversation((current) => ({
+      ...current,
+      [conversationId]: mounts,
+    }));
   }
 
   async function attachActiveTurns(conversationId: number): Promise<void> {
@@ -295,6 +324,7 @@ export function ChatWindow() {
     setActiveConversation(conversation);
     setShouldAutoScroll(true);
     streamingStore.patch(conversation.id, { loaded: true });
+    await refreshKnowledgeMounts(conversation.id);
     setSelectedGraph(null);
   }
 
@@ -713,6 +743,17 @@ export function ChatWindow() {
     setActiveFollowupSegmentId(segmentId ?? null);
   }
 
+  async function handleSaveKnowledgeMounts(spaceIds: number[]) {
+    if (!activeConversationId) {
+      return;
+    }
+    const mounts = await replaceConversationKnowledgeMounts(activeConversationId, spaceIds);
+    setKnowledgeMountsByConversation((current) => ({
+      ...current,
+      [activeConversationId]: mounts,
+    }));
+  }
+
   return (
     <section className="chat-shell">
       <ConversationList
@@ -729,7 +770,15 @@ export function ChatWindow() {
             <h2>{activeConversation?.title ?? "新对话"}</h2>
             <p>{activeConversation?.langgraph_thread_id ?? "准备连接 Memory Chat Graph"}</p>
           </div>
-          {runningNodes.length > 0 ? <span>Graph: {runningNodes.join(", ")}</span> : null}
+          <div className="chat-main-header__tools">
+            <KnowledgeMountControl
+              conversationId={activeConversationId}
+              disabled={isStreaming}
+              mounts={activeKnowledgeMounts}
+              onSave={handleSaveKnowledgeMounts}
+            />
+            {runningNodes.length > 0 ? <span>Graph: {runningNodes.join(", ")}</span> : null}
+          </div>
         </header>
 
         <div className={`chat-dialogue-zone ${activeFollowupSource ? "chat-dialogue-zone--with-followups" : ""}`}>

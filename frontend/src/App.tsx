@@ -10,6 +10,9 @@ const MemoPage = lazy(() =>
 const ChatPage = lazy(() =>
   import("./pages/chat/ChatPage").then((module) => ({ default: module.ChatPage })),
 );
+const KnowledgePage = lazy(() =>
+  import("./pages/knowledge/KnowledgePage").then((module) => ({ default: module.KnowledgePage })),
+);
 const WorkshopPage = lazy(() =>
   import("./pages/workshop/WorkshopPage").then((module) => ({ default: module.WorkshopPage })),
 );
@@ -41,6 +44,7 @@ const router = createBrowserRouter([
       { index: true, element: <Navigate to="/app/memo" replace /> },
       { path: "memo", element: withPageSuspense(<MemoPage />) },
       { path: "chat", element: withPageSuspense(<ChatPage />) },
+      { path: "knowledge", element: withPageSuspense(<KnowledgePage />) },
       {
         path: "workshop",
         element: withPageSuspense(<WorkshopPage />),

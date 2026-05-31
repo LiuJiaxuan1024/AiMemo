@@ -27,6 +27,35 @@ class RetrievedChunkPayload(TypedDict):
     score: float
 
 
+class MountedKnowledgeSpacePayload(TypedDict):
+    """当前会话显式挂载的知识空间。"""
+
+    space_id: int
+    space_name: str
+    space_icon: str | None
+    ready_document_count: int
+    document_count: int
+
+
+class KnowledgeRetrievedChunkPayload(TypedDict):
+    """会话挂载知库检索命中的 chunk 信息。"""
+
+    chunk_id: int
+    space_id: int
+    space_name: str
+    document_id: int
+    document_title: str
+    text: str
+    score: float
+    score_source: str
+    heading_path: list[str]
+    page_number: int | None
+    source_uri: str | None
+    original_filename: str | None
+    retrieval_phase: str
+    distance: float | None
+
+
 class ElfBubblePayload(TypedDict):
     """外置精灵气泡回复片段。
 
@@ -163,11 +192,18 @@ class MemoryChatGraphState(TypedDict, total=False):
     retrieval_grade_reason: str
     # L3 内部调试信息：记录 planner/retriever/grade/layer 的耗时，方便定位慢点。
     retrieval_debug: dict
+    mounted_knowledge_spaces: list[MountedKnowledgeSpacePayload]
+    needs_knowledge_retrieval: bool
+    knowledge_retrieval_query: str
+    knowledge_retrieval_reason: str
+    knowledge_retrieved_chunks: list[KnowledgeRetrievedChunkPayload]
+    knowledge_retrieval_debug: dict
     context_conversation_window_layer: ContextLayerPayload
     context_l0_layer: ContextLayerPayload
     context_l1_layer: ContextLayerPayload
     context_l2_layer: ContextLayerPayload
     context_l3_layer: ContextLayerPayload
+    context_l3_knowledge_layer: ContextLayerPayload
     context_l4_layer: ContextLayerPayload
     prompt_context: str
     # 本轮 graph 内部消息流。每轮 load_turn_state 会重新初始化，避免跨轮重复累加。

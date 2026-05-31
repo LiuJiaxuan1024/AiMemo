@@ -12,6 +12,9 @@ class AgentOperation(SQLModel, table=True):
     为后续人工审批、失败恢复和前端调试面板预留。
     """
 
+    # 详见 Note.__table_args__ 的注释。
+    __table_args__ = {"sqlite_autoincrement": True}
+
     id: int | None = Field(default=None, primary_key=True)
     conversation_id: int | None = Field(default=None, index=True)
     turn_id: int | None = Field(default=None, index=True)

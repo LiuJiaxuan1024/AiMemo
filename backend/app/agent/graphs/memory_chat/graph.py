@@ -16,6 +16,7 @@ from app.agent.graphs.memory_chat.nodes import (
     build_l0_current_input_node,
     build_l1_recent_messages_node,
     build_l2_summary_node,
+    build_l3_knowledge_context_node,
     build_l3_retrieved_memory_node,
     build_l4_core_memory_node,
     build_agent_node,
@@ -41,6 +42,7 @@ SessionFactory = Callable[[], AbstractContextManager[Session]]
 CONTEXT_WORKER_NODES = [
     "build_l4_core_memory",
     "build_l3_retrieved_memory",
+    "build_l3_knowledge_context",
     "build_l2_summary",
     "build_l1_recent_messages",
     "build_l0_current_input",
@@ -76,6 +78,7 @@ def build_memory_chat_graph(
         if selected_retriever
         else build_l3_retrieved_memory_node(session_factory, planner=planner),
     )
+    graph.add_node("build_l3_knowledge_context", build_l3_knowledge_context_node(session_factory))
     graph.add_node("build_l2_summary", build_l2_summary_node())
     graph.add_node("build_l1_recent_messages", build_l1_recent_messages_node())
     graph.add_node("build_l0_current_input", build_l0_current_input_node())
@@ -103,6 +106,7 @@ def build_memory_chat_graph(
     )
     graph.add_edge("build_l4_core_memory", "merge_prompt_context")
     graph.add_edge("build_l3_retrieved_memory", "merge_prompt_context")
+    graph.add_edge("build_l3_knowledge_context", "merge_prompt_context")
     graph.add_edge("build_l2_summary", "merge_prompt_context")
     graph.add_edge("build_l1_recent_messages", "merge_prompt_context")
     graph.add_edge("build_l0_current_input", "merge_prompt_context")
@@ -137,16 +141,19 @@ def run_memory_chat_graph(
     assistant_message_id: int | None = None,
     parent_message_id: int | None = None,
     answer_mode: str = "text",
+    langgraph_thread_id: str | None = None,
 ) -> MemoryChatGraphState:
     """执行一轮记忆对话。
 
-    thread_id 固定为 conversation:{conversation_id}。同一会话的多轮 graph 执行会共享
+    thread_id 优先用调用方传入的 ``langgraph_thread_id``（即 conversation 行的
+    ``langgraph_thread_id`` 字段）；为空时降级到旧格式 ``conversation:{id}``，仅用于
+    早期未带 uuid 后缀的历史数据兼容。同一会话的多轮 graph 执行会共享
     LangGraph checkpoint 历史，但每轮输入会覆盖 user_message 等派生字段。
     """
 
     checkpoint_file = Path(checkpoint_path)
     checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
-    thread_id = f"conversation:{conversation_id}"
+    thread_id = langgraph_thread_id or f"conversation:{conversation_id}"
 
     with get_sqlite_checkpointer(str(checkpoint_file)) as checkpointer:
         app = build_memory_chat_graph(
@@ -201,6 +208,7 @@ def stream_memory_chat_graph(
     parent_message_id: int | None = None,
     answer_mode: str = "text",
     resume_payload: dict | None = None,
+    langgraph_thread_id: str | None = None,
 ):
     """以 LangGraph 原生流执行一轮记忆对话。
 
@@ -214,7 +222,7 @@ def stream_memory_chat_graph(
 
     checkpoint_file = Path(checkpoint_path)
     checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
-    thread_id = f"conversation:{conversation_id}"
+    thread_id = langgraph_thread_id or f"conversation:{conversation_id}"
 
     with get_sqlite_checkpointer(str(checkpoint_file)) as checkpointer:
         app = build_memory_chat_graph(

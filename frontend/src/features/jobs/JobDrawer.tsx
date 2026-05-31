@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Brain, Hammer, Pin, PinOff, Sparkles } from "lucide-react";
 
 import { ElfAssistant } from "../elf/ElfAssistant";
@@ -7,7 +7,7 @@ import { countActiveJobs, countFailedJobs } from "../elf/elfState";
 import { MemoryPanel } from "../memories/MemoryPanel";
 import { Button, EmptyState, PanelHeader, SegmentedTabs } from "../../shared/ui";
 import { getRuntimeConfig } from "../../shared/runtimeConfig";
-import { getJobGraph, listJobs } from "./jobsApi";
+import { deleteJob, getJobGraph, listJobs, retryJob } from "./jobsApi";
 import { JobDetail } from "./JobDetail";
 import { JobList } from "./JobList";
 import type { Job } from "./types";
@@ -19,9 +19,11 @@ const JobGraphView = lazy(() =>
 );
 
 export function JobDrawer() {
+  const queryClient = useQueryClient();
   const [isOpen, setIsOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<DrawerTab>("jobs");
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
+  const [actionError, setActionError] = useState("");
 
   const jobsQuery = useQuery({
     queryKey: ["jobs"],
@@ -53,6 +55,27 @@ export function JobDrawer() {
     refetchInterval: selectedJob && ACTIVE_STATUSES.has(selectedJob.status) ? 3000 : false,
   });
 
+  const retryMutation = useMutation({
+    mutationFn: retryJob,
+    onSuccess: async (job) => {
+      setSelectedJob(job);
+      setActionError("");
+      await queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      await queryClient.invalidateQueries({ queryKey: ["jobs", job.id, "graph"] });
+    },
+    onError: (caught) => setActionError(errorMessage(caught, "重试任务失败")),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: deleteJob,
+    onSuccess: async (_value, jobId) => {
+      setSelectedJob((current) => (current?.id === jobId ? null : current));
+      setActionError("");
+      await queryClient.invalidateQueries({ queryKey: ["jobs"] });
+    },
+    onError: (caught) => setActionError(errorMessage(caught, "删除任务失败")),
+  });
+
   useEffect(() => {
     if (jobs.length === 0) {
       setSelectedJob(null);
@@ -68,8 +91,24 @@ export function JobDrawer() {
     const latestSelected = jobs.find((job) => job.id === selectedJob.id);
     if (latestSelected && latestSelected !== selectedJob) {
       setSelectedJob(latestSelected);
+      return;
+    }
+    if (!latestSelected) {
+      setSelectedJob(jobs[0] ?? null);
     }
   }, [jobs, selectedJob]);
+
+  function handleRetry(job: Job) {
+    retryMutation.mutate(job.id);
+  }
+
+  function handleDelete(job: Job) {
+    const confirmed = window.confirm(`确认删除任务 #${job.id} 吗？`);
+    if (!confirmed) {
+      return;
+    }
+    deleteMutation.mutate(job.id);
+  }
 
   return (
     <>
@@ -117,6 +156,7 @@ export function JobDrawer() {
             {graphQuery.error instanceof Error ? graphQuery.error.message : "读取流程图失败"}
           </div>
         ) : null}
+        {actionError ? <div className="job-drawer-error">{actionError}</div> : null}
 
         <SegmentedTabs
           ariaLabel="精灵工坊视图"
@@ -132,7 +172,13 @@ export function JobDrawer() {
           <div className="job-drawer-content">
             <JobList jobs={jobs} selectedJobId={selectedJob?.id ?? null} onSelect={setSelectedJob} />
             <div className="job-inspector">
-              <JobDetail job={selectedJob} />
+              <JobDetail
+                isDeleting={deleteMutation.isPending}
+                isRetrying={retryMutation.isPending}
+                job={selectedJob}
+                onDelete={handleDelete}
+                onRetry={handleRetry}
+              />
               <Suspense fallback={<EmptyState>正在加载 graph 渲染器...</EmptyState>}>
                 <JobGraphView graph={graphQuery.data ?? null} isLoading={graphQuery.isFetching} />
               </Suspense>
@@ -145,4 +191,11 @@ export function JobDrawer() {
     </aside>
     </>
   );
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return fallback;
 }

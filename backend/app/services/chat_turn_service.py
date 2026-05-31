@@ -29,6 +29,7 @@ MEMORY_CHAT_NODE_ORDER = [
     "dispatch_context_workers",
     "build_l4_core_memory",
     "build_l3_retrieved_memory",
+    "build_l3_knowledge_context",
     "build_l2_summary",
     "build_l1_recent_messages",
     "build_l0_current_input",

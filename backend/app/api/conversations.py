@@ -9,6 +9,10 @@ from app.schemas.conversation import (
     ConversationListItem,
     ConversationRead,
 )
+from app.schemas.knowledge import (
+    ConversationKnowledgeMountRead,
+    ConversationKnowledgeMountReplace,
+)
 from app.services.conversation_service import (
     append_message,
     create_conversation,
@@ -17,6 +21,12 @@ from app.services.conversation_service import (
     get_conversation,
     list_conversations,
     list_messages,
+)
+from app.services.knowledge_mount_service import (
+    add_conversation_knowledge_mount,
+    delete_conversation_knowledge_mount,
+    list_conversation_knowledge_mounts,
+    replace_conversation_knowledge_mounts,
 )
 
 
@@ -51,6 +61,41 @@ def list_messages_api(
     session: Session = Depends(get_session),
 ) -> list[ChatMessageRead]:
     return list_messages(session, conversation_id)
+
+
+@router.get("/{conversation_id}/knowledge-mounts", response_model=list[ConversationKnowledgeMountRead])
+def list_conversation_knowledge_mounts_api(
+    conversation_id: int,
+    session: Session = Depends(get_session),
+) -> list[ConversationKnowledgeMountRead]:
+    return list_conversation_knowledge_mounts(session, conversation_id)
+
+
+@router.put("/{conversation_id}/knowledge-mounts", response_model=list[ConversationKnowledgeMountRead])
+def replace_conversation_knowledge_mounts_api(
+    conversation_id: int,
+    payload: ConversationKnowledgeMountReplace,
+    session: Session = Depends(get_session),
+) -> list[ConversationKnowledgeMountRead]:
+    return replace_conversation_knowledge_mounts(session, conversation_id, payload.space_ids)
+
+
+@router.post("/{conversation_id}/knowledge-mounts/{space_id}", response_model=ConversationKnowledgeMountRead)
+def add_conversation_knowledge_mount_api(
+    conversation_id: int,
+    space_id: int,
+    session: Session = Depends(get_session),
+) -> ConversationKnowledgeMountRead:
+    return add_conversation_knowledge_mount(session, conversation_id, space_id)
+
+
+@router.delete("/{conversation_id}/knowledge-mounts/{space_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_conversation_knowledge_mount_api(
+    conversation_id: int,
+    space_id: int,
+    session: Session = Depends(get_session),
+) -> None:
+    delete_conversation_knowledge_mount(session, conversation_id, space_id)
 
 
 @router.post(

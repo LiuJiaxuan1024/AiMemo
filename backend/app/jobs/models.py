@@ -12,6 +12,7 @@ class JobStatus(StrEnum):
 class JobType(StrEnum):
     NOTE_METADATA = "note_metadata"
     NOTE_EMBEDDING = "note_embedding"
+    KNOWLEDGE_INGEST = "knowledge_ingest"
     CONVERSATION_SUMMARY = "conversation_summary"
     CONVERSATION_MEMORY = "conversation_memory"
     CONVERSATION_TITLE = "conversation_title"
@@ -20,6 +21,7 @@ class JobType(StrEnum):
 class GraphName(StrEnum):
     NOTE_METADATA = "note_metadata_graph"
     NOTE_EMBEDDING = "note_embedding_graph"
+    KNOWLEDGE_INGEST = "knowledge_ingest_graph"
     CONVERSATION_SUMMARY = "conversation_summary_graph"
     CONVERSATION_MEMORY = "conversation_memory_graph"
     CONVERSATION_TITLE = "conversation_title_graph"

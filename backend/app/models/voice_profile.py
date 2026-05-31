@@ -9,6 +9,8 @@ class VoiceProfile(SQLModel, table=True):
     """A reusable remote voice profile for Memo Elf speech playback."""
 
     __tablename__ = "voice_profiles"
+    # 详见 Note.__table_args__ 的注释。
+    __table_args__ = {"sqlite_autoincrement": True}
 
     id: int | None = Field(default=None, primary_key=True)
     name: str = Field(default="", index=True, max_length=120)

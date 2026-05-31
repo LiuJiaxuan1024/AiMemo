@@ -6,6 +6,9 @@ from app.models.note import utc_now
 
 
 class NoteChunk(SQLModel, table=True):
+    # 详见 Note.__table_args__ 的注释。
+    __table_args__ = {"sqlite_autoincrement": True}
+
     id: int | None = Field(default=None, primary_key=True)
     note_id: int = Field(index=True)
     chunk_index: int = Field(index=True)

@@ -16,7 +16,9 @@ from app.services.note_service import enqueue_note_embedding_job, enqueue_note_m
 from app.models.chat_message import ChatMessage
 from app.models.conversation import Conversation
 from app.models.job import Job
+from app.models.knowledge import KnowledgeDocument, KnowledgeSpace
 from app.models.note import Note
+from app.services.knowledge_document_service import enqueue_knowledge_ingest_job
 
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,7 @@ SessionFactory = Callable[[], AbstractContextManager[Session]]
 class ReconcileResult:
     metadata_jobs_created: int = 0
     embedding_jobs_created: int = 0
+    knowledge_ingest_jobs_created: int = 0
     summary_jobs_created: int = 0
     memory_jobs_created: int = 0
 
@@ -36,6 +39,7 @@ class ReconcileResult:
         return (
             self.metadata_jobs_created
             + self.embedding_jobs_created
+            + self.knowledge_ingest_jobs_created
             + self.summary_jobs_created
             + self.memory_jobs_created
         )
@@ -50,12 +54,14 @@ def reconcile_missing_jobs(session: Session) -> ReconcileResult:
 
     metadata_count = _enqueue_note_metadata_jobs(session)
     embedding_count = _enqueue_note_embedding_jobs(session)
+    knowledge_ingest_count = _enqueue_knowledge_ingest_jobs(session)
     summary_count = _enqueue_conversation_summary_jobs(session)
     memory_count = _enqueue_conversation_memory_jobs(session)
     session.commit()
     return ReconcileResult(
         metadata_jobs_created=metadata_count,
         embedding_jobs_created=embedding_count,
+        knowledge_ingest_jobs_created=knowledge_ingest_count,
         summary_jobs_created=summary_count,
         memory_jobs_created=memory_count,
     )
@@ -92,6 +98,25 @@ def _enqueue_note_embedding_jobs(session: Session) -> int:
         if _has_active_note_job(session, JobType.NOTE_EMBEDDING.value, note):
             continue
         job = enqueue_note_embedding_job(session, note)
+        if job.id is not None:
+            created += 1
+    return created
+
+
+def _enqueue_knowledge_ingest_jobs(session: Session) -> int:
+    documents = session.exec(
+        select(KnowledgeDocument)
+        .join(KnowledgeSpace, KnowledgeSpace.id == KnowledgeDocument.space_id)
+        .where(KnowledgeSpace.status == "active")
+        .where(col(KnowledgeDocument.status).in_(["pending", "parsing", "chunking", "embedding", "indexing"]))
+    ).all()
+    created = 0
+    for document in documents:
+        if document.id is None:
+            continue
+        if _has_active_job(session, _knowledge_ingest_dedupe_key(document)):
+            continue
+        job = enqueue_knowledge_ingest_job(session, document)
         if job.id is not None:
             created += 1
     return created
@@ -172,6 +197,10 @@ def _has_active_note_job(session: Session, job_type: str, note: Note) -> bool:
     current_key = f"{job_type}:note:{note.id}:content:{note.content_hash}"
     legacy_key = f"{job_type}:note:{note.id}"
     return _has_active_job(session, current_key) or _has_active_job(session, legacy_key)
+
+
+def _knowledge_ingest_dedupe_key(document: KnowledgeDocument) -> str:
+    return f"{JobType.KNOWLEDGE_INGEST.value}:document:{document.id}:content:{document.content_hash}"
 
 
 class JobReconciler:

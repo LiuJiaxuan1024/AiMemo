@@ -27,7 +27,13 @@ def test_create_conversation_assigns_langgraph_thread_id(session):
 
     assert conversation.title == "记忆问答"
     assert conversation.status == "active"
-    assert conversation.langgraph_thread_id == f"conversation:{conversation.id}"
+    # 形如 "conversation:{id}:{8hex}"。后 8 位随机后缀防止 SQLite 删除后整型 id 被复用，
+    # 让新会话误读到旧 LangGraph checkpoint（thread_id 不一致 → 旧 checkpoint 找不到）。
+    prefix = f"conversation:{conversation.id}:"
+    assert conversation.langgraph_thread_id.startswith(prefix)
+    suffix = conversation.langgraph_thread_id[len(prefix):]
+    assert len(suffix) == 8
+    assert all(c in "0123456789abcdef" for c in suffix)
 
 
 def test_append_message_links_to_latest_message_by_default(session):
@@ -292,6 +298,48 @@ def test_delete_conversation_raises_404_for_missing_id(session):
     with pytest.raises(HTTPException) as exc_info:
         delete_conversation(session, 404)
     assert exc_info.value.status_code == 404
+
+
+def test_delete_conversation_discards_chat_turn_buffer(session):
+    """删除对话必须清掉 in-memory chat_turn_buffer。
+
+    SQLite INTEGER PRIMARY KEY 不带 AUTOINCREMENT 会复用最大 id；如果不清 buffer，
+    新会话首条消息会被旧 buffer 的 SSE 事件覆盖（"问题/答案被替换成上一次"的 bug）。
+    """
+    from app.services import chat_turn_buffer
+
+    chat_turn_buffer.reset_for_tests()
+
+    conversation = create_conversation(session, ConversationCreate(title="待删除"))
+    user = append_message(
+        session,
+        conversation.id,
+        ChatMessageCreate(role="user", content="问题"),
+    )
+    assistant = append_message(
+        session,
+        conversation.id,
+        ChatMessageCreate(role="assistant", content="回答"),
+    )
+    turn = ChatTurn(
+        conversation_id=conversation.id,
+        thread_id=conversation.langgraph_thread_id,
+        user_message_id=user.id,
+        assistant_message_id=assistant.id,
+    )
+    session.add(turn)
+    session.commit()
+    session.refresh(turn)
+
+    # 模拟跑过一轮：buffer 里有旧 turn 事件。
+    buf = chat_turn_buffer.get_or_create(turn.id)
+    buf.append("event: turn\ndata: {\"q\": \"旧问题\"}\n\n")
+    assert chat_turn_buffer.get(turn.id) is not None
+
+    delete_conversation(session, conversation.id)
+
+    # 删除后 buffer 必须被丢弃，新会话即便拿到同样的 turn_id 也不会读到旧事件。
+    assert chat_turn_buffer.get(turn.id) is None
 
 
 def test_delete_message_branch_removes_turn_descendants_and_memories(session):

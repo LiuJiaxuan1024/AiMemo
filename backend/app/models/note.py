@@ -8,6 +8,11 @@ def utc_now() -> datetime:
 
 
 class Note(SQLModel, table=True):
+    # sqlite_autoincrement=True 让 SQLite 输出 INTEGER PRIMARY KEY AUTOINCREMENT，
+    # 确保 id 严格单调递增、删除最大 id 后**不复用**——避免
+    # in-memory cache（如 chat_turn_buffer）与前端 store 按整型 id 索引时的脏数据复用。
+    __table_args__ = {"sqlite_autoincrement": True}
+
     id: int | None = Field(default=None, primary_key=True)
     title: str = Field(default="", index=True, max_length=200)
     title_source: str = Field(default="fallback", index=True, max_length=24)

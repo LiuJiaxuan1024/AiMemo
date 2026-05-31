@@ -1,0 +1,145 @@
+from pathlib import Path
+
+from langgraph.checkpoint.sqlite import SqliteSaver
+from sqlmodel import select
+
+from app.agent.graphs.knowledge_ingest.graph import build_knowledge_ingest_graph, run_knowledge_ingest_graph
+from app.core.config import settings
+from app.jobs.models import GraphName, JobType
+from app.jobs.queue import enqueue_job
+from app.models.knowledge import KnowledgeChunk, KnowledgeDocument, KnowledgeSpace
+from app.rag.vector_store import connect_vector_store, ensure_knowledge_vector_store
+
+
+def test_knowledge_ingest_graph_writes_chunks_and_vectors(
+    session,
+    session_factory,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from app.services import knowledge_document_service
+
+    monkeypatch.setattr(settings, "database_url", f"sqlite:///{tmp_path / 'test.db'}")
+    monkeypatch.setattr(settings, "embedding_dimensions", 4)
+    monkeypatch.setattr(knowledge_document_service, "KNOWLEDGE_DATA_ROOT", tmp_path / "knowledge")
+    ensure_knowledge_vector_store()
+
+    document = _make_document(session, tmp_path, "guide.md", "# 标题\n\n第一段。\n\n第二段。")
+    job = enqueue_job(
+        session,
+        job_type=JobType.KNOWLEDGE_INGEST.value,
+        graph_name=GraphName.KNOWLEDGE_INGEST.value,
+        payload={"document_id": document.id, "content_hash": document.content_hash},
+    )
+    session.commit()
+    session.refresh(job)
+
+    def fake_embeddings(texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0, 0.0, float(index)] for index, _ in enumerate(texts)]
+
+    run_knowledge_ingest_graph(
+        job,
+        session_factory=session_factory,
+        checkpoint_path=str(tmp_path / "checkpoints.db"),
+        embedding_generator=fake_embeddings,
+    )
+
+    session.refresh(document)
+    chunks = session.exec(select(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id)).all()
+    assert document.status == "ready"
+    assert document.chunk_count == len(chunks)
+    assert len(chunks) >= 1
+    assert all(chunk.embedding_status == "completed" for chunk in chunks)
+    assert chunks[0].heading_path is not None
+
+    with connect_vector_store() as connection:
+        rows = connection.execute("select rowid from vec_knowledge_chunks").fetchall()
+    assert rows == [(chunk.id,) for chunk in chunks]
+
+
+def test_knowledge_ingest_graph_resumes_after_generate_without_reembedding(
+    session,
+    session_factory,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from app.services import knowledge_document_service
+
+    monkeypatch.setattr(settings, "database_url", f"sqlite:///{tmp_path / 'test.db'}")
+    monkeypatch.setattr(settings, "embedding_dimensions", 4)
+    monkeypatch.setattr(knowledge_document_service, "KNOWLEDGE_DATA_ROOT", tmp_path / "knowledge")
+    ensure_knowledge_vector_store()
+
+    document = _make_document(session, tmp_path, "resume.txt", "恢复测试内容。")
+    job = enqueue_job(
+        session,
+        job_type=JobType.KNOWLEDGE_INGEST.value,
+        graph_name=GraphName.KNOWLEDGE_INGEST.value,
+        payload={"document_id": document.id, "content_hash": document.content_hash},
+    )
+    session.commit()
+    session.refresh(job)
+
+    calls: list[list[str]] = []
+
+    def fake_embeddings(texts: list[str]) -> list[list[float]]:
+        calls.append(texts)
+        return [[0.0, 1.0, 0.0, 0.0] for _ in texts]
+
+    checkpoint_path = tmp_path / "checkpoints.db"
+    run_knowledge_ingest_graph(
+        job,
+        session_factory=session_factory,
+        checkpoint_path=str(checkpoint_path),
+        embedding_generator=fake_embeddings,
+        interrupt_after=["generate_embeddings"],
+    )
+
+    with SqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:
+        graph = build_knowledge_ingest_graph(
+            session_factory=session_factory,
+            embedding_generator=fake_embeddings,
+        ).compile(checkpointer=checkpointer)
+        snapshot = graph.get_state({"configurable": {"thread_id": job.thread_id}})
+        assert snapshot.next == ("write_vector_index",)
+
+    run_knowledge_ingest_graph(
+        job,
+        session_factory=session_factory,
+        checkpoint_path=str(checkpoint_path),
+        embedding_generator=fake_embeddings,
+    )
+
+    session.refresh(document)
+    assert len(calls) == 1
+    assert document.status == "ready"
+
+
+def _make_document(session, tmp_path: Path, filename: str, content: str) -> KnowledgeDocument:
+    from app.services import knowledge_document_service
+
+    space = KnowledgeSpace(name="测试知库")
+    session.add(space)
+    session.flush()
+    assert space.id is not None
+    document = KnowledgeDocument(
+        space_id=space.id,
+        title=Path(filename).stem,
+        source_type="file",
+        original_filename=filename,
+        storage_path=f"files/{space.id}/1/original-{filename}",
+        content_hash=f"hash-{filename}",
+        parser=Path(filename).suffix.lstrip("."),
+        status="pending",
+    )
+    session.add(document)
+    session.flush()
+    assert document.id is not None
+    document.storage_path = f"files/{space.id}/{document.id}/original-{filename}"
+    file_path = knowledge_document_service.KNOWLEDGE_DATA_ROOT / document.storage_path
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(content, encoding="utf-8")
+    session.add(document)
+    session.commit()
+    session.refresh(document)
+    return document

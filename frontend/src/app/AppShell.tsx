@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Bot, MessageSquareText, NotebookText, Wrench } from "lucide-react";
+import { Bot, LibraryBig, MessageSquareText, NotebookText, Wrench } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 import { APP_ROUTES, isActiveRoute, type AppRoute } from "./routes";
@@ -8,6 +8,7 @@ import { BackgroundTasksDrawer } from "../features/background_tasks/BackgroundTa
 const ROUTE_ICONS: Record<AppRoute, ReactNode> = {
   memo: <NotebookText aria-hidden="true" size={17} />,
   chat: <MessageSquareText aria-hidden="true" size={17} />,
+  knowledge: <LibraryBig aria-hidden="true" size={17} />,
   workshop: <Wrench aria-hidden="true" size={17} />,
 };
 

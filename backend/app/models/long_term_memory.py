@@ -12,6 +12,9 @@ class LongTermMemory(SQLModel, table=True):
     后续如果要支持长期记忆检索，可以为该表增加 embedding job。
     """
 
+    # 详见 Note.__table_args__ 的注释。
+    __table_args__ = {"sqlite_autoincrement": True}
+
     id: int | None = Field(default=None, primary_key=True)
     level: int = Field(default=4, index=True)
     category: str = Field(default="fact", index=True, max_length=40)

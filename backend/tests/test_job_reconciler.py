@@ -4,6 +4,7 @@ from app.jobs.models import GraphName, JobStatus, JobType
 from app.jobs.queue import enqueue_job
 from app.jobs.reconciler import JobReconciler, reconcile_missing_jobs
 from app.models.job import Job
+from app.models.knowledge import KnowledgeDocument, KnowledgeSpace
 from app.models.note import Note
 
 
@@ -105,3 +106,27 @@ def test_job_reconciler_run_once_uses_same_rules(session_factory):
     assert result.embedding_jobs_created == 1
     assert len(jobs) == 1
     assert jobs[0].type == JobType.NOTE_EMBEDDING.value
+
+
+def test_reconcile_enqueues_missing_knowledge_ingest_jobs(session):
+    space = KnowledgeSpace(name="知识空间")
+    session.add(space)
+    session.flush()
+    document = KnowledgeDocument(
+        space_id=space.id,
+        title="文档",
+        source_type="file",
+        storage_path="files/1/1/original.md",
+        content_hash="abc",
+        parser="markdown",
+        status="pending",
+    )
+    session.add(document)
+    session.commit()
+
+    result = reconcile_missing_jobs(session)
+
+    jobs = session.exec(select(Job).where(Job.type == JobType.KNOWLEDGE_INGEST.value)).all()
+    assert result.knowledge_ingest_jobs_created == 1
+    assert len(jobs) == 1
+    assert jobs[0].graph_name == GraphName.KNOWLEDGE_INGEST.value

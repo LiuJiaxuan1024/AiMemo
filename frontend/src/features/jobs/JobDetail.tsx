@@ -3,6 +3,10 @@ import type { Job } from "./types";
 
 interface JobDetailProps {
   job: Job | null;
+  isDeleting?: boolean;
+  isRetrying?: boolean;
+  onDelete?: (job: Job) => void;
+  onRetry?: (job: Job) => void;
 }
 
 function formatDate(value: string | null): string {
@@ -18,13 +22,30 @@ function formatDate(value: string | null): string {
   }).format(new Date(value));
 }
 
-export function JobDetail({ job }: JobDetailProps) {
+export function JobDetail({ job, isDeleting = false, isRetrying = false, onDelete, onRetry }: JobDetailProps) {
   if (!job) {
     return <EmptyState>选择一个任务看看精灵在忙什么</EmptyState>;
   }
 
+  const canRetry = job.status === "failed" || job.status === "canceled";
+  const canDelete = job.status !== "pending" && job.status !== "running";
+
   return (
     <section className="job-detail">
+      {canRetry || canDelete ? (
+        <div className="job-detail-actions">
+          {canRetry ? (
+            <button disabled={isRetrying} onClick={() => onRetry?.(job)} type="button">
+              重试
+            </button>
+          ) : null}
+          {canDelete ? (
+            <button className="danger" disabled={isDeleting} onClick={() => onDelete?.(job)} type="button">
+              删除
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       <div className="job-detail-grid">
         <span>ID</span>
         <strong>#{job.id}</strong>

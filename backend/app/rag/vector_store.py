@@ -8,6 +8,8 @@ from app.core.timing import elapsed_ms, emit_timing, now_counter
 
 
 VECTOR_TABLE_NAME = "vec_note_chunks"
+KNOWLEDGE_VECTOR_TABLE_NAME = "vec_knowledge_chunks"
+SQLITE_BUSY_TIMEOUT_MS = 30_000
 
 
 def get_sqlite_database_path() -> Path:
@@ -33,17 +35,69 @@ def ensure_vector_store() -> None:
         connection.commit()
 
 
-def upsert_chunk_embedding(chunk_id: int, embedding: list[float]) -> None:
-    _validate_embedding(embedding)
+def ensure_knowledge_vector_store() -> None:
+    """Ensure the knowledge chunk vector table exists."""
+
     with connect_vector_store() as connection:
-        # sqlite-vec 虚拟表没有业务层 upsert 语义，先删后插最直观；
-        # rowid 固定为 chunk_id，保证业务表和向量表一一对应。
-        connection.execute(f"DELETE FROM {VECTOR_TABLE_NAME} WHERE rowid = ?", (chunk_id,))
         connection.execute(
-            f"INSERT INTO {VECTOR_TABLE_NAME}(rowid, embedding) VALUES (?, ?)",
-            (chunk_id, serialize_float32(embedding)),
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS {KNOWLEDGE_VECTOR_TABLE_NAME} "
+            f"USING vec0(embedding float[{settings.embedding_dimensions}])"
         )
         connection.commit()
+
+
+def upsert_chunk_embedding(chunk_id: int, embedding: list[float]) -> None:
+    upsert_chunk_embeddings([(chunk_id, embedding)])
+
+
+def upsert_chunk_embeddings(items: list[tuple[int, list[float]]]) -> None:
+    if not items:
+        return
+    for _, embedding in items:
+        _validate_embedding(embedding)
+    ensure_vector_store()
+    with connect_vector_store() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.executemany(
+                f"DELETE FROM {VECTOR_TABLE_NAME} WHERE rowid = ?",
+                [(chunk_id,) for chunk_id, _ in items],
+            )
+            connection.executemany(
+                f"INSERT INTO {VECTOR_TABLE_NAME}(rowid, embedding) VALUES (?, ?)",
+                [(chunk_id, serialize_float32(embedding)) for chunk_id, embedding in items],
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+
+def upsert_knowledge_chunk_embeddings(items: list[tuple[int, list[float]]]) -> None:
+    if not items:
+        return
+    for _, embedding in items:
+        _validate_embedding(embedding)
+    ensure_knowledge_vector_store()
+    with connect_vector_store() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.executemany(
+                f"DELETE FROM {KNOWLEDGE_VECTOR_TABLE_NAME} WHERE rowid = ?",
+                [(chunk_id,) for chunk_id, _ in items],
+            )
+            connection.executemany(
+                f"INSERT INTO {KNOWLEDGE_VECTOR_TABLE_NAME}(rowid, embedding) VALUES (?, ?)",
+                [(chunk_id, serialize_float32(embedding)) for chunk_id, embedding in items],
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+
+def upsert_knowledge_chunk_embedding(chunk_id: int, embedding: list[float]) -> None:
+    upsert_knowledge_chunk_embeddings([(chunk_id, embedding)])
 
 
 def delete_note_chunk_embeddings(chunk_ids: list[int]) -> None:
@@ -59,6 +113,18 @@ def delete_note_chunk_embeddings(chunk_ids: list[int]) -> None:
     with connect_vector_store() as connection:
         connection.executemany(
             f"DELETE FROM {VECTOR_TABLE_NAME} WHERE rowid = ?",
+            [(chunk_id,) for chunk_id in chunk_ids],
+        )
+        connection.commit()
+
+
+def delete_knowledge_chunk_embeddings(chunk_ids: list[int]) -> None:
+    if not chunk_ids:
+        return
+    ensure_knowledge_vector_store()
+    with connect_vector_store() as connection:
+        connection.executemany(
+            f"DELETE FROM {KNOWLEDGE_VECTOR_TABLE_NAME} WHERE rowid = ?",
             [(chunk_id,) for chunk_id in chunk_ids],
         )
         connection.commit()
@@ -112,6 +178,24 @@ def search_chunk_embeddings(query_embedding: list[float], *, limit: int) -> list
     return result
 
 
+def search_knowledge_chunk_embeddings(query_embedding: list[float], *, limit: int) -> list[tuple[int, float]]:
+    """Return nearest knowledge chunk ids and distances from vec_knowledge_chunks."""
+
+    _validate_embedding(query_embedding)
+    if limit <= 0:
+        return []
+    ensure_knowledge_vector_store()
+    with connect_vector_store() as connection:
+        serialized_embedding = serialize_float32(query_embedding)
+        rows = connection.execute(
+            f"SELECT rowid, distance FROM {KNOWLEDGE_VECTOR_TABLE_NAME} "
+            "WHERE embedding MATCH ? AND k = ? "
+            "ORDER BY distance",
+            (serialized_embedding, limit),
+        ).fetchall()
+    return [(int(row[0]), float(row[1])) for row in rows]
+
+
 def connect_vector_store():
     """创建已加载 sqlite-vec 扩展的 sqlite3 连接。
 
@@ -120,7 +204,10 @@ def connect_vector_store():
 
     database_path = get_sqlite_database_path()
     database_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(database_path)
+    connection = sqlite3.connect(database_path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
+    connection.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+    _enable_wal_if_possible(connection)
+    connection.execute("PRAGMA synchronous = NORMAL")
     connection.enable_load_extension(True)
     connection.load_extension(str(_sqlite_vec_extension_path()))
     connection.enable_load_extension(False)
@@ -139,6 +226,15 @@ def _validate_embedding(embedding: list[float]) -> None:
             f"Embedding dimension mismatch: expected {settings.embedding_dimensions}, "
             f"got {len(embedding)}."
         )
+
+
+def _enable_wal_if_possible(connection: sqlite3.Connection) -> None:
+    try:
+        connection.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.OperationalError:
+        # WAL is an optimization here. If another process is holding a lock,
+        # keep the connection usable and let busy_timeout handle real writes.
+        pass
 
 
 def _sqlite_vec_extension_path() -> Path:

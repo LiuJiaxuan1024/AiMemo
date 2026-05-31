@@ -117,6 +117,26 @@ def get(turn_id: int) -> TurnBuffer | None:
         return _BUFFERS.get(turn_id)
 
 
+def discard(turn_id: int) -> bool:
+    """立刻丢弃指定 turn 的 buffer，先 mark_done 唤醒在 wait 的 subscriber。
+
+    专为"删除对话"场景设计：SQLite INTEGER PRIMARY KEY 不带 AUTOINCREMENT，删除
+    最大 id 行后下一个 INSERT 会复用同一个 id；如果不清理 buffer，新 turn 会拿到
+    旧 buffer 里的事件（含旧 user/assistant 消息），用户会看到"问题被替换成上一次
+    的问题"。
+
+    返回是否真的删除了一个 buffer，便于调试日志。
+    """
+
+    with _BUFFERS_LOCK:
+        buf = _BUFFERS.pop(turn_id, None)
+    if buf is None:
+        return False
+    # 唤醒可能还卡在 cond.wait 的 subscriber，让它们走到 done 分支后退出。
+    buf.mark_done()
+    return True
+
+
 def cleanup_expired(*, now: float | None = None) -> int:
     """删除 done 且超过 retention 的 buffer，返回回收数量。
 

@@ -6,6 +6,9 @@ from app.models.note import utc_now
 
 
 class Job(SQLModel, table=True):
+    # 详见 Note.__table_args__ 的注释。
+    __table_args__ = {"sqlite_autoincrement": True}
+
     id: int | None = Field(default=None, primary_key=True)
     type: str = Field(index=True, max_length=80)
     graph_name: str | None = Field(default=None, index=True, max_length=120)

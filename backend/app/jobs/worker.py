@@ -176,6 +176,8 @@ def _job_completed_message(job_type: str) -> str:
         return "我整理好了这条笔记的标题和标签。"
     if job_type == "note_embedding":
         return "这条笔记已经进入记忆库了。"
+    if job_type == "knowledge_ingest":
+        return "知库文档已经整理好了。"
     if job_type == "conversation_summary":
         return "我更新了这段对话的摘要。"
     if job_type == "conversation_memory":

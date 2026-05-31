@@ -16,7 +16,7 @@ from app.models.note import Note
 from app.models.note_chunk import NoteChunk
 from app.rag.chunking import split_text
 from app.rag.hashing import content_hash
-from app.rag.vector_store import delete_note_chunk_embeddings, ensure_vector_store, upsert_chunk_embedding
+from app.rag.vector_store import delete_note_chunk_embeddings, upsert_chunk_embeddings
 
 
 SessionFactory = Callable[[], AbstractContextManager[Session]]
@@ -146,11 +146,15 @@ def build_write_vector_index_node(session_factory: SessionFactory):
         if len(stored_chunks) != len(embeddings):
             raise ValueError("Stored chunks and embeddings length mismatch.")
 
-        ensure_vector_store()
+        vector_items = [
+            (int(chunk["id"]), embedding)
+            for chunk, embedding in zip(stored_chunks, embeddings, strict=True)
+        ]
+        upsert_chunk_embeddings(vector_items)
+
         with session_factory() as session:
-            for chunk, embedding in zip(stored_chunks, embeddings, strict=True):
+            for chunk in stored_chunks:
                 chunk_id = int(chunk["id"])
-                upsert_chunk_embedding(chunk_id, embedding)
                 note_chunk = session.get(NoteChunk, chunk_id)
                 if note_chunk:
                     note_chunk.embedding_status = "completed"

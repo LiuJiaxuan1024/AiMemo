@@ -1,0 +1,1 @@
+"""Knowledge ingest graph."""

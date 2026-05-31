@@ -20,14 +20,17 @@ from app.agent.graphs.memory_chat.nodes import _run_agent_tool_action
 from app.agent.graphs.memory_chat.nodes import _normalize_user_input_resume
 from app.agent.graphs.memory_chat.nodes import build_load_turn_state_node
 from app.agent.graphs.memory_chat.nodes import default_retrieval_planner
+from app.agent.graphs.memory_chat.nodes import _should_retrieve_mounted_knowledge
 from app.agent.graphs.memory_chat.nodes import _build_model_messages
 from app.agent.graphs.memory_chat.nodes import _parse_elf_bubble_parts
 from app.agent.graphs.memory_chat.nodes import build_merge_prompt_context_node
+from app.agent.graphs.memory_chat.nodes import build_l3_knowledge_context_node
 from app.agent.graphs.memory_chat.nodes import _tool_observations_to_context
 from app.agent.graphs.memory_chat.nodes import build_observe_tool_result_node
 from app.agent.graphs.memory_chat.nodes import build_plan_task_node
 from app.agent.graphs.memory_chat.nodes import build_verify_goal_node
 from app.models.chat_message import ChatMessage
+from app.models.knowledge import ConversationKnowledgeMount, KnowledgeChunk, KnowledgeDocument, KnowledgeSpace
 from app.models.long_term_memory import LongTermMemory
 from app.models.conversation import Conversation
 from app.rag.hashing import content_hash
@@ -199,6 +202,7 @@ def test_graph_input_resumes_same_turn_checkpoint(session_factory, tmp_path: Pat
             answer_mode="text",
             user_message_id=11,
             assistant_message_id=12,
+            parent_message_id=None,
         )
 
     assert graph_input is None
@@ -234,6 +238,7 @@ def test_graph_input_expires_stale_checkpoint_for_new_message(session_factory, t
             answer_mode="text",
             user_message_id=31,
             assistant_message_id=32,
+            parent_message_id=None,
         )
         expired = app.get_state(config)
 
@@ -251,6 +256,7 @@ def test_memory_chat_graph_main_flow_is_flat_context_worker_graph(session_factor
     assert "load_turn_state" in mermaid
     assert "dispatch_context_workers" in mermaid
     assert "build_l3_retrieved_memory" in mermaid
+    assert "build_l3_knowledge_context" in mermaid
     assert "build_current_conversation_window" in mermaid
     assert "plan_task" in mermaid
     assert "agent" in mermaid
@@ -269,6 +275,263 @@ def test_memory_chat_graph_main_flow_is_flat_context_worker_graph(session_factor
     assert "plan_retrieval" not in mermaid
     assert "retrieve_notes" not in mermaid
     assert "grade_retrieval" not in mermaid
+
+
+def test_l3_knowledge_context_requires_conversation_mount(session, session_factory):
+    conversation = create_conversation(session, ConversationCreate(title="未挂载知库"))
+
+    update = build_l3_knowledge_context_node(session_factory)(
+        {
+            "conversation_id": conversation.id,
+            "user_message": "根据文档总结一下项目架构",
+        }
+    )
+
+    assert update["mounted_knowledge_spaces"] == []
+    assert update["needs_knowledge_retrieval"] is False
+    assert update["knowledge_retrieved_chunks"] == []
+    assert "未挂载知识空间" in update["context_l3_knowledge_layer"]["content"]
+    assert "不能搜索或引用全局知识库" in update["context_l3_knowledge_layer"]["content"]
+
+
+def test_should_retrieve_mounted_knowledge_defaults_to_search():
+    mounted_spaces = [{"space_id": 1, "space_name": "C++ 迁移资料", "space_icon": "library"}]
+
+    needs_retrieval, reason = _should_retrieve_mounted_knowledge(
+        "帮我讲一下跳表在这个项目里适合怎么用",
+        mounted_spaces,
+    )
+
+    assert needs_retrieval is True
+    assert "默认先检索" in reason
+
+
+def test_should_retrieve_mounted_knowledge_skips_only_clear_casual_or_common_fact():
+    mounted_spaces = [{"space_id": 1, "space_name": "C++ 迁移资料", "space_icon": "library"}]
+
+    casual_result = _should_retrieve_mounted_knowledge("晚上好", mounted_spaces)
+    fact_result = _should_retrieve_mounted_knowledge("1+1 等于几？", mounted_spaces)
+    no_mount_result = _should_retrieve_mounted_knowledge("根据资料总结一下", [])
+
+    assert casual_result[0] is False
+    assert "明确闲聊或客观常识" in casual_result[1]
+    assert fact_result[0] is False
+    assert "明确闲聊或客观常识" in fact_result[1]
+    assert no_mount_result[0] is False
+    assert "未挂载知识空间" in no_mount_result[1]
+
+
+def test_l3_knowledge_context_searches_only_mounted_spaces(session, session_factory, monkeypatch):
+    conversation = create_conversation(session, ConversationCreate(title="挂载知库"))
+    mounted_space = KnowledgeSpace(name="C++ 迁移资料", description="mounted")
+    other_space = KnowledgeSpace(name="未挂载资料", description="not mounted")
+    session.add(mounted_space)
+    session.add(other_space)
+    session.commit()
+    session.refresh(mounted_space)
+    session.refresh(other_space)
+    session.add(ConversationKnowledgeMount(conversation_id=conversation.id, space_id=mounted_space.id))
+    mounted_doc = KnowledgeDocument(
+        space_id=mounted_space.id,
+        title="Zenoh 迁移方案",
+        content_hash="mounted-doc",
+        status="ready",
+    )
+    other_doc = KnowledgeDocument(
+        space_id=other_space.id,
+        title="不应被检索的方案",
+        content_hash="other-doc",
+        status="ready",
+    )
+    session.add(mounted_doc)
+    session.add(other_doc)
+    session.commit()
+    session.refresh(mounted_doc)
+    session.refresh(other_doc)
+    mounted_chunk = KnowledgeChunk(
+        space_id=mounted_space.id,
+        document_id=mounted_doc.id,
+        chunk_index=0,
+        text="Zenoh 迁移需要先抽象传输层，再替换发现机制。",
+        content_hash="chunk-mounted",
+        embedding_status="completed",
+    )
+    other_chunk = KnowledgeChunk(
+        space_id=other_space.id,
+        document_id=other_doc.id,
+        chunk_index=0,
+        text="这段未挂载内容不能进入结果。",
+        content_hash="chunk-other",
+        embedding_status="completed",
+    )
+    session.add(mounted_chunk)
+    session.add(other_chunk)
+    session.commit()
+
+    monkeypatch.setattr(
+        "app.services.knowledge_search_service.search_knowledge_chunk_embeddings",
+        lambda embedding, limit=12: [(mounted_chunk.id, 0.1), (other_chunk.id, 0.01)],
+    )
+    from app.services.knowledge_search_service import search_mounted_knowledge as real_search_mounted_knowledge
+
+    def fake_search_mounted_knowledge(current_session, *, conversation_id, query, top_k=5, mode="hybrid"):
+        return real_search_mounted_knowledge(
+            current_session,
+            conversation_id=conversation_id,
+            query=query,
+            top_k=top_k,
+            mode=mode,
+            embedding_generator=lambda texts: [[0.1, 0.2, 0.3] for _ in texts],
+        )
+
+    monkeypatch.setattr(
+        "app.agent.graphs.memory_chat.nodes.search_mounted_knowledge",
+        fake_search_mounted_knowledge,
+    )
+
+    update = build_l3_knowledge_context_node(session_factory)(
+        {
+            "conversation_id": conversation.id,
+            "user_message": "根据文档总结 Zenoh 迁移方案",
+        }
+    )
+
+    assert update["needs_knowledge_retrieval"] is True
+    assert update["knowledge_retrieved_chunks"]
+    assert update["knowledge_retrieved_chunks"][0]["space_id"] == mounted_space.id
+    assert "Zenoh 迁移需要先抽象传输层" in update["context_l3_knowledge_layer"]["content"]
+    assert "这段未挂载内容" not in update["context_l3_knowledge_layer"]["content"]
+
+
+def test_knowledge_search_tool_respects_mount_scope(session, session_factory, monkeypatch):
+    conversation = create_conversation(session, ConversationCreate(title="工具检索知库"))
+    space = KnowledgeSpace(name="工具资料", description="")
+    session.add(space)
+    session.commit()
+    session.refresh(space)
+    document = KnowledgeDocument(
+        space_id=space.id,
+        title="工具文档",
+        content_hash="tool-doc",
+        status="ready",
+    )
+    session.add(document)
+    session.commit()
+    session.refresh(document)
+    chunk = KnowledgeChunk(
+        space_id=space.id,
+        document_id=document.id,
+        chunk_index=0,
+        text="knowledge_search 只能搜索当前会话挂载的知识空间。",
+        content_hash="tool-chunk",
+        embedding_status="completed",
+    )
+    session.add(chunk)
+    session.commit()
+
+    no_mount_update = _run_agent_tool_action(
+        {"conversation_id": conversation.id, "tool_observations": [], "turn_messages": [], "thought_events": []},
+        action={
+            "tool_call_id": "ks-no-mount",
+            "tool_name": "knowledge_search",
+            "arguments": {"query": "knowledge_search"},
+        },
+        session_factory=session_factory,
+        allowed_tool_names={"knowledge_search"},
+    )
+    assert no_mount_update["tool_observations"][0]["ok"] is False
+    assert no_mount_update["tool_observations"][0]["error_code"] == "NEED_KNOWLEDGE_MOUNT"
+
+    session.add(ConversationKnowledgeMount(conversation_id=conversation.id, space_id=space.id))
+    session.commit()
+    monkeypatch.setattr(
+        "app.services.knowledge_search_service.search_knowledge_chunk_embeddings",
+        lambda embedding, limit=12: [(chunk.id, 0.1)],
+    )
+    from app.services.knowledge_search_service import search_mounted_knowledge as real_search_mounted_knowledge
+
+    def fake_search_mounted_knowledge(current_session, *, conversation_id, query, top_k=5, mode="hybrid"):
+        return real_search_mounted_knowledge(
+            current_session,
+            conversation_id=conversation_id,
+            query=query,
+            top_k=top_k,
+            mode=mode,
+            embedding_generator=lambda texts: [[0.1, 0.2, 0.3] for _ in texts],
+        )
+
+    monkeypatch.setattr(
+        "app.agent.graphs.memory_chat.nodes.search_mounted_knowledge",
+        fake_search_mounted_knowledge,
+    )
+
+    update = _run_agent_tool_action(
+        {"conversation_id": conversation.id, "tool_observations": [], "turn_messages": [], "thought_events": []},
+        action={
+            "tool_call_id": "ks-mounted",
+            "tool_name": "knowledge_search",
+            "arguments": {"query": "knowledge_search"},
+        },
+        session_factory=session_factory,
+        allowed_tool_names={"knowledge_search"},
+    )
+
+    observation = update["tool_observations"][0]
+    assert observation["ok"] is True
+    assert observation["data"]["results"][0]["space_id"] == space.id
+    assert "knowledge_search 只能搜索" in update["turn_messages"][0]["content"]
+
+
+def test_tools_node_preserves_knowledge_search_arguments(session_factory, monkeypatch):
+    captured_actions: list[dict] = []
+
+    def fake_run(state, *, action, session_factory, allowed_tool_names, step_index=None):  # noqa: ARG001
+        captured_actions.append(action)
+        obs = {
+            "tool_call_id": action["tool_call_id"],
+            "tool_name": action["tool_name"],
+            "arguments": action.get("arguments") or {},
+            "ok": True,
+            "data": {"results": []},
+            "error_code": "",
+            "message": "ok",
+            "blocked": False,
+        }
+        return {
+            "tool_observations": [*state.get("tool_observations", []), obs],
+            "turn_messages": list(state.get("turn_messages") or []),
+            "thought_events": list(state.get("thought_events") or []),
+        }
+
+    monkeypatch.setattr(
+        "app.agent.graphs.memory_chat.nodes._run_agent_tool_action",
+        fake_run,
+    )
+
+    build_tools_node(session_factory)(
+        {
+            "agent_decision": {
+                "type": "tool_call",
+                "tool_calls": [
+                    {
+                        "id": "ks-args",
+                        "name": "knowledge_search",
+                        "args": {"query": "Zenoh 迁移", "top_k": 7, "mode": "keyword"},
+                    }
+                ],
+            },
+            "tool_observations": [],
+            "turn_messages": [],
+            "thought_events": [],
+            "prompt_context": "",
+        }
+    )
+
+    assert captured_actions[0]["arguments"] == {
+        "query": "Zenoh 迁移",
+        "top_k": 7,
+        "mode": "keyword",
+    }
 
 
 def test_react_agent_routes_option_followup_to_tools(monkeypatch, session_factory):

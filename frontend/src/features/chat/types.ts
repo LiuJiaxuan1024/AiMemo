@@ -21,6 +21,19 @@ export interface Conversation {
   updated_at: string;
 }
 
+export interface ConversationKnowledgeMount {
+  id: number;
+  conversation_id: number;
+  space_id: number;
+  space_name: string;
+  space_icon: string | null;
+  ready_document_count: number;
+  document_count: number;
+  created_by: string;
+  scope_note: string | null;
+  created_at: string;
+}
+
 export interface ChatMessage {
   id: number;
   conversation_id: number;

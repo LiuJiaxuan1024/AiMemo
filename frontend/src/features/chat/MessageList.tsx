@@ -1,5 +1,5 @@
 import { Check, GitBranch, Maximize2, MessageCircleQuestion, MoreHorizontal, Send, Square, Trash2, X } from "lucide-react";
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
 import { createPortal } from "react-dom";
 
 import { Button, EmptyState } from "../../shared/ui";
@@ -680,16 +680,32 @@ function SegmentFollowupAnswer({
   onOpenGraph?: (message: DraftAssistantMessage) => void;
 }) {
   if (turn.assistantMessage) {
+    // 与主聊天保持一致：assistantMessage 已经存在但还没有任何可见内容时（segments
+    // 全空、thoughts 还没到、content 还为空），显示 Thinking 动画告诉用户 agent
+    // 正在思考——否则放大窗口和片段侧栏看上去就像“agent 没动”。
+    const followupMessage = turn.assistantMessage;
+    const isStreaming = followupMessage.isStreaming === true;
+    const effectiveThoughts = isStreaming
+      ? thoughts
+      : followupMessage.thoughts ?? [];
+    const hasVisibleWork = hasVisibleAssistantWork(
+      followupMessage.segments ?? [],
+      effectiveThoughts,
+      followupMessage.content,
+    );
+    const isWarmingUp = isStreaming && !hasVisibleWork;
     return (
       <div className="segment-followup-turn__assistant">
+        {isWarmingUp ? <TypingIndicator compact /> : null}
         <AssistantMessageBody
-          message={turn.assistantMessage}
-          thoughts={turn.assistantMessage.isStreaming ? thoughts : turn.assistantMessage.thoughts}
+          message={followupMessage}
+          thoughts={effectiveThoughts}
+          isWarmingUp={isWarmingUp}
         />
-        {showGraph && turn.assistantMessage.turn_id ? (
+        {showGraph && followupMessage.turn_id ? (
           <Button
             aria-label="查看这轮追问 graph"
-            onClick={() => onOpenGraph?.(turn.assistantMessage!)}
+            onClick={() => onOpenGraph?.(followupMessage)}
             size="icon"
             title="查看这轮追问 graph"
           >
@@ -800,6 +816,54 @@ function SegmentFollowupModal({
     message: DraftAssistantMessage;
   } | null>(null);
 
+  // 与主聊天一致的自动下滑：流式追加内容时 sticky 在底部；用户主动上滑超过 96px
+  // 后停止跟随，新提一轮 followup 重新启用。bodyRef 负责监听滚动距离，endRef 是
+  // 滚动目标哨兵。
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const endRef = useRef<HTMLDivElement | null>(null);
+  const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
+
+  const scrollAnchor = useMemo(() => {
+    const lastTurn = thread.turns[thread.turns.length - 1];
+    if (!lastTurn) {
+      return `${thread.turns.length}:empty`;
+    }
+    const msg = lastTurn.assistantMessage;
+    if (!msg) {
+      return `${thread.turns.length}:pending:${thoughts.length}`;
+    }
+    const segLen = (msg.segments ?? []).reduce(
+      (sum, segment) => sum + segment.text.length + segment.tools.length,
+      0,
+    );
+    return `${thread.turns.length}:${msg.id}:${msg.content.length}:${segLen}:${thoughts.length}`;
+  }, [thread.turns, thoughts.length]);
+
+  useEffect(() => {
+    if (!shouldAutoScroll) {
+      return;
+    }
+    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [scrollAnchor, shouldAutoScroll]);
+
+  // 用户在窗口里新提一轮追问时，turn count 增加；此时不论之前是否上滑，都应回到底部。
+  const prevTurnCountRef = useRef(thread.turns.length);
+  useEffect(() => {
+    if (thread.turns.length > prevTurnCountRef.current) {
+      setShouldAutoScroll(true);
+    }
+    prevTurnCountRef.current = thread.turns.length;
+  }, [thread.turns.length]);
+
+  const handleBodyScroll = () => {
+    const el = bodyRef.current;
+    if (!el) {
+      return;
+    }
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setShouldAutoScroll(distance < 96);
+  };
+
   useEffect(() => {
     if (!turnMenu) {
       return;
@@ -839,7 +903,7 @@ function SegmentFollowupModal({
           <span>片段</span>
           <q>{thread.originalText}</q>
         </div>
-        <div className="segment-followup-modal__body">
+        <div className="segment-followup-modal__body" ref={bodyRef} onScroll={handleBodyScroll}>
           <div className="segment-followup-modal__turns">
             {thread.turns.map((turn, index) => (
               <section
@@ -885,6 +949,7 @@ function SegmentFollowupModal({
               </section>
             ))}
           </div>
+          <div ref={endRef} />
         </div>
         <SegmentFollowupContinueComposer
           disabled={thread.status === "pending"}
@@ -1281,9 +1346,9 @@ function UserInputInterruptCard({
         ) : null}
       </div>
       <div className="chat-interrupt-card__submit">
-        <Button disabled={disabled || !canSubmit} onClick={handleFinalSubmit} size="sm" type="button" variant="primary">
-          <Check aria-hidden="true" size={15} />
-          Submit
+        <Button disabled={disabled || !canSubmit} onClick={handleFinalSubmit} size="md" type="button" variant="primary">
+          <Check aria-hidden="true" size={16} />
+          {canSubmit ? "确认提交" : "请选择一项"}
         </Button>
       </div>
     </div>

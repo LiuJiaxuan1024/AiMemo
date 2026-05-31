@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 
 from fastapi import HTTPException, status
 from sqlmodel import Session, desc, select
@@ -34,7 +35,10 @@ def create_conversation(session: Session, payload: ConversationCreate) -> Conver
       payload: 创建请求，当前只包含可选标题。
 
     返回：
-      ConversationRead。创建后会立即写入 langgraph_thread_id，格式为 conversation:{id}。
+      ConversationRead。创建后会立即写入 langgraph_thread_id，格式为
+      conversation:{id}:{8hex}。后 8 位 hex 随机后缀解决"SQLite 删除后 id 复用 →
+      LangGraph checkpoint 被新会话误继承"的问题：删除旧会话 + 新建会话即便
+      拿到同一个整型 id，thread_id 也不同，不会读到旧 checkpoint。
     """
 
     title = payload.title.strip() or "新对话"
@@ -43,7 +47,9 @@ def create_conversation(session: Session, payload: ConversationCreate) -> Conver
     session.flush()
     if conversation.id is None:
         raise RuntimeError("Conversation id was not generated.")
-    conversation.langgraph_thread_id = f"conversation:{conversation.id}"
+    conversation.langgraph_thread_id = (
+        f"conversation:{conversation.id}:{secrets.token_hex(4)}"
+    )
     session.add(conversation)
     session.commit()
     session.refresh(conversation)
@@ -251,6 +257,18 @@ def delete_conversation(session: Session, conversation_id: int) -> None:
     turns = session.exec(
         select(ChatTurn).where(ChatTurn.conversation_id == conversation_id)
     ).all()
+    # 先清掉这些 turn 在 chat_turn_buffer 里残留的事件 buffer，再删 DB 行。
+    # SQLite INTEGER PRIMARY KEY 不带 AUTOINCREMENT，删最大 id 后下一个 INSERT
+    # 会复用同样的 turn_id；如果不清 buffer，新 turn 通过 get_or_create(turn_id)
+    # 会拿回旧 buffer，新会话的 SSE 流就会 replay 旧 user/assistant 消息。
+    try:
+        from app.services import chat_turn_buffer as _buf
+
+        for turn in turns:
+            if turn.id is not None:
+                _buf.discard(int(turn.id))
+    except Exception:
+        logger.exception("丢弃 chat_turn_buffer 失败，仅继续删除数据库行")
     for turn in turns:
         session.delete(turn)
 
@@ -260,7 +278,7 @@ def delete_conversation(session: Session, conversation_id: int) -> None:
     for message in messages:
         session.delete(message)
 
-    _delete_langgraph_checkpoint(conversation_id)
+    _delete_langgraph_checkpoint(conversation.langgraph_thread_id or f"conversation:{conversation_id}")
 
     session.delete(conversation)
     session.commit()
@@ -300,10 +318,14 @@ def _cleanup_background_tasks(session: Session, conversation_id: int) -> None:
         session.delete(record)
 
 
-def _delete_langgraph_checkpoint(conversation_id: int) -> None:
-    """尽力删除该对话在 LangGraph SqliteSaver 中的 checkpoint。"""
+def _delete_langgraph_checkpoint(thread_id: str) -> None:
+    """尽力删除该对话在 LangGraph SqliteSaver 中的 checkpoint。
 
-    thread_id = f"conversation:{conversation_id}"
+    thread_id 是 conversation.langgraph_thread_id 的字符串值，由调用方传入；
+    历史上是 `conversation:{id}` 现在加了随机后缀变 `conversation:{id}:{hex}`。
+    SqliteSaver 按精确 string 匹配，传错就清不到，调用方必须传当前会话真实的 thread_id。
+    """
+
     try:
         from app.agent.checkpoints import get_sqlite_checkpointer
 

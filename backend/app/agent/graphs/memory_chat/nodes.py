@@ -48,7 +48,9 @@ from app.agent.graphs.memory_chat.state import (
     ChatMessagePayload,
     ContextLayerPayload,
     ElfBubblePayload,
+    KnowledgeRetrievedChunkPayload,
     MemoryChatGraphState,
+    MountedKnowledgeSpacePayload,
     RetrievedChunkPayload,
     TurnMessagePayload,
 )
@@ -63,6 +65,12 @@ from app.models.conversation import Conversation
 from app.models.note import utc_now
 from app.rag.search import NoteSearchResult, search_notes
 from app.rag.chunking.tokenizer import count_tokens
+from app.services.knowledge_mount_service import list_conversation_knowledge_mounts
+from app.services.knowledge_search_service import (
+    NEED_KNOWLEDGE_MOUNT,
+    KnowledgeSearchItem,
+    search_mounted_knowledge,
+)
 from app.services.long_term_memory_service import list_core_memories
 
 
@@ -136,6 +144,41 @@ RetrievalPlanner = Callable[[str, list[ChatMessagePayload]], RetrievalPlan]
 NoteRetriever = Callable[..., list[NoteSearchResult]]
 
 
+KNOWLEDGE_RETRIEVAL_TRIGGERS = [
+    "知识库",
+    "知识空间",
+    "挂载",
+    "文档",
+    "资料",
+    "文件",
+    "项目资料",
+    "根据",
+    "基于",
+    "查一下",
+    "查找",
+    "搜索",
+    "检索",
+    "引用",
+    "出处",
+    "来源",
+    "总结",
+    "概括",
+    "分析",
+    "对比",
+    "说明",
+    "里面",
+    "这份",
+    "这篇",
+    "this document",
+    "knowledge",
+    "document",
+    "docs",
+    "file",
+    "search",
+    "according to",
+]
+
+
 def build_load_turn_state_node(
     session_factory: SessionFactory,
     *,
@@ -189,11 +232,18 @@ def build_load_turn_state_node(
                 "retrieval_grade": "none",
                 "retrieval_grade_reason": "",
                 "retrieval_debug": {},
+                "mounted_knowledge_spaces": [],
+                "needs_knowledge_retrieval": False,
+                "knowledge_retrieval_query": "",
+                "knowledge_retrieval_reason": "",
+                "knowledge_retrieved_chunks": [],
+                "knowledge_retrieval_debug": {},
                 "context_l0_layer": {},
                 "context_l1_layer": {},
                 "context_conversation_window_layer": {},
                 "context_l2_layer": {},
                 "context_l3_layer": {},
+                "context_l3_knowledge_layer": {},
                 "context_l4_layer": {},
                 "prompt_context": "",
                 "turn_messages": [
@@ -243,6 +293,7 @@ def dispatch_context_workers(state: MemoryChatGraphState) -> list[Send]:
     return [
         Send("build_l4_core_memory", state),
         Send("build_l3_retrieved_memory", state),
+        Send("build_l3_knowledge_context", state),
         Send("build_l2_summary", state),
         Send("build_l1_recent_messages", state),
         Send("build_l0_current_input", state),
@@ -392,6 +443,117 @@ def build_l3_retrieved_memory_node(
         }
 
     return build_l3_retrieved_memory
+
+
+def build_l3_knowledge_context_node(
+    session_factory: SessionFactory,
+    *,
+    limit: int = 5,
+):
+    """构建 L3 会话挂载知库层。
+
+    这层只读取当前 conversation 显式挂载的知识空间。没有挂载时不检索，
+    避免 Agent 越过用户的二重防护边界去全局搜索知识库。
+    """
+
+    def build_l3_knowledge_context(state: MemoryChatGraphState) -> MemoryChatGraphState:
+        conversation_id = _resolve_conversation_id(state)
+        user_message = _resolve_user_message(state)
+        started_at = now_counter()
+        debug: dict = {
+            "status": "skipped",
+            "mounted_count": 0,
+            "needs_retrieval": False,
+            "retrieved_count": 0,
+            "query": "",
+        }
+        mounted_spaces: list[MountedKnowledgeSpacePayload] = []
+        retrieved_chunks: list[KnowledgeRetrievedChunkPayload] = []
+        needs_retrieval = False
+        reason = "当前对话未挂载知识空间。"
+        retrieval_query = ""
+
+        try:
+            with session_factory() as session:
+                mounts = list_conversation_knowledge_mounts(session, conversation_id)
+                mounted_spaces = [
+                    {
+                        "space_id": mount.space_id,
+                        "space_name": mount.space_name,
+                        "space_icon": mount.space_icon,
+                        "ready_document_count": mount.ready_document_count,
+                        "document_count": mount.document_count,
+                    }
+                    for mount in mounts
+                ]
+                debug["mounted_count"] = len(mounted_spaces)
+                debug["mounted_spaces"] = [
+                    {"space_id": item["space_id"], "space_name": item["space_name"]}
+                    for item in mounted_spaces
+                ]
+
+                if mounted_spaces:
+                    needs_retrieval, reason = _should_retrieve_mounted_knowledge(user_message, mounted_spaces)
+                    debug["needs_retrieval"] = needs_retrieval
+                    retrieval_query = user_message.strip() if needs_retrieval else ""
+                    debug["query"] = retrieval_query
+                    if needs_retrieval:
+                        search_result = search_mounted_knowledge(
+                            session,
+                            conversation_id=conversation_id,
+                            query=retrieval_query,
+                            top_k=limit,
+                            mode="hybrid",
+                        )
+                        debug["status"] = search_result.status
+                        retrieved_chunks = [
+                            _to_knowledge_chunk_payload(item)
+                            for item in search_result.results
+                        ]
+                        debug["retrieved_count"] = len(retrieved_chunks)
+                    else:
+                        debug["status"] = "not_needed"
+
+            layer = _build_knowledge_context_layer(
+                mounted_spaces,
+                retrieved_chunks,
+                needs_retrieval=needs_retrieval,
+                reason=reason,
+            )
+            debug["total_ms"] = elapsed_ms(started_at)
+        except Exception as exc:
+            logger.exception("memory_chat.l3_knowledge_failed conversation_id=%s", conversation_id)
+            debug.update(
+                {
+                    "status": "failed",
+                    "degraded": True,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "total_ms": elapsed_ms(started_at),
+                }
+            )
+            reason = "挂载知库检索失败，已降级为不使用知库上下文。"
+            needs_retrieval = False
+            retrieval_query = ""
+            retrieved_chunks = []
+            layer = _build_knowledge_context_layer(
+                mounted_spaces,
+                retrieved_chunks,
+                needs_retrieval=False,
+                reason=reason,
+            )
+
+        return {
+            "mounted_knowledge_spaces": mounted_spaces,
+            "needs_knowledge_retrieval": needs_retrieval,
+            "knowledge_retrieval_query": retrieval_query,
+            "knowledge_retrieval_reason": reason,
+            "knowledge_retrieved_chunks": retrieved_chunks,
+            "knowledge_retrieval_debug": debug,
+            "context_l3_knowledge_layer": layer.to_payload(),
+        }
+
+    return build_l3_knowledge_context
 
 
 def build_l2_summary_node():
@@ -629,7 +791,7 @@ def build_tools_node(session_factory: SessionFactory):
         )
         observations_before = len(state.get("tool_observations", []))
         working_state: MemoryChatGraphState = dict(state)
-        allowed = READ_TOOL_NAMES | WRITE_TOOL_NAMES | EXEC_TOOL_NAMES | USER_INTERRUPT_TOOL_NAMES
+        allowed = READ_TOOL_NAMES | WRITE_TOOL_NAMES | EXEC_TOOL_NAMES | USER_INTERRUPT_TOOL_NAMES | {"knowledge_search"}
 
         # 每条工具完成后立刻通过 custom stream channel 把它推给上游，
         # 避免必须等整个 tools 节点 update 派发后才能看到所有卡片。
@@ -675,6 +837,8 @@ def build_tools_node(session_factory: SessionFactory):
             raw_arguments = dict(tool_call.get("args") or tool_call.get("arguments") or {})
             if tool_name == REQUEST_USER_INPUT_TOOL_NAME:
                 arguments = _normalize_request_user_input_arguments(raw_arguments)
+            elif tool_name == "knowledge_search":
+                arguments = _normalize_knowledge_search_arguments(raw_arguments)
             else:
                 arguments = _normalize_tool_arguments(tool_name, raw_arguments)
             return {
@@ -761,7 +925,7 @@ def build_tools_node(session_factory: SessionFactory):
         current_reads: list[tuple[int, dict]] = []
         for index, tool_call in enumerate(tool_calls):
             tool_name = str(tool_call.get("name") or tool_call.get("tool_name") or "")
-            if tool_name in READ_TOOL_NAMES:
+            if tool_name in READ_TOOL_NAMES or tool_name == "knowledge_search":
                 current_reads.append((index, tool_call))
             else:
                 if current_reads:
@@ -851,6 +1015,7 @@ def _create_react_tools(
         known_read_files=_known_read_files_from_observations(state.get("tool_observations", [])),
     )
     tools[REQUEST_USER_INPUT_TOOL_NAME] = _create_request_user_input_tool()
+    tools["knowledge_search"] = _create_knowledge_search_tool(state, session_factory=session_factory)
     return tools
 
 
@@ -895,6 +1060,82 @@ def _create_request_user_input_tool() -> StructuredTool:
             "如果用户可同时选择多个项目/功能/范围，selection_mode 必须设为 multiple。"
         ),
         args_schema=RequestUserInputToolInput,
+    )
+
+
+class KnowledgeSearchToolInput(BaseModel):
+    query: str = Field(min_length=1, description="要在当前对话已挂载知识空间中检索的问题或关键词。")
+    top_k: int = Field(default=5, ge=1, le=10, description="最多返回多少条知识片段，默认 5。")
+    mode: Literal["hybrid", "vector", "keyword"] = Field(default="hybrid", description="检索模式。")
+
+
+def _create_knowledge_search_tool(
+    state: MemoryChatGraphState,
+    *,
+    session_factory: SessionFactory,
+) -> StructuredTool:
+    conversation_id = _resolve_conversation_id(state)
+
+    def knowledge_search(query: str, top_k: int = 5, mode: str = "hybrid") -> str:
+        """Search only the knowledge spaces explicitly mounted to the current conversation."""
+
+        normalized_query = query.strip()
+        if not normalized_query:
+            return json_dumps_compact(
+                {
+                    "ok": False,
+                    "tool_name": "knowledge_search",
+                    "error_code": "INVALID_ARGUMENT",
+                    "message": "query 不能为空。",
+                    "blocked": True,
+                    "data": {"results": []},
+                }
+            )
+        with session_factory() as session:
+            result = search_mounted_knowledge(
+                session,
+                conversation_id=conversation_id,
+                query=normalized_query,
+                top_k=top_k,
+                mode=mode,  # type: ignore[arg-type]
+            )
+        if result.status == NEED_KNOWLEDGE_MOUNT:
+            return json_dumps_compact(
+                {
+                    "ok": False,
+                    "tool_name": "knowledge_search",
+                    "error_code": NEED_KNOWLEDGE_MOUNT,
+                    "message": "当前对话未挂载知识空间，不能搜索全局知库。请先让用户在对话中挂载知识空间。",
+                    "blocked": True,
+                    "data": {"query": result.query, "results": []},
+                }
+            )
+        items = [_knowledge_item_to_tool_data(item) for item in result.results]
+        return json_dumps_compact(
+            {
+                "ok": True,
+                "tool_name": "knowledge_search",
+                "message": f"已在当前挂载知库中检索到 {len(items)} 条片段。",
+                "data": {
+                    "query": result.query,
+                    "mode": result.mode,
+                    "top_k": result.top_k,
+                    "results": items,
+                },
+            }
+        )
+
+    return StructuredTool.from_function(
+        func=knowledge_search,
+        name="knowledge_search",
+        description=(
+            "在当前对话显式挂载的知识空间中补充检索资料。"
+            "只能搜索当前 conversation 已挂载的知识空间，不能指定 space_id，不能全局搜索。"
+            "当初始上下文中的挂载知库片段不足以回答，或需要补充查找某个细节时调用。"
+            "[K1]/[K2] 这类编号仅用于内部定位检索片段；最终回答不要输出裸露编号或单独引用列表。"
+            "需要说明来源时，用文档标题或自然语言融入句子。"
+        ),
+        args_schema=KnowledgeSearchToolInput,
     )
 
 
@@ -1067,6 +1308,16 @@ def _build_react_agent_system_prompt() -> str:
         "label=\"为项目添加 Maven Wrapper\", description=\"不依赖全局 Maven，更适合项目自包含\"；"
         "label=\"改用已有 jar 或其他启动方式\", description=\"如果项目已经打包或有替代启动脚本\"。"
         "不要在最终回答里列三条方案让用户回复编号。\n"
+        "- 知识库边界：当前对话只能使用用户显式挂载到该对话的知识空间。"
+        "不要声称搜索了未挂载的知识库，不要要求 knowledge_search 指定 space_id，"
+        "也不要绕过挂载边界做全局知库检索。"
+        "只要当前对话已挂载知识空间，dispatch_context_workers 默认会先检索挂载资料；"
+        "只有非常明确的闲聊或客观常识问题才会跳过首轮检索。"
+        "初始上下文中的 `L3 挂载知识库` 是首轮检索结果；"
+        "如果这些片段不足以回答，才调用 knowledge_search 做补充检索。"
+        "[K1]/[K2] 这类编号只用于内部定位检索片段，最终回答不要输出裸露编号或单独引用列表；"
+        "需要说明来源时，用文档标题或自然语言融入句子。"
+        "如果没有挂载或工具返回 NEED_KNOWLEDGE_MOUNT，应明确说明需要先挂载知识空间。\n"
         "- 多个互不依赖的读取、搜索或信息查询可以在同一轮 tool_calls 中并行发出；"
         "有依赖关系的步骤必须等上一步 ToolMessage 返回后再继续。\n"
         "- 不要把删除、清理、覆盖配置、重建项目作为开局动作；只有定位到具体原因后才做针对性修改。\n"
@@ -1191,6 +1442,7 @@ def build_merge_prompt_context_node():
         payloads: list[ContextLayerPayload] = [
             _resolve_context_layer(state, "context_l4_layer"),
             _resolve_context_layer(state, "context_l3_layer"),
+            _resolve_context_layer(state, "context_l3_knowledge_layer"),
             _resolve_context_layer(state, "context_l2_layer"),
             _resolve_context_layer(state, "context_l1_layer"),
             _resolve_context_layer(state, "context_l0_layer"),
@@ -1697,6 +1949,38 @@ def _clean_tool_path(path: str) -> str:
     return path.strip().replace("`", "").strip(" \t\r\n").rstrip("）)。；;，,。")
 
 
+_OTHER_LIKE_LABELS = {
+    "其他",
+    "other",
+    "others",
+    "其他答案",
+    "其他选项",
+    "其他路径",
+    "其它",
+    "请输入其他答案",
+    "请输入其他选项",
+    "请输入其他路径",
+    "自定义",
+    "自定义答案",
+    "自定义路径",
+    "自定义选项",
+    "custom",
+}
+
+
+def _is_other_like_option(label: str, value: str) -> bool:
+    """判断 LLM 加的某个选项是否在重复前端会自动追加的 Other 输入项。
+
+    前端永远会在末尾挂一项带输入框的“其他”，LLM 若再加“其他/Other/自定义路径”等就会出现
+    一项无输入框的伪“其他”按钮，看起来像 disabled 还可能被默认选中。
+    """
+
+    haystack = {label.strip().lower(), value.strip().lower()}
+    if not any(haystack):
+        return False
+    return bool(haystack & _OTHER_LIKE_LABELS)
+
+
 def _normalize_request_user_input_arguments(arguments: dict) -> dict:
     """保留并规整结构化提问参数。
 
@@ -1714,6 +1998,10 @@ def _normalize_request_user_input_arguments(arguments: dict) -> dict:
             label = str(raw_option.get("label") or raw_option.get("value") or "").strip()
             value = str(raw_option.get("value") or label).strip()
             if not label and not value:
+                continue
+            if _is_other_like_option(label, value):
+                # 兜底过滤：即便 prompt 已经禁止，LLM 仍会偶尔塞“其他/自定义路径”等
+                # 重复项；这里直接丢弃，前端会在末尾自动追加唯一一份带输入框的 Other。
                 continue
             options.append(
                 {
@@ -1738,6 +2026,22 @@ def _normalize_request_user_input_arguments(arguments: dict) -> dict:
         "selection_mode": selection_mode,
         "allow_other": bool(arguments.get("allow_other", True)),
         "other_placeholder": str(arguments.get("other_placeholder") or "请输入其他答案").strip(),
+    }
+
+
+def _normalize_knowledge_search_arguments(arguments: dict) -> dict:
+    query = str(arguments.get("query") or "").strip()
+    try:
+        top_k = int(arguments.get("top_k") or 5)
+    except (TypeError, ValueError):
+        top_k = 5
+    mode = str(arguments.get("mode") or "hybrid").strip().lower()
+    if mode not in {"hybrid", "vector", "keyword"}:
+        mode = "hybrid"
+    return {
+        "query": query,
+        "top_k": max(1, min(top_k, 10)),
+        "mode": mode,
     }
 
 
@@ -1827,7 +2131,9 @@ def _run_request_user_input_action(
             _thought(
                 f"request-user-input-{action.get('tool_call_id') or step_index or 'choice'}",
                 "等待用户选择",
-                f"已向用户询问：{request['question']}",
+                # 多问题路径里 request 只有 `questions=[...]`、没有顶层 `question` 字段；
+                # 用 .get + fallback 拼一段摘要，避免 KeyError 把整轮终止。
+                "已向用户询问：" + _summarize_user_input_request(request),
                 related_node="tools",
                 related_tool_call_id=str(action.get("tool_call_id") or "") or None,
                 status="interrupted",
@@ -1835,6 +2141,27 @@ def _run_request_user_input_action(
             ),
         ],
     }
+
+
+def _summarize_user_input_request(request: dict) -> str:
+    """从 interrupt 请求里提一段适合 thought 展示的简短摘要。"""
+
+    single_question = str(request.get("question") or "").strip()
+    if single_question:
+        return single_question
+    questions = request.get("questions") if isinstance(request.get("questions"), list) else []
+    titles: list[str] = []
+    for item in questions:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("question") or "").strip()
+        if text:
+            titles.append(text)
+    if not titles:
+        return "需要你补充一个选择。"
+    if len(titles) == 1:
+        return titles[0]
+    return "；".join(titles)
 
 
 def _build_user_input_interrupt_payload(
@@ -1941,6 +2268,8 @@ def _normalize_user_input_questions(arguments: dict) -> list[dict]:
                 label = str(raw_option.get("label") or raw_option.get("value") or "").strip()
                 value = str(raw_option.get("value") or label).strip()
                 if not label and not value:
+                    continue
+                if _is_other_like_option(label, value):
                     continue
                 options.append(
                     {
@@ -2134,6 +2463,194 @@ def _string_list(value) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
+def _should_retrieve_mounted_knowledge(
+    user_message: str,
+    mounted_spaces: list[MountedKnowledgeSpacePayload],
+) -> tuple[bool, str]:
+    text = user_message.strip()
+    if not mounted_spaces:
+        return False, "当前对话未挂载知识空间。"
+    if not text:
+        return False, "当前用户输入为空。"
+    lowered = text.lower()
+    if any(trigger.lower() in lowered for trigger in KNOWLEDGE_RETRIEVAL_TRIGGERS):
+        return True, "用户问题显式指向文档/资料/知识库或需要基于外部资料回答。"
+    if any(str(space.get("space_name") or "").strip() and str(space.get("space_name") or "").lower() in lowered for space in mounted_spaces):
+        return True, "用户提到了已挂载知识空间名称。"
+    if _is_clear_casual_or_common_fact_message(text):
+        return False, "当前对话已挂载知识空间，但本轮是明确闲聊或客观常识，跳过知库检索。"
+    return True, "当前对话已挂载知识空间，默认先检索挂载资料以避免遗漏上下文。"
+
+
+def _looks_like_knowledge_question(text: str) -> bool:
+    question_markers = ["？", "?", "怎么", "如何", "为什么", "是否", "哪些", "什么", "帮我", "解释", "总结", "分析"]
+    return any(marker in text for marker in question_markers)
+
+
+def _is_clear_casual_or_common_fact_message(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", text.strip().lower())
+    normalized = normalized.strip("。.!！?？~～")
+    if not normalized:
+        return True
+
+    casual_messages = {
+        "你好",
+        "您好",
+        "嗨",
+        "hi",
+        "hello",
+        "晚上好",
+        "早上好",
+        "中午好",
+        "下午好",
+        "晚安",
+        "谢谢",
+        "谢谢你",
+        "感谢",
+        "辛苦了",
+        "好的",
+        "好",
+        "嗯",
+        "嗯嗯",
+        "可以",
+        "收到",
+        "明白",
+        "再见",
+        "拜拜",
+        "你是谁",
+        "你叫什么",
+        "你在吗",
+    }
+    if normalized in casual_messages:
+        return True
+
+    casual_patterns = [
+        r"^(你)?在吗$",
+        r"^你好吗$",
+        r"^今天过得怎么样$",
+        r"^最近怎么样$",
+        r"^你能做什么$",
+        r"^你会做什么$",
+    ]
+    if any(re.search(pattern, normalized) for pattern in casual_patterns):
+        return True
+
+    if re.fullmatch(r"[\d零一二三四五六七八九十百千万两\s+\-*/×÷().（）=＝]+(等于几|等于多少|等于|是多少|怎么算|几|吗)?", normalized):
+        return True
+
+    common_fact_patterns = [
+        r"^水的化学式(是)?什么$",
+        r"^太阳从哪边升起$",
+        r"^太阳从东边升起吗$",
+        r"^一周有几天$",
+        r"^一年有多少天$",
+        r"^北京是中国(的)?首都吗$",
+        r"^中国(的)?首都(是)?哪里$",
+    ]
+    return any(re.search(pattern, normalized) for pattern in common_fact_patterns)
+
+
+def _build_knowledge_context_layer(
+    mounted_spaces: list[MountedKnowledgeSpacePayload],
+    retrieved_chunks: list[KnowledgeRetrievedChunkPayload],
+    *,
+    needs_retrieval: bool,
+    reason: str,
+):
+    from app.agent.context import ContextBudget, ContextLayer
+
+    budget = ContextBudget()
+    mount_summary = _format_mounted_knowledge_spaces(mounted_spaces)
+    if not mounted_spaces:
+        content = "当前对话未挂载知识空间。不能搜索或引用全局知识库；如用户需要基于文档回答，请先提示用户挂载知识空间。"
+        note = "二重防护：未挂载即不可检索。"
+    elif retrieved_chunks:
+        chunk_lines = [
+            _format_knowledge_chunk_for_prompt(chunk, index=index)
+            for index, chunk in enumerate(retrieved_chunks, start=1)
+        ]
+        chunk_text = _fit_knowledge_lines_to_budget(chunk_lines, budget.retrieved_memory_tokens)
+        content = f"{mount_summary}\n\n本轮检索原因：{reason}\n\n{chunk_text}"
+        note = "仅包含当前会话已挂载知识空间的检索结果；[K] 编号只用于内部定位，最终回答不要裸露输出。"
+    elif needs_retrieval:
+        content = f"{mount_summary}\n\n本轮检索原因：{reason}\n检索结果：没有找到足够相关的挂载知识片段。"
+        note = "只允许说明挂载范围内未检索到依据，不能扩展为全局知识库结论。"
+    else:
+        content = f"{mount_summary}\n\n本轮未检索挂载知识库。原因：{reason}"
+        note = "已挂载时默认检索；仅在明确闲聊或客观常识问题中跳过。"
+
+    return ContextLayer(
+        level=3,
+        name="挂载知识库",
+        content=content,
+        budget_tokens=budget.retrieved_memory_tokens,
+        used_tokens=count_tokens(content),
+        note=note,
+    )
+
+
+def _fit_knowledge_lines_to_budget(lines: list[str], budget_tokens: int) -> str:
+    selected: list[str] = []
+    used_tokens = 0
+    for line in lines:
+        line_tokens = count_tokens(line)
+        if selected and used_tokens + line_tokens > budget_tokens:
+            break
+        if not selected and line_tokens > budget_tokens:
+            return line[: max(1, budget_tokens * 2)].rstrip() + "..."
+        selected.append(line)
+        used_tokens += line_tokens
+    return "\n".join(selected) if selected else "无。"
+
+
+def _format_mounted_knowledge_spaces(spaces: list[MountedKnowledgeSpacePayload]) -> str:
+    if not spaces:
+        return "已挂载知识空间：无。"
+    lines = ["已挂载知识空间："]
+    for space in spaces:
+        lines.append(
+            f"- {space.get('space_name')} "
+            f"(space_id={space.get('space_id')}, ready_docs={space.get('ready_document_count')}/{space.get('document_count')})"
+        )
+    return "\n".join(lines)
+
+
+def _format_knowledge_chunk_for_prompt(chunk: KnowledgeRetrievedChunkPayload, *, index: int) -> str:
+    heading = " / ".join(chunk.get("heading_path") or [])
+    heading_text = f" > {heading}" if heading else ""
+    page = chunk.get("page_number")
+    page_text = f", p.{page}" if page is not None else ""
+    score = chunk.get("score")
+    score_text = f", score={float(score):.3f}" if score is not None else ""
+    source = chunk.get("document_title") or chunk.get("original_filename") or f"document:{chunk.get('document_id')}"
+    text = str(chunk.get("text") or "").strip()
+    return f"- [K{index}] {source}{heading_text}{page_text}{score_text}\n  {text}"
+
+
+def _to_knowledge_chunk_payload(item: KnowledgeSearchItem) -> KnowledgeRetrievedChunkPayload:
+    return {
+        "chunk_id": item.chunk_id,
+        "space_id": item.space_id,
+        "space_name": item.space_name,
+        "document_id": item.document_id,
+        "document_title": item.document_title,
+        "text": item.text,
+        "score": item.score,
+        "score_source": item.score_source,
+        "heading_path": item.heading_path,
+        "page_number": item.page_number,
+        "source_uri": item.source_uri,
+        "original_filename": item.original_filename,
+        "retrieval_phase": item.retrieval_phase,
+        "distance": item.distance,
+    }
+
+
+def _knowledge_item_to_tool_data(item: KnowledgeSearchItem) -> dict:
+    payload = _to_knowledge_chunk_payload(item)
+    return dict(payload)
+
+
 def _run_agent_tool_action(
     state: MemoryChatGraphState,
     *,
@@ -2176,6 +2693,7 @@ def _run_agent_tool_action(
             known_existing_paths=_known_existing_paths_from_observations(state.get("tool_observations", [])),
             known_read_files=_known_read_files_from_observations(state.get("tool_observations", [])),
         )
+        tools["knowledge_search"] = _create_knowledge_search_tool(state, session_factory=session_factory)
         if tool_name not in tools:
             observation = {
                 "tool_call_id": tool_call_id,
@@ -2508,6 +3026,8 @@ def _summarize_tool_observation(observation: AgentToolObservationPayload) -> str
         return f"文件搜索完成，找到 {len(data.get('matches') or [])} 个候选。"
     if tool_name == "search_text":
         return f"文本搜索完成，找到 {len(data.get('matches') or [])} 条匹配。"
+    if tool_name == "knowledge_search":
+        return f"挂载知库检索完成，找到 {len(data.get('results') or [])} 条片段。"
     if tool_name == "list_dir":
         return f"目录读取完成：{data.get('relative_path') or data.get('path')}"
     return f"{tool_name} 执行完成。"

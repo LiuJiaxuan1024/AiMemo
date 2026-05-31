@@ -52,6 +52,39 @@ GET /api/conversations/{conversation_id}/messages
 
 MVP 阶段按创建时间顺序返回线性消息。后续如果实现对话状态树，前端可以基于 `parent_id` 组装树。
 
+## 对话知识库挂载
+
+挂载是 conversation 级别的 RAG 授权边界。Agent 只能检索当前对话已挂载的知识空间；
+没有挂载时，即使用户要求“查资料”，也不能做全局知库检索。
+
+```http
+GET /api/conversations/{conversation_id}/knowledge-mounts
+```
+
+返回当前对话已挂载的知识空间。
+
+```http
+PUT /api/conversations/{conversation_id}/knowledge-mounts
+Content-Type: application/json
+
+{
+  "space_ids": [1, 2]
+}
+```
+
+一次性替换当前对话的挂载列表。前端在切换页面后会重新读取该接口，保证挂载状态跟随 conversation 持久化。
+
+```http
+POST /api/conversations/{conversation_id}/knowledge-mounts/{space_id}
+DELETE /api/conversations/{conversation_id}/knowledge-mounts/{space_id}
+```
+
+分别用于追加挂载和取消挂载。
+
+当前 Memory Chat Graph 的策略是：只要对话已挂载知识空间，除非本轮是非常明确的闲聊或客观常识问题，
+否则 `build_l3_knowledge_context` 会默认先检索挂载知库。`[K1]` / `[K2]` 是内部 chunk 定位符，
+最终回答不应把它们裸露成一行引用标记。
+
 ## 追加消息
 
 ```http
@@ -126,4 +159,3 @@ DELETE /api/conversations/{conversation_id}
 - 不支持分支切换 UI。
 
 这些能力会在后续 graph 和前端阶段实现。
-

@@ -20,6 +20,12 @@ def test_app_registers_search_routes():
     assert delete_route is not None
     assert "/api/memories" in paths
     assert "/api/memories/{memory_id}" in paths
+    assert "/api/knowledge/spaces" in paths
+    assert "/api/knowledge/search" in paths
+    assert "/api/knowledge/spaces/{space_id}/documents" in paths
+    assert "/api/knowledge/spaces/{space_id}/documents/upload" in paths
+    assert "/api/knowledge/documents/{document_id}/chunk-drafts" in paths
+    assert "/api/conversations/{conversation_id}/knowledge-mounts" in paths
     assert "/api/background_tasks" in paths
     assert "/api/background_tasks/{task_id}" in paths
     assert "/api/background_tasks/{task_id}/output" in paths

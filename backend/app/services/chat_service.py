@@ -74,6 +74,9 @@ def run_conversation_chat(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Conversation not found",
             )
+        langgraph_thread_id = (
+            conversation.langgraph_thread_id or f"conversation:{conversation_id}"
+        )
 
     result = run_memory_chat_graph(
         conversation_id=conversation_id,
@@ -81,6 +84,7 @@ def run_conversation_chat(
         session_factory=session_factory,
         checkpoint_path=checkpoint_path or settings.langgraph_checkpoint_path,
         parent_message_id=parent_message_id,
+        langgraph_thread_id=langgraph_thread_id,
     )
     user_message_id = int(result["user_message_id"])
     assistant_message_id = int(result["assistant_message_id"])
@@ -102,7 +106,7 @@ def run_conversation_chat(
         session.commit()
         return ChatResponse(
             conversation_id=conversation_id,
-            thread_id=f"conversation:{conversation_id}",
+            thread_id=langgraph_thread_id,
             checkpoint_id=result.get("graph_checkpoint_id"),
             needs_retrieval=bool(result.get("needs_retrieval", False)),
             needs_query_rewrite=bool(result.get("needs_query_rewrite", False)),
@@ -170,6 +174,9 @@ def stream_conversation_chat_events(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Conversation not found",
             )
+        # 用 conversation 行里的 langgraph_thread_id（新会话会带 uuid 后缀），避免 SQLite
+        # 整型 id 被删除复用时新会话误读到旧 checkpoint。
+        langgraph_thread_id = conversation.langgraph_thread_id or f"conversation:{conversation_id}"
         user_message, assistant_message = _create_streaming_message_pair(
             session,
             conversation=conversation,
@@ -179,7 +186,7 @@ def stream_conversation_chat_events(
         turn = create_running_chat_turn(
             session,
             conversation_id=conversation_id,
-            thread_id=f"conversation:{conversation_id}",
+            thread_id=langgraph_thread_id,
         )
         turn_id = turn.id or 0
         attach_chat_turn_messages(
@@ -243,6 +250,7 @@ def stream_conversation_chat_events(
             "debug_payload": debug_payload,
             "started_at": started_at,
             "resume_payload": None,
+            "langgraph_thread_id": langgraph_thread_id,
         },
         daemon=True,
         name=f"chat-turn-{turn_id}",
@@ -298,6 +306,14 @@ def stream_conversation_chat_resume_events(
         user_message_id = user_message.id or 0
         assistant_message_id = assistant_message.id or 0
         original_user_content = user_message.content
+        # resume 走的 LangGraph thread_id 必须和最初那一轮一致，否则 Command(resume=...)
+        # 会落到一个空 thread 上，interrupt 状态找不到，graph 会从头跑。
+        conversation = session.get(Conversation, conversation_id)
+        resume_thread_id = (
+            (conversation.langgraph_thread_id if conversation else None)
+            or turn.thread_id
+            or f"conversation:{conversation_id}"
+        )
 
     buffer = chat_turn_buffer.create_fresh(turn_id)
     buffer.append(
@@ -327,6 +343,7 @@ def stream_conversation_chat_resume_events(
             "debug_payload": debug_payload,
             "started_at": started_at,
             "resume_payload": resume_payload,
+            "langgraph_thread_id": resume_thread_id,
         },
         daemon=True,
         name=f"chat-turn-resume-{turn_id}",
@@ -373,6 +390,7 @@ def _run_turn_to_buffer(
     debug_payload: dict,
     started_at: float,
     resume_payload: dict | None = None,
+    langgraph_thread_id: str | None = None,
 ) -> None:
     """Graph worker：在后台线程里跑完一轮 memory_chat_graph，事件全部推进 buffer。
 
@@ -407,6 +425,7 @@ def _run_turn_to_buffer(
             parent_message_id=parent_message_id,
             answer_mode=answer_mode,
             resume_payload=resume_payload,
+            langgraph_thread_id=langgraph_thread_id,
         ):
             if _is_chat_turn_cancelled(session_factory, turn_id):
                 raise ChatTurnCancelled("用户中断了本轮生成。")
@@ -694,7 +713,7 @@ def _run_turn_to_buffer(
             session.commit()
             response = ChatResponse(
                 conversation_id=conversation_id,
-                thread_id=f"conversation:{conversation_id}",
+                thread_id=langgraph_thread_id or f"conversation:{conversation_id}",
                 checkpoint_id=checkpoint_id,
                 needs_retrieval=bool(final_state.get("needs_retrieval", False)),
                 needs_query_rewrite=bool(final_state.get("needs_query_rewrite", False)),
@@ -995,6 +1014,7 @@ def _extract_context_layers(state: dict) -> list[dict]:
     for key in [
         "context_l4_layer",
         "context_l3_layer",
+        "context_l3_knowledge_layer",
         "context_l2_layer",
         "context_conversation_window_layer",
         "context_l1_layer",
@@ -1101,6 +1121,10 @@ def _mark_node_timing(
         retrieval_debug = state.get("retrieval_debug")
         if isinstance(retrieval_debug, dict):
             node_payload["retrieval_debug"] = retrieval_debug
+    if state and node_name == "build_l3_knowledge_context":
+        knowledge_debug = state.get("knowledge_retrieval_debug")
+        if isinstance(knowledge_debug, dict):
+            node_payload["knowledge_retrieval_debug"] = knowledge_debug
     if state:
         # 保存“节点完成后的累计 state 快照”，前端点击节点时可以直接查看。
         # 这里不直接暴露原始对象：一方面 state 可能包含较长文本，另一方面部分值

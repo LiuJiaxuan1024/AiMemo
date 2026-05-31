@@ -13,6 +13,9 @@ class ChatTurn(SQLModel, table=True):
     节点状态、上下文金字塔和检索证据。
     """
 
+    # 详见 Note.__table_args__ 的注释。
+    __table_args__ = {"sqlite_autoincrement": True}
+
     id: int | None = Field(default=None, primary_key=True)
     conversation_id: int = Field(index=True)
     user_message_id: int | None = Field(default=None, index=True)

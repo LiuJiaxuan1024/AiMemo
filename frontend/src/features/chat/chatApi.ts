@@ -3,6 +3,7 @@ import type {
   ChatMessage,
   ChatStreamEvent,
   ChatTurnGraph,
+  ConversationKnowledgeMount,
   ChatTurnStateHistory,
   Conversation,
   SegmentFollowupRequest,
@@ -61,6 +62,20 @@ export async function deleteMessageBranch(conversationId: number, messageId: num
 
 export function listMessages(conversationId: number): Promise<ChatMessage[]> {
   return request<ChatMessage[]>(`/api/conversations/${conversationId}/messages`);
+}
+
+export function listConversationKnowledgeMounts(conversationId: number): Promise<ConversationKnowledgeMount[]> {
+  return request<ConversationKnowledgeMount[]>(`/api/conversations/${conversationId}/knowledge-mounts`);
+}
+
+export function replaceConversationKnowledgeMounts(
+  conversationId: number,
+  spaceIds: number[],
+): Promise<ConversationKnowledgeMount[]> {
+  return request<ConversationKnowledgeMount[]>(`/api/conversations/${conversationId}/knowledge-mounts`, {
+    method: "PUT",
+    body: JSON.stringify({ space_ids: spaceIds }),
+  });
 }
 
 export function getMessageGraph(

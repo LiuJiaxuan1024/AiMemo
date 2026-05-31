@@ -12,6 +12,9 @@ class Conversation(SQLModel, table=True):
     用户可见的标题、摘要和消息列表都应以业务表为准。
     """
 
+    # 详见 Note.__table_args__ 的注释。
+    __table_args__ = {"sqlite_autoincrement": True}
+
     id: int | None = Field(default=None, primary_key=True)
     title: str = Field(default="新对话", index=True, max_length=200)
     status: str = Field(default="active", index=True, max_length=24)

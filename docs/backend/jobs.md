@@ -95,6 +95,10 @@ conversation 未摘要消息 token 超过阈值
 
 assistant 消息缺少任何 conversation_memory job
   -> 补建 conversation_memory job
+
+knowledge_document.status in pending/parsing/chunking/embedding/indexing
+  且不存在活跃 knowledge_ingest job
+  -> 补建 knowledge_ingest job
 ```
 
 随后 `JobReconciler` 会按固定间隔继续扫描，默认间隔：
@@ -163,6 +167,17 @@ dedupe_key: conversation_memory:assistant_message:{assistant_message_id}
 ```
 
 该任务负责从一轮对话中抽取 L4 核心长期记忆，并写入 `longtermmemory`。
+
+```text
+type: knowledge_ingest
+graph_name: knowledge_ingest_graph
+payload: {"document_id": 1}
+thread_id: job:{job_id}
+dedupe_key: knowledge_ingest:document:{document_id}
+```
+
+该任务负责知库文档导入流水线：解析文档、生成 chunk、调用 embedding，并写入 `sqlite-vec` 知库向量索引。
+第一版支持 TXT / Markdown / DOCX / PPTX / PDF。失败任务可以在任务抽屉中重试或删除。
 
 ## 与 LangGraph 的协作
 
