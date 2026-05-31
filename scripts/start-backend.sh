@@ -44,10 +44,16 @@ PY
 
 find_python312() {
   local candidate
-  if command -v python3.12 >/dev/null 2>&1; then
-    command -v python3.12
+  if [[ -n "${AIMEMO_PYTHON:-}" ]] && python_is_312 "$AIMEMO_PYTHON"; then
+    echo "$AIMEMO_PYTHON"
     return 0
   fi
+  for candidate in python3.12 python; do
+    if command -v "$candidate" >/dev/null 2>&1 && python_is_312 "$(command -v "$candidate")"; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
   for candidate in \
     "/opt/homebrew/opt/python@3.12/bin/python3.12" \
     "/usr/local/opt/python@3.12/bin/python3.12"; do
@@ -63,14 +69,6 @@ find_python312() {
       return 0
     fi
   fi
-  if command -v python >/dev/null 2>&1 && python - <<'PY' 2>/dev/null
-import sys
-raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)
-PY
-  then
-    command -v python
-    return 0
-  fi
   return 1
 }
 
@@ -83,7 +81,7 @@ if ! python_is_312 "$VENV_PYTHON"; then
     install_hint=""
     case "$platform" in
       Darwin)
-        install_hint=$'  macOS:         brew install python@3.12\n\nIf Python 3.12 is installed but not linked, add it to PATH or use the Homebrew\npath directly:\n  export PATH="/opt/homebrew/opt/python@3.12/bin:$PATH"'
+        install_hint=$'  macOS:         brew install python@3.12\n\nIf Python 3.12 is installed but not linked, add it to PATH or set AIMEMO_PYTHON:\n  export AIMEMO_PYTHON="/opt/homebrew/opt/python@3.12/bin/python3.12"'
         ;;
       Linux)
         install_hint=$'  Ubuntu/Debian: sudo apt install python3.12 python3.12-venv\n  Fedora:        sudo dnf install python3.12'

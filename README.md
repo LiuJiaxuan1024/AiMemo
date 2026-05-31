@@ -229,7 +229,11 @@ chmod +x scripts/start-dev.sh scripts/start-backend.sh scripts/start-frontend.sh
 ./scripts/start-dev.sh --skip-install
 ```
 
-后端脚本会确保 `backend/.venv` 使用 Python 3.12。如果已有虚拟环境不是 Python 3.12，会自动重建；Windows 会尝试通过 `winget` 安装 Python 3.12。
+后端脚本会确保 `backend/.venv` 使用 Python 3.12。如果已有虚拟环境不是 Python 3.12，会自动重建；Windows 在找不到 Python 3.12 时会尝试通过 `winget` 安装。也可以用 `AIMEMO_PYTHON` 指向指定的 Python 3.12 解释器。
+
+前端 graph 图依赖 `mermaid`。启动脚本会在 `node_modules` 缺失或 `mermaid` 缺失时自动执行 `npm install`；如果强制跳过安装后仍报缺包，请在 `frontend/` 下手动执行 `npm install`。
+
+`npm` 是硬要求；如果没有 Node.js / npm，脚本会直接提示安装 Node.js 20+。Rust / Cargo 只影响桌面 Memo Elf，没装 Rust 时一键脚本会跳过桌面精灵，后端和 Web 仍会继续启动。
 
 如果只想调试 Web，不启动桌面精灵：
 
@@ -353,7 +357,7 @@ http://127.0.0.1:5173/app/workshop/voice
 
 ### 后端
 
-建议使用 Python 3.12。项目依赖声明为 `>=3.11,<3.14`，但当前本地开发主要使用 3.12 虚拟环境。
+必须使用 Python 3.12。`backend/pyproject.toml` 和项目启动脚本都会硬卡 Python 3.12，避免其他版本带来的依赖兼容问题。
 
 Windows PowerShell：
 

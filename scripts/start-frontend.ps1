@@ -10,6 +10,17 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $frontendDir = Join-Path $repoRoot "frontend"
 
+if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+  throw "npm is required. Install Node.js 20+ from https://nodejs.org/ and make sure npm is in PATH."
+}
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+  throw "node is required. Install Node.js 20+ from https://nodejs.org/ and make sure node is in PATH."
+}
+$nodeMajor = [int](& node -p "process.versions.node.split('.')[0]")
+if ($nodeMajor -lt 20) {
+  throw "Node.js 20+ is required. Current version: $(node --version). Install Node.js 20+ from https://nodejs.org/."
+}
+
 function Test-PortAvailable {
   param([string]$HostName, [int]$Port)
   $listener = $null
@@ -35,9 +46,24 @@ while (-not (Test-PortAvailable -HostName $HostName -Port $Port)) {
 
 Set-Location $frontendDir
 
-if ((-not $SkipInstall) -or (-not (Test-Path "node_modules"))) {
+function Test-NpmPackageInstalled {
+  param([string]$PackageName)
+  if (-not (Test-Path "node_modules")) {
+    return $false
+  }
+  npm ls $PackageName --depth=0 --silent *> $null
+  return $LASTEXITCODE -eq 0
+}
+
+$missingRequiredPackage = -not (Test-NpmPackageInstalled -PackageName "mermaid")
+
+if ((-not $SkipInstall) -or (-not (Test-Path "node_modules")) -or $missingRequiredPackage) {
   Write-Host "Installing frontend dependencies..."
   npm install
+}
+
+if (-not (Test-NpmPackageInstalled -PackageName "mermaid")) {
+  throw "Frontend dependency 'mermaid' is missing. Run 'npm install' in frontend/ or rerun without -SkipInstall."
 }
 
 $env:VITE_API_BASE_URL = if ($env:VITE_API_BASE_URL) { $env:VITE_API_BASE_URL } else { "http://${HostName}:$BackendPort" }

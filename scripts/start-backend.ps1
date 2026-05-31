@@ -39,39 +39,63 @@ function Test-Python312 {
   if (-not (Test-Path $PythonExe)) {
     return $false
   }
-  $version = & $PythonExe -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
-  return $version -eq "3.12"
+  & $PythonExe -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)" 2>$null
+  return $LASTEXITCODE -eq 0
+}
+
+function Test-PythonCandidate {
+  param(
+    [string]$PythonExe,
+    [string[]]$PrefixArgs = @()
+  )
+  if (-not $PythonExe) {
+    return $false
+  }
+  if (-not (Test-Path $PythonExe) -and -not (Get-Command $PythonExe -ErrorAction SilentlyContinue)) {
+    return $false
+  }
+  & $PythonExe @PrefixArgs -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)" 2>$null
+  return $LASTEXITCODE -eq 0
+}
+
+function Get-Python312Candidate {
+  $candidates = @()
+  if ($env:AIMEMO_PYTHON) {
+    $candidates += @{ Exe = $env:AIMEMO_PYTHON; Args = @() }
+  }
+  $candidates += @(
+    @{ Exe = "py"; Args = @("-3.12") },
+    @{ Exe = "python3.12"; Args = @() },
+    @{ Exe = "python"; Args = @() }
+  )
+
+  foreach ($candidate in $candidates) {
+    if (Test-PythonCandidate -PythonExe $candidate.Exe -PrefixArgs $candidate.Args) {
+      return $candidate
+    }
+  }
+  return $null
 }
 
 function Invoke-Python312 {
   param([string[]]$Arguments)
 
-  if (Get-Command py -ErrorAction SilentlyContinue) {
-    & py -3.12 @Arguments
+  $candidate = Get-Python312Candidate
+  if ($candidate) {
+    & $candidate.Exe @($candidate.Args) @Arguments
     return
-  }
-  if (Get-Command python3.12 -ErrorAction SilentlyContinue) {
-    & python3.12 @Arguments
-    return
-  }
-  if (Get-Command python -ErrorAction SilentlyContinue) {
-    $version = & python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
-    if ($version -eq "3.12") {
-      & python @Arguments
-      return
-    }
   }
 
   Write-Host "Python 3.12 was not found. Trying to install it with winget..."
   if (Get-Command winget -ErrorAction SilentlyContinue) {
     winget install --id Python.Python.3.12 -e --source winget
-    if (Get-Command py -ErrorAction SilentlyContinue) {
+    if (Test-PythonCandidate -PythonExe "py" -PrefixArgs @("-3.12")) {
       & py -3.12 @Arguments
       return
     }
   }
 
-  throw "Python 3.12 is required. Please install Python 3.12 and rerun this script."
+  throw "Python 3.12 is required. Install Python 3.12, or set AIMEMO_PYTHON to a Python 3.12 python.exe."
 }
 
 Set-Location $backendDir

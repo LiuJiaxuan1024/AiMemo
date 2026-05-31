@@ -11,14 +11,14 @@ Python 3.12
 Node.js 20 或更高版本
 npm
 Git
+Rust / Cargo（仅桌面 Memo Elf 需要）
 ```
 
 说明：
 
 ```text
-后端依赖声明为 Python >=3.11,<3.14。
-当前推荐 Python 3.12，因为 LangGraph / LangChain / sqlite-vec 生态在 3.12 上更稳。
-不建议用 Python 3.14 启动后端。
+后端运行环境必须使用 Python 3.12，`backend/pyproject.toml` 和启动脚本都会硬卡 3.12，避免 LangGraph / LangChain / sqlite-vec 等依赖在其他 Python 版本上出现兼容问题。
+Node.js / npm 是 Web 前端和桌面壳启动必需项。Rust / Cargo 只影响桌面 Memo Elf；没装 Rust 时一键脚本会跳过桌面精灵，后端和 Web 仍可启动。
 ```
 
 ## 1. 克隆项目
@@ -107,6 +107,22 @@ http://127.0.0.1:8000/app/workshop/voice
 必要时自动执行 `npm run build`。Windows 后端开发启动默认启用 uvicorn
 reload，便于 Python 代码改动后自动生效。
 
+脚本还会做启动前检查：
+
+```text
+npm 不存在
+  -> 直接提示安装 Node.js 20+。
+
+frontend/node_modules 或 mermaid 缺失
+  -> 自动执行 npm install，避免 graph 图无法渲染。
+
+backend/.venv 不是 Python 3.12
+  -> 自动重建。
+
+Rust/Cargo 不存在
+  -> 跳过桌面 Memo Elf，只启动后端和 Web。
+```
+
 依赖已经安装好时，可以跳过安装：
 
 Windows PowerShell：
@@ -151,7 +167,7 @@ Linux / macOS：
 
 `stop-dev` 会停止后端、Vite 前端、Tauri desktop webview 和残留的 Memo Elf 桌面进程，避免重复启动后出现多个精灵。
 
-### Python 3.12 虚拟环境策略
+### Python 虚拟环境策略
 
 后端必须使用 Python 3.12。启动脚本会检查 `backend/.venv`：
 
@@ -164,6 +180,21 @@ backend/.venv 存在但不是 Python 3.12
 ```
 
 Windows 下如果没有 Python 3.12，脚本会尝试用 `winget install Python.Python.3.12` 安装。
+如果机器上已有兼容 Python 但不在 PATH，可以显式指定：
+
+Windows PowerShell：
+
+```powershell
+$env:AIMEMO_PYTHON="C:\Users\you\AppData\Local\Programs\Python\Python312\python.exe"
+.\scripts\start-dev.ps1
+```
+
+Linux / macOS：
+
+```bash
+export AIMEMO_PYTHON=/opt/homebrew/opt/python@3.12/bin/python3.12
+./scripts/start-dev.sh
+```
 
 Linux / macOS 下脚本不会静默安装系统 Python，而是提示用户安装。示例：
 
@@ -290,6 +321,13 @@ Linux / macOS：
 
 ```bash
 ./scripts/start-frontend.sh --skip-install
+```
+
+Graph 图渲染依赖前端包 `mermaid`。启动脚本会在检测到 `node_modules` 缺失或 `mermaid` 缺失时自动执行 `npm install`。
+如果你强制跳过安装后仍看到缺失 `mermaid` 的报错，请在 `frontend/` 下执行：
+
+```bash
+npm install
 ```
 
 ## 6. 手动启动

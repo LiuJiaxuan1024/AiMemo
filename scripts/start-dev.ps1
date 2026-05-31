@@ -12,6 +12,28 @@ $desktopDir = Join-Path $repoRoot "desktop"
 $stopScript = Join-Path $PSScriptRoot "stop-dev.ps1"
 $frontendDir = Join-Path $repoRoot "frontend"
 
+function Assert-CommandAvailable {
+  param(
+    [string]$CommandName,
+    [string]$InstallHint
+  )
+
+  if (-not (Get-Command $CommandName -ErrorAction SilentlyContinue)) {
+    throw "$CommandName is required. $InstallHint"
+  }
+}
+
+function Assert-NodeVersion {
+  Assert-CommandAvailable -CommandName "node" -InstallHint "Install Node.js 20+ from https://nodejs.org/ and make sure node is in PATH."
+  Assert-CommandAvailable -CommandName "npm" -InstallHint "Install Node.js 20+ from https://nodejs.org/ and make sure npm is in PATH."
+
+  $majorText = & node -p "process.versions.node.split('.')[0]"
+  $major = [int]$majorText
+  if ($major -lt 20) {
+    throw "Node.js 20+ is required. Current version: $(node --version). Install Node.js 20+ from https://nodejs.org/."
+  }
+}
+
 function Test-PortAvailable {
   param(
     [string]$HostName,
@@ -64,6 +86,29 @@ function Write-PortFallback {
   }
 }
 
+function Wait-HttpReady {
+  param(
+    [string]$Url,
+    [string]$Name,
+    [int]$TimeoutSeconds = 60
+  )
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while ((Get-Date) -lt $deadline) {
+    try {
+      Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 3 | Out-Null
+      Write-Host "$Name is ready: $Url"
+      return $true
+    }
+    catch {
+      Start-Sleep -Seconds 2
+    }
+  }
+
+  Write-Warning "$Name did not become ready within ${TimeoutSeconds}s. Check the service window for details: $Url"
+  return $false
+}
+
 function Test-PathIsNewerThan {
   param(
     [string]$Path,
@@ -85,9 +130,68 @@ function Test-PathIsNewerThan {
   return $null -ne $newerChild
 }
 
+function Test-FrontendPackageInstalled {
+  param([string]$PackageName)
+  Push-Location $frontendDir
+  try {
+    if (-not (Test-Path "node_modules")) {
+      return $false
+    }
+    npm ls $PackageName --depth=0 --silent *> $null
+    return $LASTEXITCODE -eq 0
+  }
+  finally {
+    Pop-Location
+  }
+}
+
+function Ensure-FrontendDependencies {
+  $nodeModules = Join-Path $frontendDir "node_modules"
+  $missingMermaid = -not (Test-FrontendPackageInstalled -PackageName "mermaid")
+
+  if ((-not $SkipInstall) -or (-not (Test-Path $nodeModules)) -or $missingMermaid) {
+    Push-Location $frontendDir
+    try {
+      Write-Host "Installing frontend dependencies..."
+      npm install
+    }
+    finally {
+      Pop-Location
+    }
+  }
+
+  if (-not (Test-FrontendPackageInstalled -PackageName "mermaid")) {
+    throw "Frontend dependency 'mermaid' is missing. Run 'npm install' in frontend/ or rerun without -SkipInstall."
+  }
+}
+
+function Ensure-DesktopDependencies {
+  if ($NoDesktop) {
+    return $false
+  }
+
+  if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    Write-Warning "Rust/Cargo was not found. Skipping Memo Elf desktop window. Install Rust from https://rustup.rs/ and rerun without -NoDesktop."
+    return $false
+  }
+
+  $nodeModules = Join-Path $desktopDir "node_modules"
+  if ((-not $SkipInstall) -or (-not (Test-Path $nodeModules))) {
+    Push-Location $desktopDir
+    try {
+      Write-Host "Installing desktop dependencies..."
+      npm install
+    }
+    finally {
+      Pop-Location
+    }
+  }
+
+  return $true
+}
+
 function Ensure-FrontendDistForBackendApp {
   $indexHtml = Join-Path $frontendDir "dist\index.html"
-  $nodeModules = Join-Path $frontendDir "node_modules"
 
   # The backend-hosted product entry uses frontend/dist through /app on the selected backend port.
   # Vite on 5173 is hot-reloaded, but /app on 8000 will stay stale unless dist is rebuilt.
@@ -128,11 +232,9 @@ function Ensure-FrontendDistForBackendApp {
   }
 
   Write-Host "Building frontend for backend-hosted /app entry..."
+  Ensure-FrontendDependencies
   Push-Location $frontendDir
   try {
-    if ((-not $SkipInstall) -or (-not (Test-Path $nodeModules))) {
-      npm install
-    }
     npm run build
   }
   finally {
@@ -140,7 +242,9 @@ function Ensure-FrontendDistForBackendApp {
   }
 }
 
+Assert-NodeVersion
 & $stopScript
+Ensure-FrontendDependencies
 Ensure-FrontendDistForBackendApp
 
 $hostName = if ($env:AIMEMO_HOST) { $env:AIMEMO_HOST } else { "127.0.0.1" }
@@ -150,6 +254,7 @@ $preferredDesktopPort = if ($env:AIMEMO_DESKTOP_PORT) { [int]$env:AIMEMO_DESKTOP
 $backendPort = Find-AvailablePort -HostName $hostName -PreferredPort $preferredBackendPort
 $frontendPort = Find-AvailablePort -HostName $hostName -PreferredPort $preferredFrontendPort
 $desktopPort = Find-AvailablePort -HostName $hostName -PreferredPort $preferredDesktopPort
+$desktopEnabled = Ensure-DesktopDependencies
 $env:AIMEMO_HOST = $hostName
 $env:AIMEMO_BACKEND_PORT = [string]$backendPort
 $env:AIMEMO_FRONTEND_PORT = [string]$frontendPort
@@ -161,14 +266,16 @@ $env:VITE_AIMEMO_BACKEND_URL = $env:AIMEMO_BACKEND_URL
 Write-Host "Starting AiMemo backend, frontend, and Memo Elf..."
 Write-PortFallback -Name "Backend" -PreferredPort $preferredBackendPort -ActualPort $backendPort
 Write-PortFallback -Name "Frontend" -PreferredPort $preferredFrontendPort -ActualPort $frontendPort
-if (-not $NoDesktop) {
+if ($desktopEnabled) {
   Write-PortFallback -Name "Memo Elf webview" -PreferredPort $preferredDesktopPort -ActualPort $desktopPort
 }
 Write-Host "Backend:  http://${hostName}:$backendPort"
 Write-Host "Frontend: http://${hostName}:$frontendPort/app/"
 Write-Host "Product:  http://${hostName}:$backendPort/app/"
-if (-not $NoDesktop) {
+if ($desktopEnabled) {
   Write-Host "Memo Elf: Tauri desktop window"
+} elseif (-not $NoDesktop) {
+  Write-Host "Memo Elf: skipped because Rust/Cargo is not installed"
 }
 
 $backendArgs = @("-NoExit", "-ExecutionPolicy", "Bypass", "-File", $backendScript, "-HostName", $hostName, "-Port", $backendPort)
@@ -179,10 +286,10 @@ if ($SkipInstall) {
 }
 
 Start-Process powershell -ArgumentList $backendArgs -WorkingDirectory $repoRoot
-Start-Sleep -Seconds 2
+Wait-HttpReady -Url "http://${hostName}:$backendPort/api/health" -Name "Backend" -TimeoutSeconds 75 | Out-Null
 Start-Process powershell -ArgumentList $frontendArgs -WorkingDirectory $repoRoot
-if (-not $NoDesktop) {
-  $desktopCommand = if ($SkipInstall) { "npm run dev" } else { "npm install; npm run dev" }
+if ($desktopEnabled) {
+  $desktopCommand = "npm run dev"
   Start-Sleep -Seconds 2
   Start-Process powershell -ArgumentList @("-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $desktopCommand) -WorkingDirectory $desktopDir
 }

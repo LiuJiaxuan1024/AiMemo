@@ -32,15 +32,40 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FRONTEND_DIR="$REPO_ROOT/frontend"
 source "$SCRIPT_DIR/dev-utils.sh"
 
+if ! command -v npm >/dev/null 2>&1; then
+  echo "npm is required. Install Node.js 20+ from https://nodejs.org/ and make sure npm is in PATH." >&2
+  exit 1
+fi
+if ! command -v node >/dev/null 2>&1; then
+  echo "node is required. Install Node.js 20+ from https://nodejs.org/ and make sure node is in PATH." >&2
+  exit 1
+fi
+NODE_MAJOR="$(node -p "process.versions.node.split('.')[0]")"
+if (( NODE_MAJOR < 20 )); then
+  echo "Node.js 20+ is required. Current version: $(node --version). Install Node.js 20+ from https://nodejs.org/." >&2
+  exit 1
+fi
+
 ACTUAL_PORT="$(find_available_port "$HOST" "$PORT")"
 print_port_fallback "Frontend" "$PORT" "$ACTUAL_PORT"
 PORT="$ACTUAL_PORT"
 
 cd "$FRONTEND_DIR"
 
-if [[ "$SKIP_INSTALL" -eq 0 || ! -d "node_modules" ]]; then
+package_installed() {
+  local package_name="$1"
+  [[ -d "node_modules" ]] || return 1
+  npm ls "$package_name" --depth=0 --silent >/dev/null 2>&1
+}
+
+if [[ "$SKIP_INSTALL" -eq 0 || ! -d "node_modules" ]] || ! package_installed mermaid; then
   echo "Installing frontend dependencies..."
   npm install
+fi
+
+if ! package_installed mermaid; then
+  echo "Frontend dependency 'mermaid' is missing. Run 'npm install' in frontend/ or rerun without --skip-install." >&2
+  exit 1
 fi
 
 echo "Starting AiMemo frontend dev server at http://$HOST:$PORT/app/ ..."

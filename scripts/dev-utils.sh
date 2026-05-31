@@ -3,8 +3,34 @@
 port_is_available() {
   local host="$1"
   local port="$2"
+  local python_bin
 
-  python3 - "$host" "$port" <<'PY' >/dev/null 2>&1
+  if command -v node >/dev/null 2>&1; then
+    node - "$host" "$port" <<'JS' >/dev/null 2>&1
+const net = require("node:net");
+const host = process.argv[2];
+const port = Number(process.argv[3]);
+const server = net.createServer();
+server.once("error", () => process.exit(1));
+server.once("listening", () => server.close(() => process.exit(0)));
+server.listen(port, host);
+JS
+    return $?
+  fi
+
+  for python_bin in python3.12 python3 python; do
+    if command -v "$python_bin" >/dev/null 2>&1; then
+      break
+    fi
+    python_bin=""
+  done
+
+  if [[ -z "$python_bin" ]]; then
+    echo "Node.js or Python is required for port probing. Install Node.js 20+ and Python 3.12, then rerun the dev script." >&2
+    return 1
+  fi
+
+  "$python_bin" - "$host" "$port" <<'PY' >/dev/null 2>&1
 import socket
 import sys
 

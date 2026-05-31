@@ -23,6 +23,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/dev-utils.sh"
 
+assert_command_available() {
+  local command_name="$1"
+  local install_hint="$2"
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "$command_name is required. $install_hint" >&2
+    exit 1
+  fi
+}
+
+assert_node_version() {
+  assert_command_available node "Install Node.js 20+ from https://nodejs.org/ and make sure node is in PATH."
+  assert_command_available npm "Install Node.js 20+ from https://nodejs.org/ and make sure npm is in PATH."
+
+  local node_major
+  node_major="$(node -p "process.versions.node.split('.')[0]")"
+  if (( node_major < 20 )); then
+    echo "Node.js 20+ is required. Current version: $(node --version). Install Node.js 20+ from https://nodejs.org/." >&2
+    exit 1
+  fi
+}
+
 warn_linux_file_watch_limit() {
   [[ "$(uname -s)" == "Linux" ]] || return 0
 
@@ -59,6 +80,53 @@ Example:
 EOF
     fi
   done
+}
+
+frontend_package_installed() {
+  local package_name="$1"
+  (
+    cd "$REPO_ROOT/frontend"
+    [[ -d "node_modules" ]] || exit 1
+    npm ls "$package_name" --depth=0 --silent >/dev/null 2>&1
+  )
+}
+
+ensure_frontend_dependencies() {
+  local frontend_dir="$REPO_ROOT/frontend"
+  if [[ "$SKIP_INSTALL" -eq 0 || ! -d "$frontend_dir/node_modules" ]] || ! frontend_package_installed mermaid; then
+    (
+      cd "$frontend_dir"
+      echo "Installing frontend dependencies..."
+      npm install
+    )
+  fi
+
+  if ! frontend_package_installed mermaid; then
+    echo "Frontend dependency 'mermaid' is missing. Run 'npm install' in frontend/ or rerun without --skip-install." >&2
+    exit 1
+  fi
+}
+
+ensure_desktop_dependencies() {
+  if [[ "$NO_DESKTOP" -eq 1 ]]; then
+    return 1
+  fi
+
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "Warning: Rust/Cargo was not found. Skipping Memo Elf desktop window." >&2
+    echo "Install Rust from https://rustup.rs/ and rerun without --no-desktop to enable it." >&2
+    return 1
+  fi
+
+  if [[ "$(uname -s)" != "Linux" && ( "$SKIP_INSTALL" -eq 0 || ! -d "$REPO_ROOT/desktop/node_modules" ) ]]; then
+    (
+      cd "$REPO_ROOT/desktop"
+      echo "Installing desktop dependencies..."
+      npm install
+    )
+  fi
+
+  return 0
 }
 
 stop_port_processes() {
@@ -108,16 +176,16 @@ ensure_frontend_dist_for_backend_app() {
   echo "Building frontend for backend-hosted /app entry..."
   (
     cd "$frontend_dir"
-    if [[ "$SKIP_INSTALL" -eq 0 || ! -d "node_modules" ]]; then
-      npm install
-    fi
+    ensure_frontend_dependencies
     npm run build
   )
 }
 
+assert_node_version
 "$SCRIPT_DIR/stop-dev.sh"
 warn_linux_file_watch_limit
 warn_invalid_proxy_scheme
+ensure_frontend_dependencies
 ensure_frontend_dist_for_backend_app
 
 HOST="${AIMEMO_HOST:-127.0.0.1}"
@@ -127,6 +195,10 @@ PREFERRED_DESKTOP_PORT="${AIMEMO_DESKTOP_PORT:-1420}"
 BACKEND_PORT="$(find_available_port "$HOST" "$PREFERRED_BACKEND_PORT")"
 FRONTEND_PORT="$(find_available_port "$HOST" "$PREFERRED_FRONTEND_PORT")"
 DESKTOP_PORT="$(find_available_port "$HOST" "$PREFERRED_DESKTOP_PORT")"
+DESKTOP_ENABLED=0
+if ensure_desktop_dependencies; then
+  DESKTOP_ENABLED=1
+fi
 export AIMEMO_HOST="$HOST"
 export AIMEMO_BACKEND_PORT="$BACKEND_PORT"
 export AIMEMO_FRONTEND_PORT="$FRONTEND_PORT"
@@ -143,14 +215,16 @@ fi
 echo "Starting AiMemo backend, frontend, and Memo Elf..."
 print_port_fallback "Backend" "$PREFERRED_BACKEND_PORT" "$BACKEND_PORT"
 print_port_fallback "Frontend" "$PREFERRED_FRONTEND_PORT" "$FRONTEND_PORT"
-if [[ "$NO_DESKTOP" -eq 0 && "$(uname -s)" != "Linux" ]]; then
+if [[ "$DESKTOP_ENABLED" -eq 1 && "$(uname -s)" != "Linux" ]]; then
   print_port_fallback "Memo Elf webview" "$PREFERRED_DESKTOP_PORT" "$DESKTOP_PORT"
 fi
 echo "Backend:  http://$HOST:$BACKEND_PORT"
 echo "Frontend: http://$HOST:$FRONTEND_PORT/app/"
 echo "Product:  http://$HOST:$BACKEND_PORT/app/"
-if [[ "$NO_DESKTOP" -eq 0 ]]; then
+if [[ "$DESKTOP_ENABLED" -eq 1 ]]; then
   echo "Memo Elf: Tauri desktop window"
+elif [[ "$NO_DESKTOP" -eq 0 ]]; then
+  echo "Memo Elf: skipped because Rust/Cargo is not installed"
 fi
 
 "$SCRIPT_DIR/start-backend.sh" $START_ARGS --host="$HOST" --port="$BACKEND_PORT" &
@@ -171,12 +245,9 @@ fi
 "$SCRIPT_DIR/start-frontend.sh" $START_ARGS --host="$HOST" --port="$FRONTEND_PORT" --backend-port="$BACKEND_PORT" &
 FRONTEND_PID=$!
 
-if [[ "$NO_DESKTOP" -eq 0 ]]; then
+if [[ "$DESKTOP_ENABLED" -eq 1 ]]; then
   (
     cd "$REPO_ROOT/desktop"
-    if [[ "$(uname -s)" != "Linux" ]] && [[ "$SKIP_INSTALL" -eq 0 || ! -d "node_modules" ]]; then
-      npm install
-    fi
     if [[ "$(uname -s)" == "Linux" ]]; then
       (
         cd "$REPO_ROOT/desktop/src-tauri"
@@ -189,7 +260,7 @@ if [[ "$NO_DESKTOP" -eq 0 ]]; then
   DESKTOP_PID=$!
 fi
 
-if [[ "$NO_DESKTOP" -eq 0 ]]; then
+if [[ "$DESKTOP_ENABLED" -eq 1 ]]; then
   wait "$BACKEND_PID" "$FRONTEND_PID" "$DESKTOP_PID"
 else
   wait "$BACKEND_PID" "$FRONTEND_PID"
