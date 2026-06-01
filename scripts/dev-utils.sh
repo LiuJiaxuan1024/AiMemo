@@ -70,3 +70,18 @@ print_port_fallback() {
     echo "$name port $preferred_port is busy; using $actual_port instead."
   fi
 }
+
+read_project_config_value() {
+  local path="$1"
+  local default_value="$2"
+  local config_path="$REPO_ROOT/config.json5"
+  local script_dir
+
+  if [[ ! -f "$config_path" ]]; then
+    echo "$default_value"
+    return 0
+  fi
+
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  node "$script_dir/read-project-config.cjs" "$config_path" "$path" "$default_value"
+}

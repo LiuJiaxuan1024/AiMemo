@@ -17,7 +17,8 @@
     "reconciler_interval_seconds": 30.0,
   },
   "elf": {
-    // false 时 Web 前端不挂载精灵组件；精灵工坊仍可通过侧边按钮打开。
+    // false 时 Web 前端不挂载精灵组件，start-dev 也不启动桌面精灵；
+    // 精灵工坊仍可通过侧边按钮打开。
     "enabled": false,
   },
   "voice": {

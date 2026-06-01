@@ -162,6 +162,9 @@ class Settings(BaseSettings):
     # 这里可以追加更多根目录，使用分号或逗号分隔，例如：
     # LOCAL_OPERATOR_WORKSPACE_ROOTS=E:\Ai记;D:\资料;~/Documents
     local_operator_workspace_roots: str = ""
+    aimemo_host: str = "127.0.0.1"
+    aimemo_frontend_port: int = 5173
+    aimemo_desktop_port: int = 1420
     cors_origins: list[str] = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
@@ -179,6 +182,19 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @property
+    def resolved_cors_origins(self) -> list[str]:
+        origins = list(self.cors_origins)
+        for port in {self.aimemo_frontend_port, self.aimemo_desktop_port}:
+            origins.extend(
+                [
+                    f"http://localhost:{port}",
+                    f"http://127.0.0.1:{port}",
+                    f"http://{self.aimemo_host}:{port}",
+                ]
+            )
+        return list(dict.fromkeys(origins))
 
 
 settings = Settings()

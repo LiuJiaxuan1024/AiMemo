@@ -11,6 +11,7 @@ $frontendScript = Join-Path $PSScriptRoot "start-frontend.ps1"
 $desktopDir = Join-Path $repoRoot "desktop"
 $stopScript = Join-Path $PSScriptRoot "stop-dev.ps1"
 $frontendDir = Join-Path $repoRoot "frontend"
+$desktopSkipReason = ""
 
 function Assert-CommandAvailable {
   param(
@@ -84,6 +85,25 @@ function Write-PortFallback {
   if ($PreferredPort -ne $ActualPort) {
     Write-Host "$Name port $PreferredPort is busy; using $ActualPort instead."
   }
+}
+
+function Get-ProjectConfigValue {
+  param(
+    [string]$Path,
+    [string]$DefaultValue
+  )
+
+  $configPath = Join-Path $repoRoot "config.json5"
+  $readerPath = Join-Path $PSScriptRoot "read-project-config.cjs"
+  if (-not (Test-Path $configPath)) {
+    return $DefaultValue
+  }
+
+  $value = & node $readerPath $configPath $Path $DefaultValue
+  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($value)) {
+    return $DefaultValue
+  }
+  return $value.Trim()
 }
 
 function Wait-HttpReady {
@@ -167,11 +187,18 @@ function Ensure-FrontendDependencies {
 
 function Ensure-DesktopDependencies {
   if ($NoDesktop) {
+    $script:desktopSkipReason = "disabled by -NoDesktop"
+    return $false
+  }
+
+  if ((Get-ProjectConfigValue -Path "elf.enabled" -DefaultValue "true") -ne "true") {
+    $script:desktopSkipReason = "disabled by config.json5 elf.enabled=false"
     return $false
   }
 
   if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     Write-Warning "Rust/Cargo was not found. Skipping Memo Elf desktop window. Install Rust from https://rustup.rs/ and rerun without -NoDesktop."
+    $script:desktopSkipReason = "Rust/Cargo is not installed"
     return $false
   }
 
@@ -274,8 +301,8 @@ Write-Host "Frontend: http://${hostName}:$frontendPort/app/"
 Write-Host "Product:  http://${hostName}:$backendPort/app/"
 if ($desktopEnabled) {
   Write-Host "Memo Elf: Tauri desktop window"
-} elseif (-not $NoDesktop) {
-  Write-Host "Memo Elf: skipped because Rust/Cargo is not installed"
+} elseif ($desktopSkipReason) {
+  Write-Host "Memo Elf: skipped ($desktopSkipReason)"
 }
 
 $backendArgs = @("-NoExit", "-ExecutionPolicy", "Bypass", "-File", $backendScript, "-HostName", $hostName, "-Port", $backendPort)

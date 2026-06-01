@@ -3,6 +3,7 @@ set -euo pipefail
 
 SKIP_INSTALL=0
 NO_DESKTOP=0
+DESKTOP_SKIP_REASON=""
 for arg in "$@"; do
   case "$arg" in
     --skip-install)
@@ -109,12 +110,19 @@ ensure_frontend_dependencies() {
 
 ensure_desktop_dependencies() {
   if [[ "$NO_DESKTOP" -eq 1 ]]; then
+    DESKTOP_SKIP_REASON="disabled by --no-desktop"
+    return 1
+  fi
+
+  if [[ "$(read_project_config_value "elf.enabled" "true")" != "true" ]]; then
+    DESKTOP_SKIP_REASON="disabled by config.json5 elf.enabled=false"
     return 1
   fi
 
   if ! command -v cargo >/dev/null 2>&1; then
     echo "Warning: Rust/Cargo was not found. Skipping Memo Elf desktop window." >&2
     echo "Install Rust from https://rustup.rs/ and rerun without --no-desktop to enable it." >&2
+    DESKTOP_SKIP_REASON="Rust/Cargo is not installed"
     return 1
   fi
 
@@ -223,8 +231,8 @@ echo "Frontend: http://$HOST:$FRONTEND_PORT/app/"
 echo "Product:  http://$HOST:$BACKEND_PORT/app/"
 if [[ "$DESKTOP_ENABLED" -eq 1 ]]; then
   echo "Memo Elf: Tauri desktop window"
-elif [[ "$NO_DESKTOP" -eq 0 ]]; then
-  echo "Memo Elf: skipped because Rust/Cargo is not installed"
+elif [[ -n "$DESKTOP_SKIP_REASON" ]]; then
+  echo "Memo Elf: skipped ($DESKTOP_SKIP_REASON)"
 fi
 
 "$SCRIPT_DIR/start-backend.sh" $START_ARGS --host="$HOST" --port="$BACKEND_PORT" &

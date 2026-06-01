@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DESKTOP_EXE="$REPO_ROOT/desktop/src-tauri/target/debug/memo-elf-desktop"
+NATIVE_ELF_EXE="$REPO_ROOT/desktop/src-tauri/target/debug/memo-elf-native"
 
 stop_port_processes() {
   local port="$1"
@@ -28,6 +29,8 @@ stop_matching_processes() {
 }
 
 stop_matching_processes "$DESKTOP_EXE" "Memo Elf desktop"
+stop_matching_processes "$NATIVE_ELF_EXE" "Memo Elf native desktop"
+stop_matching_processes "$REPO_ROOT/desktop/src-tauri.*cargo run --bin memo-elf-native" "Memo Elf native cargo runner"
 stop_matching_processes "$REPO_ROOT.*npm run dev" "AiMemo npm dev processes"
 stop_matching_processes "$REPO_ROOT.*uvicorn app.main:app" "AiMemo backend processes"
 stop_matching_processes "$REPO_ROOT.*vite.*--host 127.0.0.1" "AiMemo Vite dev processes"
