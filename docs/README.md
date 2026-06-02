@@ -49,6 +49,7 @@
 - [Note Embedding Graph](./agent/note-embedding-graph.md)
 - [Memory Chat Graph](./agent/memory-chat-graph.md)
 - [Context Pyramid](./agent/context-pyramid.md)
+- [聊天模型 Provider 适配设计](./agent/model-provider-adapter.md)
 - [Conversation Summary Graph](./agent/conversation-summary-graph.md)
 - [Conversation Memory Graph](./agent/conversation-memory-graph.md)
 - [Conversation Title Graph](./agent/conversation-title-graph.md)

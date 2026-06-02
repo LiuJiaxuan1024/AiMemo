@@ -163,7 +163,10 @@ plan_l3_retrieval
 
 派生文本
   作为上下文和检索入口，包含 OCR、caption、key facts、标签、坐标/尺寸 metadata。
-  当前实现先生成基础 metadata 派生文本；OCR、caption、key facts 是后续视觉理解扩展。
+  当前上传阶段先生成基础 metadata 派生文本；只要本轮用户消息挂载了图片，
+  build_lx_attachment_context 会主动调用视觉模型生成 vision 派生文本并注入上下文。
+  inspect_image_attachment 仍作为后续追问或重新解析工具保留。OCR、caption、key facts
+  的更细粒度后台持久化派生仍可后续扩展。
   派生文本是可重算、可过期的，不等同于原图真相。
 
 上下文注入
@@ -175,9 +178,9 @@ plan_l3_retrieval
 
 ```text
 1. 读取当前 user message 关联的附件，以及 L1/L2/L3 中提到的 attachment 引用。
-2. 对当前轮新图片生成或读取派生文本，优先产出足够回答本轮问题的 caption/key facts。
+2. 对当前轮新图片自动生成或读取 vision 派生文本，优先产出足够回答本轮问题的图片内容。
 3. 对历史图片默认只注入已保存派生文本和 attachment_id/storage_path。
 4. 如果派生文本不足，prompt 中必须让 agent 能看到可回源的 attachment 引用，
-   后续通过附件解析工具重新读取原图，而不是基于不完整 caption 编造。
+   后续通过 inspect_image_attachment 重新读取原图，而不是基于不完整 caption 编造。
 5. 把最终结果写入 context_lx_attachment_layer，交给 merge_prompt_context 合并。
 ```

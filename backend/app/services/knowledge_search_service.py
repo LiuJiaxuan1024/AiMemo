@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from typing import Literal
 
@@ -40,6 +40,9 @@ class KnowledgeSearchResult:
     mode: str
     status: str
     results: list[KnowledgeSearchItem]
+    recall_cache: list[KnowledgeSearchItem] = field(default_factory=list)
+    per_document_limit: int = 3
+    cache_hit: bool = False
 
 
 def search_knowledge(
@@ -49,12 +52,14 @@ def search_knowledge(
     space_ids: list[int],
     top_k: int = 8,
     mode: KnowledgeSearchMode = "hybrid",
+    per_document_limit: int = 3,
     embedding_generator=embed_texts,
 ) -> KnowledgeSearchResult:
     normalized_query = query.strip()
     normalized_space_ids = list(dict.fromkeys(int(space_id) for space_id in space_ids if int(space_id) > 0))
     normalized_mode = _normalize_mode(mode)
     normalized_top_k = max(1, min(int(top_k or 8), 20))
+    normalized_per_document_limit = max(1, min(int(per_document_limit or 3), 20))
     if not normalized_query or not normalized_space_ids:
         return KnowledgeSearchResult(
             query=normalized_query,
@@ -62,6 +67,8 @@ def search_knowledge(
             mode=normalized_mode,
             status="ok",
             results=[],
+            recall_cache=[],
+            per_document_limit=normalized_per_document_limit,
         )
 
     vector_items: list[KnowledgeSearchItem] = []
@@ -85,11 +92,16 @@ def search_knowledge(
         )
 
     if normalized_mode == "vector":
-        results = _cap_per_document(vector_items)[:normalized_top_k]
+        recall_cache = vector_items
     elif normalized_mode == "keyword":
-        results = _cap_per_document(keyword_items)[:normalized_top_k]
+        recall_cache = keyword_items
     else:
-        results = _hybrid_merge(vector_items, keyword_items, top_k=normalized_top_k)
+        recall_cache = _hybrid_rank(vector_items, keyword_items)
+    results = select_from_recall_cache(
+        recall_cache,
+        top_k=normalized_top_k,
+        per_document_limit=normalized_per_document_limit,
+    )
 
     return KnowledgeSearchResult(
         query=normalized_query,
@@ -97,6 +109,8 @@ def search_knowledge(
         mode=normalized_mode,
         status="ok",
         results=results,
+        recall_cache=recall_cache,
+        per_document_limit=normalized_per_document_limit,
     )
 
 
@@ -107,6 +121,7 @@ def search_mounted_knowledge(
     query: str,
     top_k: int = 5,
     mode: KnowledgeSearchMode = "hybrid",
+    per_document_limit: int = 3,
     embedding_generator=embed_texts,
 ) -> KnowledgeSearchResult:
     mounts = session.exec(
@@ -120,6 +135,8 @@ def search_mounted_knowledge(
             mode=_normalize_mode(mode),
             status=NEED_KNOWLEDGE_MOUNT,
             results=[],
+            recall_cache=[],
+            per_document_limit=max(1, min(int(per_document_limit or 3), 20)),
         )
     return search_knowledge(
         session,
@@ -127,6 +144,7 @@ def search_mounted_knowledge(
         space_ids=space_ids,
         top_k=top_k,
         mode=mode,
+        per_document_limit=per_document_limit,
         embedding_generator=embedding_generator,
     )
 
@@ -237,11 +255,9 @@ def _ready_chunk_statement(space_ids: list[int]):
     )
 
 
-def _hybrid_merge(
+def _hybrid_rank(
     vector_items: list[KnowledgeSearchItem],
     keyword_items: list[KnowledgeSearchItem],
-    *,
-    top_k: int,
 ) -> list[KnowledgeSearchItem]:
     combined: dict[int, KnowledgeSearchItem] = {}
     scores: dict[int, float] = {}
@@ -271,7 +287,16 @@ def _hybrid_merge(
                 }
             )
         )
-    return _cap_per_document(merged)[:top_k]
+    return merged
+
+
+def select_from_recall_cache(
+    items: list[KnowledgeSearchItem],
+    *,
+    top_k: int,
+    per_document_limit: int = 3,
+) -> list[KnowledgeSearchItem]:
+    return _cap_per_document(items, per_document=per_document_limit)[: max(1, min(int(top_k or 5), 20))]
 
 
 def _cap_per_document(items: list[KnowledgeSearchItem], *, per_document: int = 3) -> list[KnowledgeSearchItem]:

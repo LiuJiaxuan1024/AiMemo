@@ -152,6 +152,7 @@ class Settings(BaseSettings):
         _config_value("attachments.chat_image_default_policy", "chat_only")
     )
     attachments_auto_extract: bool = bool(_config_value("attachments.auto_extract", True))
+    attachments_vision_model: str = str(_config_value("attachments.vision_model", "qwen-vl-plus"))
     attachments_allowed_image_mime_types: list[str] = [
         str(item)
         for item in _config_value(
@@ -182,6 +183,11 @@ class Settings(BaseSettings):
     embedding_dimensions: int = 1024
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
+    deepseek_api_key: str = ""
+    openrouter_api_key: str = ""
+    siliconflow_api_key: str = ""
+    local_llm_api_key: str = ""
+    anthropic_api_key: str = ""
     chat_model: str = ""
     embedding_model: str = ""
     # Local Operator read-only 默认允许仓库根目录和当前用户 Home。

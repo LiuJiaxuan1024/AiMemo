@@ -630,6 +630,117 @@ RRF 示例语义：
   可以提高该文档上限。
 ```
 
+#### 慢启动自适应召回
+
+每个文档默认最多进入 3 个 chunk 是合理的首轮策略：它能避免长文档一次占满上下文，也能让多文档问题保留来源多样性。但这个上限不应被理解成“每轮永远只允许 3 个”。更稳的设计是慢启动：
+
+```text
+focused 首轮
+  final_top_k = 5
+  per_document_limit = 3
+  适合事实查询、定义解释、定位某个资料点。
+
+expanded 补充轮
+  final_top_k = 10
+  per_document_limit = 6
+  适合首轮片段明显不足、同一文档相关但上下文断裂、用户追问“详细说说”。
+
+deep 深查轮
+  final_top_k = 15-20
+  per_document_limit = 9
+  只在用户明确要求总结整篇文档、跨章节分析、列出完整方案或多次补查仍不足时启用。
+```
+
+触发扩容时不要只按“第几次检索”机械递增，而要记录不足原因：
+
+```text
+命中数量不足
+  优先扩大 final_top_k，保持 per_document_limit，避免单文档挤占结果。
+
+同一文档高相关但片段断裂
+  扩大 per_document_limit，并优先补取命中 chunk 的相邻 chunk。
+
+问题本身很宽泛
+  例如“总结这份文档”“分析整个方案”，可以从 expanded 起步。
+
+最高分偏低或 query 歧义大
+  不盲目扩大 chunk 数量，优先改写 query、换关键词，必要时向用户澄清。
+```
+
+相邻 chunk 扩展应作为慢启动的重要组成，而不是只依赖再次向量检索：
+
+```text
+命中 document_id = 8, chunk_index = 12
+  可补取同文档 chunk_index = 11 和 13。
+
+如果 chunk 处在标题段落边界
+  可额外补取同 heading_path 下的前后 chunk。
+```
+
+首轮检索应保留一个本轮缓存池，避免补充轮无意义地反复查询向量库：
+
+```text
+recall_cache
+  保存本轮 vector recall、keyword recall、hybrid merge 的候选 chunk。
+  候选数量应大于最终进入 prompt 的数量，例如 focused 首轮 final_top_k=5，
+  但 recall_cache 可保留 top 12-20 个候选及其 score、rank、document_id、chunk_index。
+
+context_pack
+  只保存当前真正进入 L3_knowledge_context 的片段。
+
+expansion
+  当 agent 判断内容不足、命中太少或文档断裂时，优先从 recall_cache 中扩充。
+  只有缓存池也不足、query 需要改写或用户提出了新检索角度时，才再次查询向量库 / 关键词索引。
+```
+
+缓存扩展的优先级：
+
+```text
+1. 同一 document_id 且同 heading_path 的候选 chunk。
+2. 命中 chunk_index 前后的相邻 chunk。
+3. 首轮 hybrid merge 中排名靠前但未进入 context_pack 的候选。
+4. 其他文档中的高分候选，用于保持多文档问题的来源多样性。
+5. 缓存无法覆盖新问题时，再执行新的 retrieval。
+```
+
+缓存只在单轮 graph / 当前追问链路内有效，不应长期复用。原因是挂载范围、文档状态、用户问题和 token budget 都可能变化。缓存命中也必须重新经过 mounted space、document.status、embedding_status 等范围校验，避免文档被删除或取消挂载后继续被引用。
+
+推荐流程：
+
+```mermaid
+flowchart TD
+  Ask[用户问题] --> Scope{当前对话已挂载知库?}
+  Scope -->|否| NeedMount[提示先挂载知识空间]
+  Scope -->|是| Intent{问题是否需要知库?}
+  Intent -->|明确闲聊/常识| Skip[跳过知库检索]
+  Intent -->|需要或可能需要| Profile[选择检索档位 focused]
+  Profile --> Recall[hybrid recall: vector + keyword]
+  Recall --> Merge[RRF merge + 去重]
+  Merge --> Cache[写入 recall_cache]
+  Cache --> Cap[每文档最多 3 个 chunk]
+  Cap --> Pack[打包 L3_knowledge_context]
+  Pack --> Enough{片段足够回答?}
+  Enough -->|是| Answer[基于引用回答]
+  Enough -->|否: 命中少| ExpandTopK[从 recall_cache 扩大 final_top_k]
+  Enough -->|否: 同文档断裂| ExpandDoc[从 recall_cache / 相邻 chunk 扩到 per_document=6]
+  Enough -->|否: query 歧义| Rewrite[改写 query / 换关键词]
+  ExpandTopK --> Pack
+  ExpandDoc --> Pack
+  Rewrite --> Recall
+```
+
+实现上可以把档位参数显式放入检索请求或工具参数中：
+
+```text
+retrieval_profile: focused | expanded | deep
+per_document_limit: 3 | 6 | 9
+include_neighbor_chunks: false | true
+expansion_reason: low_hit_count | same_document_gap | broad_summary | ambiguous_query
+recall_cache_policy: keep_candidates | bypass_cache_on_query_rewrite
+```
+
+回答阶段如果触发补充检索，应把 `retrieval_phase` 标记成 `tool_supplement` 或更细的 `adaptive_expansion`，并在 debug 中记录本轮从哪个档位扩到哪个档位、是否命中 `recall_cache`。用户最终回答不需要暴露这些内部档位，但调试面板应该能看到扩容原因。
+
 ### 5. Context Packing：上下文打包
 
 进入 prompt 的不是原始检索结果，而是结构化 context pack。

@@ -62,6 +62,57 @@ def test_search_knowledge_keyword_mode_without_embedding_call(session: Session) 
     assert result.results[0].score_source == "keyword"
 
 
+def test_search_knowledge_keeps_recall_cache_beyond_document_cap(session: Session) -> None:
+    space = KnowledgeSpace(name="缓存资料")
+    session.add(space)
+    session.flush()
+    document = KnowledgeDocument(
+        space_id=space.id or 0,
+        title="长文档",
+        source_type="file",
+        content_hash="cache-doc",
+        status="ready",
+    )
+    session.add(document)
+    session.flush()
+    chunks = [
+        KnowledgeChunk(
+            space_id=space.id or 0,
+            document_id=document.id or 0,
+            chunk_index=index,
+            text=f"adaptive cache topic section {index}",
+            content_hash=f"cache-chunk-{index}",
+            token_count=5,
+            embedding_status="completed",
+        )
+        for index in range(5)
+    ]
+    session.add_all(chunks)
+    session.commit()
+
+    focused = search_knowledge(
+        session,
+        query="adaptive cache",
+        space_ids=[space.id or 0],
+        top_k=5,
+        mode="keyword",
+    )
+
+    assert len(focused.recall_cache) == 5
+    assert len(focused.results) == 3
+
+    expanded = search_knowledge(
+        session,
+        query="adaptive cache",
+        space_ids=[space.id or 0],
+        top_k=5,
+        mode="keyword",
+        per_document_limit=6,
+    )
+
+    assert len(expanded.results) == 5
+
+
 def test_search_mounted_knowledge_uses_only_mounted_spaces(session: Session, tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(settings, "database_url", f"sqlite:///{tmp_path / 'test.db'}")
     monkeypatch.setattr(settings, "embedding_dimensions", 4)

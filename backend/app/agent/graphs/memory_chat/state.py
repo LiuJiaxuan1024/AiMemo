@@ -197,6 +197,7 @@ class MemoryChatGraphState(TypedDict, total=False):
     knowledge_retrieval_query: str
     knowledge_retrieval_reason: str
     knowledge_retrieved_chunks: list[KnowledgeRetrievedChunkPayload]
+    knowledge_recall_cache: list[KnowledgeRetrievedChunkPayload]
     knowledge_retrieval_debug: dict
     context_conversation_window_layer: ContextLayerPayload
     context_l0_layer: ContextLayerPayload

@@ -2,6 +2,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+import base64
 import json
 import logging
 from copy import deepcopy
@@ -15,7 +16,7 @@ from langchain_core.tools import StructuredTool
 from langgraph.config import get_stream_writer
 from langgraph.types import Send, interrupt
 from pydantic import BaseModel, Field
-from sqlmodel import Session, desc, select
+from sqlmodel import Session, col, desc, select
 
 from app.ai.json_utils import parse_json_object
 from app.agent.graphs.local_operator.nodes import (
@@ -56,13 +57,20 @@ from app.agent.graphs.memory_chat.state import (
     TurnMessagePayload,
 )
 from app.agent.context import build_memory_chat_prompt_context
-from app.agent.model import get_agent_chat_model, get_agent_chat_model_with_tools, get_planner_chat_model
+from app.agent.model import (
+    get_agent_chat_model,
+    get_agent_chat_model_with_tools,
+    get_planner_chat_model,
+    get_vision_chat_model,
+)
 from app.core.config import settings
 from app.core.timing import elapsed_ms, emit_timing, now_counter
 from app.local_operator.policy import LocalOperatorPolicy
 from app.local_operator.tools import create_read_tools
 from app.models.chat_message import ChatMessage
+from app.models.chat_attachment import ChatAttachment, ChatAttachmentDerivative
 from app.models.conversation import Conversation
+from app.models.knowledge import KnowledgeChunk, KnowledgeDocument, KnowledgeSpace
 from app.models.note import utc_now
 from app.rag.search import NoteSearchResult, search_notes
 from app.rag.chunking.tokenizer import count_tokens
@@ -72,7 +80,11 @@ from app.services.knowledge_search_service import (
     KnowledgeSearchItem,
     search_mounted_knowledge,
 )
-from app.services.attachment_service import attach_attachments_to_message, load_attachment_context_for_message
+from app.services.attachment_service import (
+    attach_attachments_to_message,
+    get_attachment_or_404,
+    load_attachment_context_for_message,
+)
 from app.services.long_term_memory_service import list_core_memories
 
 
@@ -84,6 +96,7 @@ logger = logging.getLogger(__name__)
 MAX_CONSECUTIVE_FAILED_TOOL_BATCHES = 3
 REQUEST_USER_INPUT_TOOL_NAME = "request_user_input"
 USER_INTERRUPT_TOOL_NAMES = {REQUEST_USER_INPUT_TOOL_NAME}
+INSPECT_IMAGE_ATTACHMENT_TOOL_NAME = "inspect_image_attachment"
 
 
 class UserInputOption(BaseModel):
@@ -180,6 +193,12 @@ KNOWLEDGE_RETRIEVAL_TRIGGERS = [
     "according to",
 ]
 
+KNOWLEDGE_RETRIEVAL_PROFILES = {
+    "focused": {"top_k": 5, "per_document_limit": 3},
+    "expanded": {"top_k": 10, "per_document_limit": 6},
+    "deep": {"top_k": 20, "per_document_limit": 9},
+}
+
 
 def build_load_turn_state_node(
     session_factory: SessionFactory,
@@ -239,6 +258,7 @@ def build_load_turn_state_node(
                 "knowledge_retrieval_query": "",
                 "knowledge_retrieval_reason": "",
                 "knowledge_retrieved_chunks": [],
+                "knowledge_recall_cache": [],
                 "knowledge_retrieval_debug": {},
                 "context_l0_layer": {},
                 "context_l1_layer": {},
@@ -474,6 +494,7 @@ def build_l3_knowledge_context_node(
         }
         mounted_spaces: list[MountedKnowledgeSpacePayload] = []
         retrieved_chunks: list[KnowledgeRetrievedChunkPayload] = []
+        recall_cache: list[KnowledgeRetrievedChunkPayload] = []
         needs_retrieval = False
         reason = "当前对话未挂载知识空间。"
         retrieval_query = ""
@@ -515,7 +536,14 @@ def build_l3_knowledge_context_node(
                             _to_knowledge_chunk_payload(item)
                             for item in search_result.results
                         ]
+                        recall_cache = [
+                            _to_knowledge_chunk_payload(item)
+                            for item in search_result.recall_cache
+                        ]
                         debug["retrieved_count"] = len(retrieved_chunks)
+                        debug["recall_cache_count"] = len(recall_cache)
+                        debug["retrieval_profile"] = "focused"
+                        debug["per_document_limit"] = search_result.per_document_limit
                     else:
                         debug["status"] = "not_needed"
 
@@ -541,6 +569,7 @@ def build_l3_knowledge_context_node(
             needs_retrieval = False
             retrieval_query = ""
             retrieved_chunks = []
+            recall_cache = []
             layer = _build_knowledge_context_layer(
                 mounted_spaces,
                 retrieved_chunks,
@@ -554,6 +583,7 @@ def build_l3_knowledge_context_node(
             "knowledge_retrieval_query": retrieval_query,
             "knowledge_retrieval_reason": reason,
             "knowledge_retrieved_chunks": retrieved_chunks,
+            "knowledge_recall_cache": recall_cache,
             "knowledge_retrieval_debug": debug,
             "context_l3_knowledge_layer": layer.to_payload(),
         }
@@ -592,6 +622,14 @@ def build_lx_attachment_context_node(session_factory: SessionFactory):
         user_message_id = int(state.get("user_message_id") or 0) or None
         attachment_ids = [int(item) for item in state.get("attachment_ids", []) if int(item) > 0]
         with session_factory() as session:
+            attachment_context = load_attachment_context_for_message(
+                session,
+                conversation_id=conversation_id,
+                message_id=user_message_id,
+                attachment_ids=attachment_ids,
+            )
+            _ensure_current_turn_image_derivatives(session, attachment_context)
+            session.commit()
             attachment_context = load_attachment_context_for_message(
                 session,
                 conversation_id=conversation_id,
@@ -637,6 +675,112 @@ def build_lx_attachment_context_node(session_factory: SessionFactory):
         return {"context_lx_attachment_layer": layer.to_payload()}
 
     return build_lx_attachment_context
+
+
+def _ensure_current_turn_image_derivatives(
+    session: Session,
+    attachment_context: list[tuple[ChatAttachment, list[ChatAttachmentDerivative]]],
+) -> None:
+    for attachment, derivatives in attachment_context:
+        if attachment.kind != "image" or attachment.id is None:
+            continue
+        has_completed_vision = any(
+            derivative.kind == "vision"
+            and derivative.status == "completed"
+            and derivative.source_hash == attachment.sha256
+            for derivative in derivatives
+        )
+        if has_completed_vision:
+            continue
+        result = _inspect_image_attachment_payload(
+            attachment,
+            instruction="请分析这张用户本轮上传的图片，提取主要内容、可见文字、布局和关键细节。",
+        )
+        status = "completed" if result["ok"] else "failed"
+        content = str(result["data"].get("analysis") or result["message"] or "").strip()
+        if not content:
+            content = "图片视觉解析没有返回有效内容。"
+        session.add(
+            ChatAttachmentDerivative(
+                attachment_id=int(attachment.id),
+                kind="vision",
+                content=content,
+                model=settings.attachments_vision_model,
+                prompt_version="auto-current-turn-v1",
+                source_hash=attachment.sha256,
+                status=status,
+            )
+        )
+
+
+def _inspect_image_attachment_payload(attachment: ChatAttachment, *, instruction: str) -> dict:
+    image_path = Path(attachment.storage_path)
+    if not image_path.exists() or not image_path.is_file():
+        return {
+            "ok": False,
+            "message": "图片附件文件不存在，无法解析。",
+            "error_code": "ATTACHMENT_FILE_NOT_FOUND",
+            "data": {"attachment_id": attachment.id},
+        }
+    image_bytes = image_path.read_bytes()
+    max_bytes = settings.attachments_image_max_mb * 1024 * 1024
+    if len(image_bytes) > max_bytes:
+        return {
+            "ok": False,
+            "message": f"图片超过 {settings.attachments_image_max_mb} MB，无法直接送入视觉模型。",
+            "error_code": "IMAGE_TOO_LARGE",
+            "data": {
+                "attachment_id": attachment.id,
+                "size_bytes": len(image_bytes),
+            },
+        }
+    mime_type = attachment.mime_type or "image/png"
+    prompt = (
+        "你是 AiMemo 的图片解析助手。请基于图片真实视觉内容回答，不要臆测看不见的细节。\n"
+        "请提取：主要画面、可见文字/OCR、图表或界面结构、和用户问题相关的关键细节。\n"
+        f"用户本次解析要求：{instruction.strip() or '分析图片内容'}\n"
+        f"附件信息：attachment_id={attachment.id}, name={attachment.original_name}, "
+        f"mime_type={mime_type}, size_bytes={len(image_bytes)}, dimensions={attachment.width}x{attachment.height}。"
+    )
+    data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+    try:
+        model = get_vision_chat_model()
+        response = model.invoke(
+            [
+                HumanMessage(
+                    content=[
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ]
+                )
+            ]
+        )
+        analysis = str(response.content or "").strip()
+    except Exception as exc:
+        logger.exception("inspect_image_attachment_failed attachment_id=%s", attachment.id)
+        return {
+            "ok": False,
+            "message": f"视觉模型解析图片失败：{exc}",
+            "error_code": "VISION_MODEL_FAILED",
+            "data": {
+                "attachment_id": attachment.id,
+                "name": attachment.original_name,
+                "mime_type": mime_type,
+            },
+        }
+    return {
+        "ok": True,
+        "message": "图片解析完成。",
+        "error_code": "",
+        "data": {
+            "attachment_id": attachment.id,
+            "name": attachment.original_name,
+            "mime_type": mime_type,
+            "width": attachment.width,
+            "height": attachment.height,
+            "analysis": analysis,
+        },
+    }
 
 
 def build_current_conversation_window_node():
@@ -854,7 +998,13 @@ def build_tools_node(session_factory: SessionFactory):
         )
         observations_before = len(state.get("tool_observations", []))
         working_state: MemoryChatGraphState = dict(state)
-        allowed = READ_TOOL_NAMES | WRITE_TOOL_NAMES | EXEC_TOOL_NAMES | USER_INTERRUPT_TOOL_NAMES | {"knowledge_search"}
+        allowed = (
+            READ_TOOL_NAMES
+            | WRITE_TOOL_NAMES
+            | EXEC_TOOL_NAMES
+            | USER_INTERRUPT_TOOL_NAMES
+            | {"knowledge_search", INSPECT_IMAGE_ATTACHMENT_TOOL_NAME}
+        )
 
         # 每条工具完成后立刻通过 custom stream channel 把它推给上游，
         # 避免必须等整个 tools 节点 update 派发后才能看到所有卡片。
@@ -988,7 +1138,7 @@ def build_tools_node(session_factory: SessionFactory):
         current_reads: list[tuple[int, dict]] = []
         for index, tool_call in enumerate(tool_calls):
             tool_name = str(tool_call.get("name") or tool_call.get("tool_name") or "")
-            if tool_name in READ_TOOL_NAMES or tool_name == "knowledge_search":
+            if tool_name in READ_TOOL_NAMES or tool_name in {"knowledge_search", INSPECT_IMAGE_ATTACHMENT_TOOL_NAME}:
                 current_reads.append((index, tool_call))
             else:
                 if current_reads:
@@ -1030,6 +1180,10 @@ def build_tools_node(session_factory: SessionFactory):
                 "turn_messages": merged_tm,
                 "thought_events": merged_th,
             }
+            for upd in results:
+                for key in ["knowledge_recall_cache", "knowledge_retrieval_query", "knowledge_retrieval_debug"]:
+                    if key in upd:
+                        working_state[key] = upd[key]
 
         observations = list(working_state.get("tool_observations", []))
         # 本轮新增的 observations；若其中至少一个 ok，本批就算"取得了进展"，清零计数。
@@ -1046,6 +1200,9 @@ def build_tools_node(session_factory: SessionFactory):
             "turn_messages": working_state.get("turn_messages", []),
             "tool_budget": working_state.get("tool_budget", state.get("tool_budget", 0)),
             "consecutive_failed_tools": consecutive_failed_tools,
+            "knowledge_recall_cache": working_state.get("knowledge_recall_cache", state.get("knowledge_recall_cache", [])),
+            "knowledge_retrieval_query": working_state.get("knowledge_retrieval_query", state.get("knowledge_retrieval_query", "")),
+            "knowledge_retrieval_debug": working_state.get("knowledge_retrieval_debug", state.get("knowledge_retrieval_debug", {})),
             "thought_events": [
                 *working_state.get("thought_events", []),
                 _thought(
@@ -1079,6 +1236,10 @@ def _create_react_tools(
     )
     tools[REQUEST_USER_INPUT_TOOL_NAME] = _create_request_user_input_tool()
     tools["knowledge_search"] = _create_knowledge_search_tool(state, session_factory=session_factory)
+    tools[INSPECT_IMAGE_ATTACHMENT_TOOL_NAME] = _create_inspect_image_attachment_tool(
+        state,
+        session_factory=session_factory,
+    )
     return tools
 
 
@@ -1126,10 +1287,96 @@ def _create_request_user_input_tool() -> StructuredTool:
     )
 
 
+def _create_inspect_image_attachment_tool(
+    state: MemoryChatGraphState,
+    *,
+    session_factory: SessionFactory,
+) -> StructuredTool:
+    conversation_id = _resolve_conversation_id(state)
+
+    def inspect_image_attachment(
+        attachment_id: int,
+        instruction: str = "请分析这张图片的主要内容、可见文字、布局和对用户问题有帮助的细节。",
+    ) -> str:
+        """Inspect an image attachment that belongs to the current conversation."""
+
+        try:
+            normalized_attachment_id = int(attachment_id)
+        except (TypeError, ValueError):
+            normalized_attachment_id = 0
+        if normalized_attachment_id <= 0:
+            return json_dumps_compact(
+                {
+                    "ok": False,
+                    "tool_name": INSPECT_IMAGE_ATTACHMENT_TOOL_NAME,
+                    "error_code": "INVALID_ARGUMENT",
+                    "message": "attachment_id 必须是当前对话中的图片附件 ID。",
+                    "blocked": True,
+                    "data": {},
+                }
+            )
+        with session_factory() as session:
+            attachment = get_attachment_or_404(
+                session,
+                conversation_id=conversation_id,
+                attachment_id=normalized_attachment_id,
+            )
+            if attachment.kind != "image":
+                return json_dumps_compact(
+                    {
+                        "ok": False,
+                        "tool_name": INSPECT_IMAGE_ATTACHMENT_TOOL_NAME,
+                        "error_code": "NOT_IMAGE_ATTACHMENT",
+                        "message": "该附件不是图片，不能使用图片解析工具。",
+                        "blocked": True,
+                        "data": {
+                            "attachment_id": normalized_attachment_id,
+                            "kind": attachment.kind,
+                            "mime_type": attachment.mime_type,
+                        },
+                    }
+                )
+            result = _inspect_image_attachment_payload(attachment, instruction=instruction)
+        return json_dumps_compact(
+            {
+                "ok": bool(result["ok"]),
+                "tool_name": INSPECT_IMAGE_ATTACHMENT_TOOL_NAME,
+                "error_code": str(result.get("error_code") or ""),
+                "message": str(result["message"]),
+                "blocked": result.get("error_code") in {"IMAGE_TOO_LARGE"},
+                "data": result["data"],
+            }
+        )
+
+    return StructuredTool.from_function(
+        func=inspect_image_attachment,
+        name=INSPECT_IMAGE_ATTACHMENT_TOOL_NAME,
+        description=(
+            "解析当前对话中的图片附件，返回图片内容描述、OCR 文字、图表/界面结构和关键细节。"
+            "只能传 attachment_id，不能传任意本地路径。"
+            "当用户要求分析/描述/识别/OCR 本轮已上传图片，且 Lx 附件派生上下文只有 metadata 或信息不足时，"
+            "必须主动调用本工具，不要先问用户是否读取。"
+        ),
+        args_schema=InspectImageAttachmentToolInput,
+    )
+
+
 class KnowledgeSearchToolInput(BaseModel):
     query: str = Field(min_length=1, description="要在当前对话已挂载知识空间中检索的问题或关键词。")
-    top_k: int = Field(default=5, ge=1, le=10, description="最多返回多少条知识片段，默认 5。")
+    top_k: int = Field(default=5, ge=1, le=20, description="最多返回多少条知识片段，默认 5。")
     mode: Literal["hybrid", "vector", "keyword"] = Field(default="hybrid", description="检索模式。")
+    retrieval_profile: Literal["focused", "expanded", "deep"] = Field(
+        default="focused",
+        description="检索档位。focused 默认 5 条且每文档最多 3 条；expanded/deep 用于首轮片段不足时从缓存扩充。",
+    )
+
+
+class InspectImageAttachmentToolInput(BaseModel):
+    attachment_id: int = Field(ge=1, description="要解析的当前对话图片附件 ID。")
+    instruction: str = Field(
+        default="请分析这张图片的主要内容、可见文字、布局和对用户问题有帮助的细节。",
+        description="本次图片解析重点，例如 OCR、图表分析、界面说明或整体描述。",
+    )
 
 
 def _create_knowledge_search_tool(
@@ -1139,7 +1386,12 @@ def _create_knowledge_search_tool(
 ) -> StructuredTool:
     conversation_id = _resolve_conversation_id(state)
 
-    def knowledge_search(query: str, top_k: int = 5, mode: str = "hybrid") -> str:
+    def knowledge_search(
+        query: str,
+        top_k: int = 5,
+        mode: str = "hybrid",
+        retrieval_profile: str = "focused",
+    ) -> str:
         """Search only the knowledge spaces explicitly mounted to the current conversation."""
 
         normalized_query = query.strip()
@@ -1154,13 +1406,69 @@ def _create_knowledge_search_tool(
                     "data": {"results": []},
                 }
             )
+        profile = _normalize_knowledge_retrieval_profile(retrieval_profile)
+        top_k = max(1, min(int(top_k or KNOWLEDGE_RETRIEVAL_PROFILES[profile]["top_k"]), 20))
+        per_document_limit = int(KNOWLEDGE_RETRIEVAL_PROFILES[profile]["per_document_limit"])
+        normalized_mode = mode if mode in {"hybrid", "vector", "keyword"} else "hybrid"
+        cached_items = list(state.get("knowledge_recall_cache") or [])
+        cache_query = str(state.get("knowledge_retrieval_query") or "").strip()
         with session_factory() as session:
+            if _can_use_knowledge_recall_cache(
+                query=normalized_query,
+                mode=normalized_mode,
+                cache_query=cache_query,
+                cached_items=cached_items,
+            ):
+                mounted_space_ids = {
+                    int(mount.space_id)
+                    for mount in list_conversation_knowledge_mounts(session, conversation_id)
+                }
+                scoped_cache = [
+                    item for item in cached_items
+                    if int(item.get("space_id") or 0) in mounted_space_ids
+                ]
+                scoped_cache = _filter_ready_cached_knowledge_payloads(session, scoped_cache)
+                items = _select_knowledge_payloads_from_cache(
+                    scoped_cache,
+                    top_k=top_k,
+                    per_document_limit=per_document_limit,
+                    retrieval_phase="adaptive_expansion_cache" if profile != "focused" else "cache_reuse",
+                )
+                if items:
+                    return json_dumps_compact(
+                        {
+                            "ok": True,
+                            "tool_name": "knowledge_search",
+                            "message": f"已从本轮知库检索缓存中扩充到 {len(items)} 条片段。",
+                            "data": {
+                                "query": normalized_query,
+                                "mode": normalized_mode,
+                                "top_k": top_k,
+                                "retrieval_profile": profile,
+                                "per_document_limit": per_document_limit,
+                                "cache_hit": True,
+                                "results": items,
+                                "_state_update": {
+                                    "knowledge_retrieval_query": normalized_query,
+                                    "knowledge_recall_cache": scoped_cache,
+                                    "knowledge_retrieval_debug_patch": {
+                                        "tool_cache_hit": True,
+                                        "tool_retrieval_profile": profile,
+                                        "tool_top_k": top_k,
+                                        "tool_per_document_limit": per_document_limit,
+                                        "tool_result_count": len(items),
+                                    },
+                                },
+                            },
+                        }
+                    )
             result = search_mounted_knowledge(
                 session,
                 conversation_id=conversation_id,
                 query=normalized_query,
                 top_k=top_k,
-                mode=mode,  # type: ignore[arg-type]
+                mode=normalized_mode,  # type: ignore[arg-type]
+                per_document_limit=per_document_limit,
             )
         if result.status == NEED_KNOWLEDGE_MOUNT:
             return json_dumps_compact(
@@ -1183,7 +1491,25 @@ def _create_knowledge_search_tool(
                     "query": result.query,
                     "mode": result.mode,
                     "top_k": result.top_k,
+                    "retrieval_profile": profile,
+                    "per_document_limit": result.per_document_limit,
+                    "cache_hit": False,
                     "results": items,
+                    "_state_update": {
+                        "knowledge_retrieval_query": result.query,
+                        "knowledge_recall_cache": [
+                            _to_knowledge_chunk_payload(item)
+                            for item in result.recall_cache
+                        ],
+                        "knowledge_retrieval_debug_patch": {
+                            "tool_cache_hit": False,
+                            "tool_retrieval_profile": profile,
+                            "tool_top_k": result.top_k,
+                            "tool_per_document_limit": result.per_document_limit,
+                            "tool_recall_cache_count": len(result.recall_cache),
+                            "tool_result_count": len(items),
+                        },
+                    },
                 },
             }
         )
@@ -1195,6 +1521,9 @@ def _create_knowledge_search_tool(
             "在当前对话显式挂载的知识空间中补充检索资料。"
             "只能搜索当前 conversation 已挂载的知识空间，不能指定 space_id，不能全局搜索。"
             "当初始上下文中的挂载知库片段不足以回答，或需要补充查找某个细节时调用。"
+            "如果是同一个问题的片段不足或文档上下文断裂，优先保持相同 query 并使用 retrieval_profile='expanded'；"
+            "仍不足且用户需要整篇总结/跨章节分析时，再使用 retrieval_profile='deep'。"
+            "工具会优先从本轮 recall_cache 扩充候选，只有 query 变化或缓存不足时才重新检索。"
             "[K1]/[K2] 这类编号仅用于内部定位检索片段；最终回答不要输出裸露编号或单独引用列表。"
             "需要说明来源时，用文档标题或自然语言融入句子。"
         ),
@@ -1297,6 +1626,9 @@ def _build_react_agent_system_prompt() -> str:
         "理解这是在执行上一轮 assistant 提出的方案；如果方案涉及本地操作，应调用工具。\n"
         "- 本轮没有成功工具结果时，绝不能声称文件已创建/修改、命令已执行、程序已运行、"
         "也不能编造 stdout、随机数、测试通过或构建成功。\n"
+        "- 用户请求分析、描述、识别或 OCR 本轮已上传图片时，如果 `附件派生上下文（Lx）` "
+        "只有 metadata/尺寸/路径等信息，必须主动调用 inspect_image_attachment；"
+        "不要先问用户是否需要读取图片。只有工具失败时，才说明真实失败原因。\n"
         "- 每次工具调用后必须阅读 ToolMessage 里的 ok/error_code/message/stdout/stderr，再决定下一步。\n"
         "- 工具失败时先诊断根因，再选择下一步；不要原样盲目重试，也不要切换到无关工具碰运气。\n"
         "- 写入已有文本文件或覆盖文本文件前，必须先用 read_file 完整读取目标文件；"
@@ -1378,6 +1710,8 @@ def _build_react_agent_system_prompt() -> str:
         "只有非常明确的闲聊或客观常识问题才会跳过首轮检索。"
         "初始上下文中的 `L3 挂载知识库` 是首轮检索结果；"
         "如果这些片段不足以回答，才调用 knowledge_search 做补充检索。"
+        "同一问题补充检索时优先使用相同 query 加 retrieval_profile=\"expanded\"，"
+        "让工具从本轮 recall_cache 扩充；只有问题角度变化、缓存不足或用户要求深查时，才改写 query 或使用 deep。"
         "[K1]/[K2] 这类编号只用于内部定位检索片段，最终回答不要输出裸露编号或单独引用列表；"
         "需要说明来源时，用文档标题或自然语言融入句子。"
         "如果没有挂载或工具返回 NEED_KNOWLEDGE_MOUNT，应明确说明需要先挂载知识空间。\n"
@@ -2107,18 +2441,25 @@ def _normalize_request_user_input_arguments(arguments: dict) -> dict:
 
 def _normalize_knowledge_search_arguments(arguments: dict) -> dict:
     query = str(arguments.get("query") or "").strip()
+    profile = str(arguments.get("retrieval_profile") or arguments.get("profile") or "focused").strip().lower()
+    if profile not in KNOWLEDGE_RETRIEVAL_PROFILES:
+        profile = "focused"
+    default_top_k = int(KNOWLEDGE_RETRIEVAL_PROFILES[profile]["top_k"])
     try:
-        top_k = int(arguments.get("top_k") or 5)
+        top_k = int(arguments.get("top_k") or default_top_k)
     except (TypeError, ValueError):
-        top_k = 5
+        top_k = default_top_k
     mode = str(arguments.get("mode") or "hybrid").strip().lower()
     if mode not in {"hybrid", "vector", "keyword"}:
         mode = "hybrid"
-    return {
+    normalized = {
         "query": query,
-        "top_k": max(1, min(top_k, 10)),
+        "top_k": max(1, min(top_k, 20)),
         "mode": mode,
     }
+    if "retrieval_profile" in arguments or "profile" in arguments:
+        normalized["retrieval_profile"] = profile
+    return normalized
 
 
 def _run_request_user_input_action(
@@ -2746,6 +3087,72 @@ def _knowledge_item_to_tool_data(item: KnowledgeSearchItem) -> dict:
     return dict(payload)
 
 
+def _normalize_knowledge_retrieval_profile(profile: str) -> str:
+    normalized = str(profile or "focused").strip().lower()
+    return normalized if normalized in KNOWLEDGE_RETRIEVAL_PROFILES else "focused"
+
+
+def _can_use_knowledge_recall_cache(
+    *,
+    query: str,
+    mode: str,
+    cache_query: str,
+    cached_items: list[KnowledgeRetrievedChunkPayload],
+) -> bool:
+    if mode != "hybrid":
+        return False
+    if not cached_items:
+        return False
+    return query.strip() == cache_query.strip()
+
+
+def _filter_ready_cached_knowledge_payloads(
+    session: Session,
+    cached_items: list[KnowledgeRetrievedChunkPayload],
+) -> list[KnowledgeRetrievedChunkPayload]:
+    chunk_ids = [int(item.get("chunk_id") or 0) for item in cached_items if int(item.get("chunk_id") or 0)]
+    if not chunk_ids:
+        return []
+    rows = session.exec(
+        select(KnowledgeChunk.id)
+        .join(KnowledgeDocument, KnowledgeDocument.id == KnowledgeChunk.document_id)
+        .join(KnowledgeSpace, KnowledgeSpace.id == KnowledgeChunk.space_id)
+        .where(col(KnowledgeChunk.id).in_(chunk_ids))
+        .where(KnowledgeSpace.status == "active")
+        .where(KnowledgeDocument.status == "ready")
+        .where(KnowledgeChunk.embedding_status == "completed")
+    ).all()
+    valid_chunk_ids = {int(chunk_id) for chunk_id in rows if chunk_id is not None}
+    return [item for item in cached_items if int(item.get("chunk_id") or 0) in valid_chunk_ids]
+
+
+def _select_knowledge_payloads_from_cache(
+    cached_items: list[KnowledgeRetrievedChunkPayload],
+    *,
+    top_k: int,
+    per_document_limit: int,
+    retrieval_phase: str,
+) -> list[dict]:
+    selected: list[dict] = []
+    counts: dict[int, int] = {}
+    seen_chunk_ids: set[int] = set()
+    for item in cached_items:
+        chunk_id = int(item.get("chunk_id") or 0)
+        document_id = int(item.get("document_id") or 0)
+        if not chunk_id or chunk_id in seen_chunk_ids:
+            continue
+        if counts.get(document_id, 0) >= per_document_limit:
+            continue
+        payload = dict(item)
+        payload["retrieval_phase"] = retrieval_phase
+        selected.append(payload)
+        seen_chunk_ids.add(chunk_id)
+        counts[document_id] = counts.get(document_id, 0) + 1
+        if len(selected) >= top_k:
+            break
+    return selected
+
+
 def _run_agent_tool_action(
     state: MemoryChatGraphState,
     *,
@@ -2789,6 +3196,10 @@ def _run_agent_tool_action(
             known_read_files=_known_read_files_from_observations(state.get("tool_observations", [])),
         )
         tools["knowledge_search"] = _create_knowledge_search_tool(state, session_factory=session_factory)
+        tools[INSPECT_IMAGE_ATTACHMENT_TOOL_NAME] = _create_inspect_image_attachment_tool(
+            state,
+            session_factory=session_factory,
+        )
         if tool_name not in tools:
             observation = {
                 "tool_call_id": tool_call_id,
@@ -2804,12 +3215,14 @@ def _run_agent_tool_action(
             try:
                 raw_result = tools[tool_name].invoke(arguments)
                 payload = parse_json_object(str(raw_result))
+                data = dict(payload.get("data") or {})
+                state_update = data.pop("_state_update", {})
                 observation = {
                     "tool_call_id": tool_call_id,
                     "tool_name": tool_name,
                     "arguments": arguments,
                     "ok": bool(payload.get("ok")),
-                    "data": dict(payload.get("data") or {}),
+                    "data": data,
                     "error_code": str(payload.get("error_code") or ""),
                     "message": str(payload.get("message") or ""),
                     "blocked": bool(payload.get("blocked", False)),
@@ -2829,7 +3242,7 @@ def _run_agent_tool_action(
                     "blocked": False,
                 }
 
-    return {
+    update: MemoryChatGraphState = {
         "tool_observations": [*state.get("tool_observations", []), observation],
         "tool_budget": max(int(state.get("tool_budget") or 0) - 1, 0),
         "turn_messages": [
@@ -2853,6 +3266,18 @@ def _run_agent_tool_action(
             ),
         ],
     }
+    if isinstance(locals().get("state_update"), dict) and state_update:
+        if isinstance(state_update.get("knowledge_recall_cache"), list):
+            update["knowledge_recall_cache"] = state_update["knowledge_recall_cache"]
+        if state_update.get("knowledge_retrieval_query") is not None:
+            update["knowledge_retrieval_query"] = str(state_update.get("knowledge_retrieval_query") or "")
+        debug_patch = state_update.get("knowledge_retrieval_debug_patch")
+        if isinstance(debug_patch, dict):
+            update["knowledge_retrieval_debug"] = {
+                **dict(state.get("knowledge_retrieval_debug") or {}),
+                **debug_patch,
+            }
+    return update
 
 
 def _tool_observations_to_context(observations: list[AgentToolObservationPayload]) -> str:
@@ -3123,6 +3548,8 @@ def _summarize_tool_observation(observation: AgentToolObservationPayload) -> str
         return f"文本搜索完成，找到 {len(data.get('matches') or [])} 条匹配。"
     if tool_name == "knowledge_search":
         return f"挂载知库检索完成，找到 {len(data.get('results') or [])} 条片段。"
+    if tool_name == INSPECT_IMAGE_ATTACHMENT_TOOL_NAME:
+        return f"图片解析完成：attachment_id={data.get('attachment_id')}"
     if tool_name == "list_dir":
         return f"目录读取完成：{data.get('relative_path') or data.get('path')}"
     return f"{tool_name} 执行完成。"

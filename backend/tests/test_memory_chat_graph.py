@@ -374,13 +374,22 @@ def test_l3_knowledge_context_searches_only_mounted_spaces(session, session_fact
     )
     from app.services.knowledge_search_service import search_mounted_knowledge as real_search_mounted_knowledge
 
-    def fake_search_mounted_knowledge(current_session, *, conversation_id, query, top_k=5, mode="hybrid"):
+    def fake_search_mounted_knowledge(
+        current_session,
+        *,
+        conversation_id,
+        query,
+        top_k=5,
+        mode="hybrid",
+        per_document_limit=3,
+    ):
         return real_search_mounted_knowledge(
             current_session,
             conversation_id=conversation_id,
             query=query,
             top_k=top_k,
             mode=mode,
+            per_document_limit=per_document_limit,
             embedding_generator=lambda texts: [[0.1, 0.2, 0.3] for _ in texts],
         )
 
@@ -443,6 +452,26 @@ def test_knowledge_search_tool_respects_mount_scope(session, session_factory, mo
     assert no_mount_update["tool_observations"][0]["error_code"] == "NEED_KNOWLEDGE_MOUNT"
 
     session.add(ConversationKnowledgeMount(conversation_id=conversation.id, space_id=space.id))
+    document = KnowledgeDocument(
+        space_id=space.id,
+        title="长文档",
+        content_hash="cache-expansion-doc",
+        status="ready",
+    )
+    session.add(document)
+    session.flush()
+    chunks = [
+        KnowledgeChunk(
+            space_id=space.id,
+            document_id=document.id,
+            chunk_index=index,
+            text=f"缓存中的第 {index + 1} 段资料",
+            content_hash=f"cache-expansion-{index}",
+            embedding_status="completed",
+        )
+        for index in range(5)
+    ]
+    session.add_all(chunks)
     session.commit()
     monkeypatch.setattr(
         "app.services.knowledge_search_service.search_knowledge_chunk_embeddings",
@@ -450,13 +479,22 @@ def test_knowledge_search_tool_respects_mount_scope(session, session_factory, mo
     )
     from app.services.knowledge_search_service import search_mounted_knowledge as real_search_mounted_knowledge
 
-    def fake_search_mounted_knowledge(current_session, *, conversation_id, query, top_k=5, mode="hybrid"):
+    def fake_search_mounted_knowledge(
+        current_session,
+        *,
+        conversation_id,
+        query,
+        top_k=5,
+        mode="hybrid",
+        per_document_limit=3,
+    ):
         return real_search_mounted_knowledge(
             current_session,
             conversation_id=conversation_id,
             query=query,
             top_k=top_k,
             mode=mode,
+            per_document_limit=per_document_limit,
             embedding_generator=lambda texts: [[0.1, 0.2, 0.3] for _ in texts],
         )
 
@@ -480,6 +518,91 @@ def test_knowledge_search_tool_respects_mount_scope(session, session_factory, mo
     assert observation["ok"] is True
     assert observation["data"]["results"][0]["space_id"] == space.id
     assert "knowledge_search 只能搜索" in update["turn_messages"][0]["content"]
+
+
+def test_knowledge_search_tool_expands_from_recall_cache(session, session_factory, monkeypatch):
+    conversation = create_conversation(session, ConversationCreate(title="缓存扩展知库"))
+    space = KnowledgeSpace(name="缓存资料", description="")
+    session.add(space)
+    session.commit()
+    session.refresh(space)
+    session.add(ConversationKnowledgeMount(conversation_id=conversation.id, space_id=space.id))
+    document = KnowledgeDocument(
+        space_id=space.id,
+        title="长文档",
+        content_hash="cache-expansion-doc",
+        status="ready",
+    )
+    session.add(document)
+    session.flush()
+    chunks = [
+        KnowledgeChunk(
+            space_id=space.id,
+            document_id=document.id,
+            chunk_index=index,
+            text=f"缓存中的第 {index + 1} 段资料",
+            content_hash=f"cache-expansion-{index}",
+            embedding_status="completed",
+        )
+        for index in range(5)
+    ]
+    session.add_all(chunks)
+    session.commit()
+
+    def fail_search(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("cache hit should not query vector search again")
+
+    monkeypatch.setattr(
+        "app.agent.graphs.memory_chat.nodes.search_mounted_knowledge",
+        fail_search,
+    )
+    cached_chunks = [
+        {
+            "chunk_id": chunk.id,
+            "space_id": space.id,
+            "space_name": space.name,
+            "document_id": document.id,
+            "document_title": document.title,
+            "text": chunk.text,
+            "score": 1.0 - index * 0.01,
+            "score_source": "hybrid",
+            "heading_path": ["章节"],
+            "page_number": None,
+            "source_uri": None,
+            "original_filename": "cache.md",
+            "retrieval_phase": "hybrid_merge",
+            "distance": None,
+        }
+        for index, chunk in enumerate(chunks)
+    ]
+
+    update = _run_agent_tool_action(
+        {
+            "conversation_id": conversation.id,
+            "knowledge_retrieval_query": "adaptive cache",
+            "knowledge_recall_cache": cached_chunks,
+            "tool_observations": [],
+            "turn_messages": [],
+            "thought_events": [],
+        },
+        action={
+            "tool_call_id": "ks-cache",
+            "tool_name": "knowledge_search",
+            "arguments": {
+                "query": "adaptive cache",
+                "top_k": 5,
+                "retrieval_profile": "expanded",
+            },
+        },
+        session_factory=session_factory,
+        allowed_tool_names={"knowledge_search"},
+    )
+
+    observation = update["tool_observations"][0]
+    assert observation["ok"] is True
+    assert observation["data"]["cache_hit"] is True
+    assert len(observation["data"]["results"]) == 5
+    assert observation["data"]["results"][-1]["text"] == "缓存中的第 5 段资料"
 
 
 def test_tools_node_preserves_knowledge_search_arguments(session_factory, monkeypatch):

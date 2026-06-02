@@ -23,7 +23,7 @@ api_key: DASHSCOPE_API_KEY
 thinking: disabled by default
 ```
 
-回答模型名暂时在 `backend/app/agent/model.py` 中固定为 `qwen3.5-plus`。后续需要支持多 Provider 时，再引入可配置的模型注册表。
+回答模型名暂时在 `backend/app/agent/model.py` 中固定为 `qwen3.5-plus`。下一阶段会先把主聊天模型抽成可配置 slot，详见 [聊天模型 Provider 适配设计](./model-provider-adapter.md)。
 
 轻量规划模型：
 
@@ -70,6 +70,7 @@ LangGraph 不直接替代业务数据库。
 - [Conversation Summary Graph](./conversation-summary-graph.md)
 - [Conversation Memory Graph](./conversation-memory-graph.md)
 - [Context Pyramid](./context-pyramid.md)
+- [聊天模型 Provider 适配设计](./model-provider-adapter.md)
 - [Local Operator Agent](./local-operator-agent.md)
 - [Agent 工具扩展提案](./tooling-expansion-proposal.md)
 - [前后台任务边界](./background-vs-foreground.md)

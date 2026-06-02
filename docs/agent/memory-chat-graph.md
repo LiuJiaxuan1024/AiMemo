@@ -86,6 +86,10 @@ build_l3_knowledge_context
   如果没有挂载知识空间，该节点只产出 no-scope 说明，不能全局检索。
   如果已挂载，除非当前输入是非常明确的闲聊或客观常识问题，否则默认先在挂载范围内检索。
   首轮结果进入 prompt_context；如果结果不足，agent 后续只能用 knowledge_search 在同一挂载范围内补检索。
+  当前首轮采用 focused 策略：默认 top_k=5，混合召回后每个文档最多进入 3 个 chunk。
+  下一步应按[知库设计文档](../architecture/knowledge-base-module.md#慢启动自适应召回)升级为慢启动自适应召回：不足时扩大 top_k、提高单文档 chunk 上限，
+  并优先从本轮 recall_cache 中补取高分候选和同文档相邻 chunk，而不是一开始就把长文档大量塞进 prompt，
+  也不是每次扩容都重新查询向量库。
   prompt 中的 [K1]/[K2] 只用于内部定位 chunk，最终回答不要裸露输出这些编号。
 
 build_l2_summary
@@ -652,7 +656,10 @@ context_l0_layer
 
 派生文本
   记录 OCR、caption、key facts、标签、坐标/尺寸 metadata、生成模型和 source_hash。
-  当前实现先生成基础 metadata 派生文本；OCR、caption、key facts 是后续视觉理解扩展。
+  当前上传阶段先生成基础 metadata 派生文本；只要本轮用户消息挂载了图片，
+  build_lx_attachment_context 会主动调用视觉模型生成 vision 派生文本并注入上下文。
+  inspect_image_attachment 仍作为后续追问或重新解析工具保留。
+  OCR、caption、key facts 的更细粒度后台持久化派生仍可后续扩展。
   派生文本用于 prompt_context、embedding 和后续检索。
 
 上下文注入
@@ -682,17 +689,17 @@ context_l0_layer
 当前轮有新图片
   -> 验证大小和 mime type
   -> 保存原图和缩略图
-  -> 同步或快速异步生成本轮回答需要的 caption/key facts
+  -> build_lx_attachment_context 自动回源解析原图，生成 vision 派生文本
   -> 把派生文本和 attachment 引用写入 context_lx_attachment_layer
 
 历史上下文提到图片
   -> 优先读取已保存的 AttachmentDerivative
   -> 不默认把原图再次塞进模型
-  -> 如果用户追问细节，agent 可通过后续附件解析工具回源读取原图
+  -> 如果用户追问细节，agent 可通过 inspect_image_attachment 回源读取原图
 
 派生文本不足
   -> agent 不应基于 caption 猜测
-  -> 使用 attachment_id/storage_path 重新解析图片，或明确说明当前信息不足
+  -> 使用 inspect_image_attachment 根据 attachment_id 重新解析图片；只有工具失败时才说明信息不足
 ```
 
 长期记忆抽取只消费派生文本和用户确认过的结论。图片本体作为证据链接保留，不能因为
@@ -766,8 +773,10 @@ content_hash 不重复
 - 不做多 query rewrite。
 - 不做 LLM 检索结果评分。
 - 不做多源检索 worker 和 LLM rerank worker。
-- 当前图片/附件上传、附件表、派生文本表、前端粘贴/选择入口和
-  `build_lx_attachment_context` 已接入；OCR、视觉 caption/key facts、图片解析工具仍待实现。
+- 当前图片/附件上传、附件表、派生文本表、前端粘贴/选择入口、
+  `build_lx_attachment_context` 和 inspect_image_attachment 已接入；
+  本轮挂载图片会自动生成 vision 派生文本。OCR、视觉 caption/key facts 的更细粒度
+  后台持久化派生仍待实现。
 - 主对话工具循环已接入 read/write/exec。exec 第一版只支持短时、非交互命令；
   高风险命令会被策略拦截，后续再接 LangGraph `interrupt()` 做人工审批。
 - 当前工具循环由模型 tool_calls 驱动，允许 observation 以 ToolMessage 回到 `agent` 后再次
