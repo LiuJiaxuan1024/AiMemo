@@ -6,6 +6,7 @@ import traceback
 import threading
 from time import perf_counter
 
+from fastapi import HTTPException, status
 from sqlmodel import Session, desc, select
 
 from app.agent.graphs.memory_chat.graph import run_memory_chat_graph, stream_memory_chat_graph
@@ -21,6 +22,7 @@ from app.schemas.elf import ElfEventCreate
 from app.schemas.conversation import ChatMessageRead
 from app.schemas.search import NoteSearchResult
 from app.services import chat_turn_buffer
+from app.services.attachment_service import attach_attachments_to_message, list_message_attachments
 from app.services.chat_turn_service import (
     attach_chat_turn_messages,
     complete_chat_turn,
@@ -52,6 +54,7 @@ def run_conversation_chat(
     conversation_id: int,
     *,
     message: str,
+    attachment_ids: list[int] | None = None,
     parent_message_id: int | None = None,
     session_factory: SessionFactory = session_scope,
     checkpoint_path: str | None = None,
@@ -64,6 +67,9 @@ def run_conversation_chat(
       session_factory: graph 节点使用的 session 工厂，测试可替换。
       checkpoint_path: LangGraph checkpoint 数据库路径，默认使用配置。
     """
+
+    attachment_ids = attachment_ids or []
+    message = _normalize_chat_message_for_attachments(message, attachment_ids)
 
     with session_factory() as session:
         conversation = session.get(Conversation, conversation_id)
@@ -85,12 +91,18 @@ def run_conversation_chat(
         checkpoint_path=checkpoint_path or settings.langgraph_checkpoint_path,
         parent_message_id=parent_message_id,
         langgraph_thread_id=langgraph_thread_id,
+        attachment_ids=attachment_ids or [],
     )
     user_message_id = int(result["user_message_id"])
     assistant_message_id = int(result["assistant_message_id"])
     with session_factory() as session:
         user = _get_message_or_error(session, user_message_id)
         assistant = _get_message_or_error(session, assistant_message_id)
+        attachments_by_message_id = list_message_attachments(
+            session,
+            conversation_id=conversation_id,
+            message_ids=[user_message_id, assistant_message_id],
+        )
         # 摘要更新不阻塞主回答：这里只负责在达到阈值时创建后台 job。
         # 真正的 LLM 摘要由 conversation_summary_graph 在 worker 中完成。
         enqueue_conversation_summary_job_if_needed(session, conversation_id)
@@ -114,8 +126,14 @@ def run_conversation_chat(
             retrieval_grade=result.get("retrieval_grade", "none"),
             retrieval_grade_reason=result.get("retrieval_grade_reason", ""),
             retrieval_reason=result.get("retrieval_reason", ""),
-            user_message=_to_chat_message_read(user),
-            assistant_message=_to_chat_message_read(assistant),
+            user_message=_to_chat_message_read(
+                user,
+                attachments=attachments_by_message_id.get(user.id or 0, []),
+            ),
+            assistant_message=_to_chat_message_read(
+                assistant,
+                attachments=attachments_by_message_id.get(assistant.id or 0, []),
+            ),
             retrieved_chunks=[
                 NoteSearchResult(
                     note_id=chunk["note_id"],
@@ -137,6 +155,7 @@ def stream_conversation_chat_events(
     conversation_id: int,
     *,
     message: str,
+    attachment_ids: list[int] | None = None,
     parent_message_id: int | None = None,
     session_factory: SessionFactory = session_scope,
     checkpoint_path: str | None = None,
@@ -162,6 +181,9 @@ def stream_conversation_chat_events(
       - error: graph 失败。
     """
 
+    attachment_ids = attachment_ids or []
+    message = _normalize_chat_message_for_attachments(message, attachment_ids)
+
     started_at = perf_counter()
     debug_payload = _create_debug_payload()
 
@@ -183,6 +205,14 @@ def stream_conversation_chat_events(
             user_content=message,
             parent_message_id=parent_message_id,
         )
+        user_attachments = attach_attachments_to_message(
+            session,
+            conversation_id=conversation_id,
+            message_id=user_message.id or 0,
+            attachment_ids=attachment_ids or [],
+        )
+        if user_attachments:
+            session.commit()
         turn = create_running_chat_turn(
             session,
             conversation_id=conversation_id,
@@ -197,7 +227,15 @@ def stream_conversation_chat_events(
         )
         # SQLAlchemy 默认会在 commit 后过期 ORM 对象；在 session 内转换成 schema，
         # 避免 SSE 首包在 session 关闭后访问 detached 对象。
-        user_message_read = _to_chat_message_read(user_message)
+        attachments_by_message_id = list_message_attachments(
+            session,
+            conversation_id=conversation_id,
+            message_ids=[user_message.id or 0, assistant_message.id or 0],
+        )
+        user_message_read = _to_chat_message_read(
+            user_message,
+            attachments=attachments_by_message_id.get(user_message.id or 0, []),
+        )
         assistant_message_read = _to_chat_message_read(assistant_message, turn_id=turn_id)
         user_message_id = user_message_read.id
         assistant_message_id = assistant_message_read.id
@@ -251,6 +289,7 @@ def stream_conversation_chat_events(
             "started_at": started_at,
             "resume_payload": None,
             "langgraph_thread_id": langgraph_thread_id,
+            "attachment_ids": attachment_ids or [],
         },
         daemon=True,
         name=f"chat-turn-{turn_id}",
@@ -391,6 +430,7 @@ def _run_turn_to_buffer(
     started_at: float,
     resume_payload: dict | None = None,
     langgraph_thread_id: str | None = None,
+    attachment_ids: list[int] | None = None,
 ) -> None:
     """Graph worker：在后台线程里跑完一轮 memory_chat_graph，事件全部推进 buffer。
 
@@ -426,6 +466,7 @@ def _run_turn_to_buffer(
             answer_mode=answer_mode,
             resume_payload=resume_payload,
             langgraph_thread_id=langgraph_thread_id,
+            attachment_ids=attachment_ids or [],
         ):
             if _is_chat_turn_cancelled(session_factory, turn_id):
                 raise ChatTurnCancelled("用户中断了本轮生成。")
@@ -702,6 +743,11 @@ def _run_turn_to_buffer(
             )
             user = _get_message_or_error(session, user_message_id)
             assistant = _get_message_or_error(session, assistant_message_id)
+            attachments_by_message_id = list_message_attachments(
+                session,
+                conversation_id=conversation_id,
+                message_ids=[user_message_id, assistant_message_id],
+            )
             enqueue_conversation_summary_job_if_needed(session, conversation_id)
             enqueue_conversation_memory_job_if_needed(
                 session,
@@ -721,8 +767,15 @@ def _run_turn_to_buffer(
                 retrieval_grade=final_state.get("retrieval_grade", "none"),
                 retrieval_grade_reason=final_state.get("retrieval_grade_reason", ""),
                 retrieval_reason=final_state.get("retrieval_reason", ""),
-                user_message=_to_chat_message_read(user),
-                assistant_message=_to_chat_message_read(assistant, turn_id=turn_id),
+                user_message=_to_chat_message_read(
+                    user,
+                    attachments=attachments_by_message_id.get(user.id or 0, []),
+                ),
+                assistant_message=_to_chat_message_read(
+                    assistant,
+                    attachments=attachments_by_message_id.get(assistant.id or 0, []),
+                    turn_id=turn_id,
+                ),
                 retrieved_chunks=[
                     NoteSearchResult(
                         note_id=chunk["note_id"],
@@ -824,6 +877,15 @@ def _get_message_or_error(session: Session, message_id: int) -> ChatMessage:
     if message is None:
         raise RuntimeError(f"ChatMessage {message_id} was not found after graph execution.")
     return message
+
+
+def _normalize_chat_message_for_attachments(message: str, attachment_ids: list[int]) -> str:
+    normalized = message.strip()
+    if normalized:
+        return normalized
+    if attachment_ids:
+        return "请分析我上传的附件。"
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Message or attachment is required")
 
 
 def _sse(event: str, data: dict) -> str:
@@ -1018,6 +1080,7 @@ def _extract_context_layers(state: dict) -> list[dict]:
         "context_l2_layer",
         "context_conversation_window_layer",
         "context_l1_layer",
+        "context_lx_attachment_layer",
         "context_l0_layer",
     ]:
         payload = state.get(key)

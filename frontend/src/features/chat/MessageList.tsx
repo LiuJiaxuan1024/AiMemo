@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEven
 import { createPortal } from "react-dom";
 
 import { Button, EmptyState } from "../../shared/ui";
+import { resolveAttachmentUrl } from "./chatApi";
 import { MarkdownMessage } from "./MarkdownMessage";
 import { PulseGlyph } from "./PulseGlyph";
 import { groupThoughtsByStep } from "./streamingStore";
@@ -10,6 +11,7 @@ import { ToolCallCard } from "./ToolCallCard";
 import { VerbRotator } from "./VerbRotator";
 import type {
   ChatThought,
+  ChatAttachment,
   DraftAssistantMessage,
   MessageSegment,
   SegmentFollowupRequest,
@@ -224,6 +226,9 @@ export function MessageList({
                 ) : (
                   <p>{message.content}</p>
                 )}
+                {message.attachments && message.attachments.length > 0 ? (
+                  <MessageAttachments attachments={message.attachments} />
+                ) : null}
                 {isAssistant && message.pending_interrupt ? (
                   <UserInputInterruptCard
                     disabled={message.isStreaming === true}
@@ -298,6 +303,54 @@ export function MessageList({
       <div ref={endRef} />
     </div>
   );
+}
+
+function MessageAttachments({ attachments }: { attachments: ChatAttachment[] }) {
+  return (
+    <div className="chat-message-attachments">
+      {attachments.map((attachment, index) => {
+        const key = attachment.id ? String(attachment.id) : `${attachment.original_name}-${index}`;
+        if (attachment.kind === "image" && attachment.url) {
+          return (
+            <a
+              className="chat-message-attachment chat-message-attachment--image"
+              href={resolveAttachmentUrl(attachment.url)}
+              key={key}
+              rel="noreferrer"
+              target="_blank"
+              title={attachment.original_name}
+            >
+              <img alt={attachment.original_name} src={resolveAttachmentUrl(attachment.url)} />
+              <span>{attachment.original_name}</span>
+            </a>
+          );
+        }
+        return (
+          <a
+            className="chat-message-attachment"
+            href={attachment.url ? resolveAttachmentUrl(attachment.url) : undefined}
+            key={key}
+            rel="noreferrer"
+            target="_blank"
+            title={attachment.original_name}
+          >
+            <span>{attachment.original_name}</span>
+            <small>{formatAttachmentSize(attachment.size_bytes)}</small>
+          </a>
+        );
+      })}
+    </div>
+  );
+}
+
+function formatAttachmentSize(sizeBytes: number): string {
+  if (sizeBytes >= 1024 * 1024) {
+    return `${(sizeBytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+  if (sizeBytes >= 1024) {
+    return `${(sizeBytes / 1024).toFixed(1)} KB`;
+  }
+  return `${sizeBytes} B`;
 }
 
 function SegmentFollowupMenu({

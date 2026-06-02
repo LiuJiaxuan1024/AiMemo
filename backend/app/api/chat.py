@@ -42,6 +42,7 @@ def run_conversation_chat_api(
         conversation_id,
         message=payload.message,
         parent_message_id=payload.parent_message_id,
+        attachment_ids=payload.attachment_ids,
     )
 
 
@@ -56,6 +57,7 @@ def stream_conversation_chat_api(
             conversation_id,
             message=payload.message,
             parent_message_id=payload.parent_message_id,
+            attachment_ids=payload.attachment_ids,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

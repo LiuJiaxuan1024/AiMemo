@@ -29,6 +29,7 @@ from app.agent.graphs.local_operator.nodes import (
 )
 from app.agent.project_rules import RUNTIME_AGENT_RULES
 from app.agent.context import (
+    ContextLayer,
     ContextBudget,
     PyramidPromptContext,
     build_core_memory_layer,
@@ -71,6 +72,7 @@ from app.services.knowledge_search_service import (
     KnowledgeSearchItem,
     search_mounted_knowledge,
 )
+from app.services.attachment_service import attach_attachments_to_message, load_attachment_context_for_message
 from app.services.long_term_memory_service import list_core_memories
 
 
@@ -245,6 +247,7 @@ def build_load_turn_state_node(
                 "context_l3_layer": {},
                 "context_l3_knowledge_layer": {},
                 "context_l4_layer": {},
+                "context_lx_attachment_layer": {},
                 "prompt_context": "",
                 "turn_messages": [
                     {
@@ -274,6 +277,7 @@ def build_load_turn_state_node(
                 "user_message_id": int(state.get("user_message_id") or 0),
                 "assistant_message_id": int(state.get("assistant_message_id") or 0),
                 "parent_message_id": int(state.get("parent_message_id") or 0),
+                "attachment_ids": list(state.get("attachment_ids") or []),
                 "graph_checkpoint_id": None,
                 "error": "",
             }
@@ -296,6 +300,7 @@ def dispatch_context_workers(state: MemoryChatGraphState) -> list[Send]:
         Send("build_l3_knowledge_context", state),
         Send("build_l2_summary", state),
         Send("build_l1_recent_messages", state),
+        Send("build_lx_attachment_context", state),
         Send("build_l0_current_input", state),
         Send("build_current_conversation_window", state),
     ]
@@ -310,7 +315,7 @@ def build_l4_core_memory_node(session_factory: SessionFactory):
                 memory.content
                 for memory in list_core_memories(session)
             ]
-        layer = build_core_memory_layer(core_memories, ContextBudget())
+        layer = build_core_memory_layer(core_memories, _context_budget())
         return {"context_l4_layer": layer.to_payload()}
 
     return build_l4_core_memory
@@ -377,7 +382,7 @@ def build_l3_retrieved_memory_node(
                 retrieved_chunks,
                 plan.needs_retrieval,
                 retrieval_grade,
-                ContextBudget(),
+                _context_budget(),
             )
             layer_elapsed_ms = elapsed_ms(layer_started_at)
             retrieval_debug = {
@@ -394,7 +399,7 @@ def build_l3_retrieved_memory_node(
         except Exception as exc:
             # L3 是增强上下文，不应因为 embedding/API/检索链路波动阻断主对话。
             layer_started_at = now_counter()
-            layer = build_retrieved_memory_layer([], False, "none", ContextBudget())
+            layer = build_retrieved_memory_layer([], False, "none", _context_budget())
             layer_elapsed_ms = elapsed_ms(layer_started_at)
             retrieval_debug = {
                 "planner_ms": planner_elapsed_ms,
@@ -560,7 +565,7 @@ def build_l2_summary_node():
     """构建 L2 对话摘要层。"""
 
     def build_l2_summary(state: MemoryChatGraphState) -> MemoryChatGraphState:
-        layer = build_summary_layer(state.get("conversation_summary", ""), ContextBudget())
+        layer = build_summary_layer(state.get("conversation_summary", ""), _context_budget())
         return {"context_l2_layer": layer.to_payload()}
 
     return build_l2_summary
@@ -570,10 +575,68 @@ def build_l1_recent_messages_node():
     """构建 L1 近期对话窗口层。"""
 
     def build_l1_recent_messages(state: MemoryChatGraphState) -> MemoryChatGraphState:
-        layer = build_recent_messages_layer(state.get("recent_messages", []), ContextBudget())
+        layer = build_recent_messages_layer(state.get("recent_messages", []), _context_budget())
         return {"context_l1_layer": layer.to_payload()}
 
     return build_l1_recent_messages
+
+
+def build_lx_attachment_context_node(session_factory: SessionFactory):
+    """构建附件派生上下文层。
+
+    原始附件只作为可回源证据保存；这里默认注入 derivative/metadata 文本。
+    """
+
+    def build_lx_attachment_context(state: MemoryChatGraphState) -> MemoryChatGraphState:
+        conversation_id = _resolve_conversation_id(state)
+        user_message_id = int(state.get("user_message_id") or 0) or None
+        attachment_ids = [int(item) for item in state.get("attachment_ids", []) if int(item) > 0]
+        with session_factory() as session:
+            attachment_context = load_attachment_context_for_message(
+                session,
+                conversation_id=conversation_id,
+                message_id=user_message_id,
+                attachment_ids=attachment_ids,
+            )
+        if not attachment_context:
+            content = "本轮没有可用附件。"
+        else:
+            sections: list[str] = []
+            for attachment, derivatives in attachment_context:
+                lines = [
+                    f"- attachment_id: {attachment.id}",
+                    f"  kind: {attachment.kind}",
+                    f"  name: {attachment.original_name}",
+                    f"  mime_type: {attachment.mime_type}",
+                    f"  size_bytes: {attachment.size_bytes}",
+                    f"  storage_path: {attachment.storage_path}",
+                    f"  source_hash: {attachment.sha256}",
+                ]
+                if attachment.width and attachment.height:
+                    lines.append(f"  image_dimensions: {attachment.width}x{attachment.height}")
+                if derivatives:
+                    lines.append("  derived:")
+                    for derivative in derivatives:
+                        derivative_text = str(derivative.content or "").strip()
+                        if derivative_text:
+                            lines.append(f"    [{derivative.kind}]\n{_indent_text(derivative_text, 4)}")
+                else:
+                    lines.append("  derived: 暂无派生文本。")
+                lines.append("  fallback: 如果派生信息不足，应根据 attachment_id/storage_path 回源重新解析原始附件。")
+                sections.append("\n".join(lines))
+            budget_tokens = min(_context_budget().summary_tokens, 4000)
+            content = _truncate_context_text("\n\n".join(sections), budget_tokens)
+        layer = ContextLayer(
+            level=0,
+            name="附件派生上下文（Lx）",
+            content=content,
+            budget_tokens=min(_context_budget().summary_tokens, 4000),
+            used_tokens=count_tokens(content),
+            note="默认基于派生文本回答；如果派生文本不足，必须回源读取原始附件，不能凭摘要猜测。",
+        )
+        return {"context_lx_attachment_layer": layer.to_payload()}
+
+    return build_lx_attachment_context
 
 
 def build_current_conversation_window_node():
@@ -588,7 +651,7 @@ def build_current_conversation_window_node():
         layer = build_current_conversation_window_layer(
             state.get("recent_messages", []),
             _resolve_user_message(state),
-            ContextBudget(),
+            _context_budget(),
         )
         return {"context_conversation_window_layer": layer.to_payload()}
 
@@ -1445,6 +1508,7 @@ def build_merge_prompt_context_node():
             _resolve_context_layer(state, "context_l3_knowledge_layer"),
             _resolve_context_layer(state, "context_l2_layer"),
             _resolve_context_layer(state, "context_l1_layer"),
+            _resolve_context_layer(state, "context_lx_attachment_layer"),
             _resolve_context_layer(state, "context_l0_layer"),
         ]
         layers = [context_layer_from_payload(dict(payload)) for payload in payloads]
@@ -1681,6 +1745,12 @@ def build_persist_messages_node(session_factory: SessionFactory):
                 session.add(user)
                 session.add(assistant)
                 session.add(conversation)
+                attach_attachments_to_message(
+                    session,
+                    conversation_id=conversation_id,
+                    message_id=user.id or 0,
+                    attachment_ids=list(state.get("attachment_ids") or []),
+                )
                 session.commit()
                 return {
                     "user_message_id": user.id or 0,
@@ -1722,6 +1792,12 @@ def build_persist_messages_node(session_factory: SessionFactory):
             session.flush()
             if assistant.id is None:
                 raise RuntimeError("Assistant message id was not generated.")
+            attach_attachments_to_message(
+                session,
+                conversation_id=conversation_id,
+                message_id=user.id,
+                attachment_ids=list(state.get("attachment_ids") or []),
+            )
 
             conversation.updated_at = utc_now()
             conversation.active_task = ""
@@ -2557,9 +2633,9 @@ def _build_knowledge_context_layer(
     needs_retrieval: bool,
     reason: str,
 ):
-    from app.agent.context import ContextBudget, ContextLayer
+    from app.agent.context import ContextLayer
 
-    budget = ContextBudget()
+    budget = _context_budget()
     mount_summary = _format_mounted_knowledge_spaces(mounted_spaces)
     if not mounted_spaces:
         content = "当前对话未挂载知识空间。不能搜索或引用全局知识库；如用户需要基于文档回答，请先提示用户挂载知识空间。"
@@ -2601,6 +2677,25 @@ def _fit_knowledge_lines_to_budget(lines: list[str], budget_tokens: int) -> str:
         selected.append(line)
         used_tokens += line_tokens
     return "\n".join(selected) if selected else "无。"
+
+
+def _context_budget() -> ContextBudget:
+    return settings.context_pyramid_budget
+
+
+def _indent_text(text: str, spaces: int) -> str:
+    prefix = " " * spaces
+    return "\n".join(f"{prefix}{line}" if line else line for line in text.splitlines())
+
+
+def _truncate_context_text(text: str, budget_tokens: int) -> str:
+    normalized = text.strip()
+    if count_tokens(normalized) <= budget_tokens:
+        return normalized
+    candidate = normalized[: max(1, budget_tokens * 2)]
+    while candidate and count_tokens(candidate + "...") > budget_tokens:
+        candidate = candidate[: max(1, int(len(candidate) * 0.85))]
+    return candidate.rstrip() + "..."
 
 
 def _format_mounted_knowledge_spaces(spaces: list[MountedKnowledgeSpacePayload]) -> str:
@@ -3061,6 +3156,7 @@ def generate_memory_chat_answer(
         retrieved_chunks=retrieved_chunks,
         needs_retrieval=needs_retrieval,
         retrieval_grade=retrieval_grade,  # type: ignore[arg-type]
+        budget=_context_budget(),
     ).to_prompt()
     response = model.invoke(_build_model_messages(build_memory_chat_answer_system_prompt(), context, turn_messages))
     return str(response.content)
@@ -3090,6 +3186,7 @@ def generate_memory_chat_elf_bubble_answer(
         retrieved_chunks=retrieved_chunks,
         needs_retrieval=needs_retrieval,
         retrieval_grade=retrieval_grade,  # type: ignore[arg-type]
+        budget=_context_budget(),
     ).to_prompt()
     response = model.invoke(_build_model_messages(build_elf_bubble_answer_system_prompt(), context, turn_messages))
     return _parse_elf_bubble_parts(str(response.content))

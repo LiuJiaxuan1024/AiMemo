@@ -19,6 +19,7 @@ from app.agent.graphs.memory_chat.nodes import (
     build_l3_knowledge_context_node,
     build_l3_retrieved_memory_node,
     build_l4_core_memory_node,
+    build_lx_attachment_context_node,
     build_agent_node,
     build_generate_elf_bubble_answer_node,
     build_load_turn_state_node,
@@ -45,6 +46,7 @@ CONTEXT_WORKER_NODES = [
     "build_l3_knowledge_context",
     "build_l2_summary",
     "build_l1_recent_messages",
+    "build_lx_attachment_context",
     "build_l0_current_input",
     "build_current_conversation_window",
 ]
@@ -81,6 +83,7 @@ def build_memory_chat_graph(
     graph.add_node("build_l3_knowledge_context", build_l3_knowledge_context_node(session_factory))
     graph.add_node("build_l2_summary", build_l2_summary_node())
     graph.add_node("build_l1_recent_messages", build_l1_recent_messages_node())
+    graph.add_node("build_lx_attachment_context", build_lx_attachment_context_node(session_factory))
     graph.add_node("build_l0_current_input", build_l0_current_input_node())
     graph.add_node("build_current_conversation_window", build_current_conversation_window_node())
     graph.add_node("merge_prompt_context", build_merge_prompt_context_node())
@@ -109,10 +112,15 @@ def build_memory_chat_graph(
     graph.add_edge("build_l3_knowledge_context", "merge_prompt_context")
     graph.add_edge("build_l2_summary", "merge_prompt_context")
     graph.add_edge("build_l1_recent_messages", "merge_prompt_context")
+    graph.add_edge("build_lx_attachment_context", "merge_prompt_context")
     graph.add_edge("build_l0_current_input", "merge_prompt_context")
     graph.add_edge("build_current_conversation_window", "merge_prompt_context")
     graph.add_edge("merge_prompt_context", "plan_task")
-    graph.add_edge("plan_task", "agent")
+    graph.add_conditional_edges(
+        "plan_task",
+        _route_after_plan_task,
+        ["agent", "generate_elf_bubble_answer"],
+    )
     graph.add_conditional_edges(
         "agent",
         route_after_agent,
@@ -124,6 +132,12 @@ def build_memory_chat_graph(
     graph.add_edge("generate_elf_bubble_answer", "persist_messages")
     graph.add_edge("persist_messages", END)
     return graph
+
+
+def _route_after_plan_task(state: MemoryChatGraphState) -> str:
+    if state.get("answer_mode") == "elf_bubble":
+        return "generate_elf_bubble_answer"
+    return "agent"
 
 
 def run_memory_chat_graph(
@@ -142,6 +156,7 @@ def run_memory_chat_graph(
     parent_message_id: int | None = None,
     answer_mode: str = "text",
     langgraph_thread_id: str | None = None,
+    attachment_ids: list[int] | None = None,
 ) -> MemoryChatGraphState:
     """执行一轮记忆对话。
 
@@ -175,6 +190,7 @@ def run_memory_chat_graph(
             user_message_id=user_message_id,
             assistant_message_id=assistant_message_id,
             parent_message_id=parent_message_id,
+            attachment_ids=attachment_ids or [],
         )
         result = app.invoke(
             graph_input,
@@ -209,6 +225,7 @@ def stream_memory_chat_graph(
     answer_mode: str = "text",
     resume_payload: dict | None = None,
     langgraph_thread_id: str | None = None,
+    attachment_ids: list[int] | None = None,
 ):
     """以 LangGraph 原生流执行一轮记忆对话。
 
@@ -247,6 +264,7 @@ def stream_memory_chat_graph(
                 user_message_id=user_message_id,
                 assistant_message_id=assistant_message_id,
                 parent_message_id=parent_message_id,
+                attachment_ids=attachment_ids or [],
             )
         latest_state: MemoryChatGraphState = {}
         for stream_item in app.stream(
@@ -361,6 +379,7 @@ def _resolve_graph_input_for_turn(
     user_message_id: int | None,
     assistant_message_id: int | None,
     parent_message_id: int | None,
+    attachment_ids: list[int] | None = None,
 ) -> MemoryChatGraphState | None:
     """判断本次调用是恢复旧 graph，还是新用户输入要开启新一轮。
 
@@ -379,6 +398,7 @@ def _resolve_graph_input_for_turn(
         "user_message_id": user_message_id or 0,
         "assistant_message_id": assistant_message_id or 0,
         "parent_message_id": parent_message_id or 0,
+        "attachment_ids": attachment_ids or [],
     }
     if not snapshot.next:
         return next_input
@@ -441,6 +461,7 @@ def _expire_stale_checkpoint(
             "user_message_id": next_input.get("user_message_id"),
             "assistant_message_id": next_input.get("assistant_message_id"),
             "parent_message_id": next_input.get("parent_message_id"),
+            "attachment_ids": next_input.get("attachment_ids", []),
         },
         as_node="persist_messages",
     )

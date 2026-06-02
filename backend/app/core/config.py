@@ -133,6 +133,32 @@ class Settings(BaseSettings):
     local_operator_exec_max_output_bytes: int = int(
         _config_value("local_operator.exec_command.max_output_bytes", 256 * 1024)
     )
+    context_pyramid_core_memory_tokens: int = int(_config_value("context_pyramid.core_memory_tokens", 2_400))
+    context_pyramid_retrieved_memory_tokens: int = int(
+        _config_value("context_pyramid.retrieved_memory_tokens", 10_000)
+    )
+    context_pyramid_summary_tokens: int = int(_config_value("context_pyramid.summary_tokens", 4_000))
+    context_pyramid_conversation_window_tokens: int = int(
+        _config_value("context_pyramid.conversation_window_tokens", 10_000)
+    )
+    context_pyramid_recent_message_tokens: int = int(_config_value("context_pyramid.recent_message_tokens", 8_000))
+    context_pyramid_weak_retrieval_max_chunks: int = int(
+        _config_value("context_pyramid.weak_retrieval_max_chunks", 5)
+    )
+    attachments_storage_dir: str = str(_config_value("attachments.storage_dir", "./data/uploads"))
+    attachments_image_max_mb: int = int(_config_value("attachments.image_max_mb", 10))
+    attachments_file_max_mb: int = int(_config_value("attachments.file_max_mb", 30))
+    attachments_chat_image_default_policy: str = str(
+        _config_value("attachments.chat_image_default_policy", "chat_only")
+    )
+    attachments_auto_extract: bool = bool(_config_value("attachments.auto_extract", True))
+    attachments_allowed_image_mime_types: list[str] = [
+        str(item)
+        for item in _config_value(
+            "attachments.allowed_image_mime_types",
+            ["image/jpeg", "image/png", "image/gif", "image/webp"],
+        )
+    ]
     voice_enabled: bool = bool(_config_value("voice.enabled", True))
     voice_asr_provider: str = str(_config_value("voice.asr_provider", "aliyun_dashscope"))
     voice_tts_provider: str = str(_config_value("voice.tts_provider", "aliyun_dashscope"))
@@ -195,6 +221,19 @@ class Settings(BaseSettings):
                 ]
             )
         return list(dict.fromkeys(origins))
+
+    @property
+    def context_pyramid_budget(self):
+        from app.agent.context import ContextBudget
+
+        return ContextBudget(
+            core_memory_tokens=self.context_pyramid_core_memory_tokens,
+            retrieved_memory_tokens=self.context_pyramid_retrieved_memory_tokens,
+            summary_tokens=self.context_pyramid_summary_tokens,
+            conversation_window_tokens=self.context_pyramid_conversation_window_tokens,
+            recent_message_tokens=self.context_pyramid_recent_message_tokens,
+            weak_retrieval_max_chunks=self.context_pyramid_weak_retrieval_max_chunks,
+        )
 
 
 settings = Settings()

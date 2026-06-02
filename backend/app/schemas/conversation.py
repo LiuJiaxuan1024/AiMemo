@@ -2,6 +2,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from app.schemas.attachment import ChatAttachmentRead
+
 
 class ConversationCreate(BaseModel):
     """创建对话的请求体。
@@ -63,6 +65,7 @@ class ChatMessageRead(BaseModel):
     checkpoint_id: str | None
     status: str
     token_count: int
+    attachments: list[ChatAttachmentRead] = Field(default_factory=list)
     turn_id: int | None = None
     pending_interrupt: dict | None = None
     created_at: datetime

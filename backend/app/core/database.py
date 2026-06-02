@@ -14,6 +14,8 @@ from app.core.config import settings
 from app.models import (
     AgentOperation,
     BackgroundTask,
+    ChatAttachment,
+    ChatAttachmentDerivative,
     ChatMessage,
     ChatTurn,
     Conversation,
@@ -39,6 +41,8 @@ _AUTOINCREMENT_MODELS = (
     Note,
     Conversation,
     ChatMessage,
+    ChatAttachment,
+    ChatAttachmentDerivative,
     ChatTurn,
     Job,
     KnowledgeSpace,

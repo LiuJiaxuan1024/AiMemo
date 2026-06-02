@@ -15,6 +15,7 @@ import {
   serializeSegmentFollowupMessage,
   streamChat,
   streamTurnResume,
+  uploadConversationAttachment,
 } from "./chatApi";
 import { ChatComposer } from "./ChatComposer";
 import { ConversationList } from "./ConversationList";
@@ -30,10 +31,12 @@ import {
 import { applyChatStreamEvent, streamingStore, useConversationView } from "./streamingStore";
 import type {
   ChatStreamEvent,
+  ChatAttachment,
   ChatTurnGraph,
   ConversationKnowledgeMount,
   Conversation,
   DraftAssistantMessage,
+  PendingChatAttachment,
   SegmentFollowupRequest,
   UserInputAnswer,
 } from "./types";
@@ -46,6 +49,8 @@ export function ChatWindow() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversation, setActiveConversation] = useState<Conversation | null>(null);
   const [input, setInput] = useState("");
+  const [composerAttachments, setComposerAttachments] = useState<PendingChatAttachment[]>([]);
+  const [isUploadingAttachments, setIsUploadingAttachments] = useState(false);
   const [selectedGraph, setSelectedGraph] = useState<ChatTurnGraph | null>(null);
   const [knowledgeMountsByConversation, setKnowledgeMountsByConversation] = useState<Record<number, ConversationKnowledgeMount[]>>({});
   const [isGraphLoading, setIsGraphLoading] = useState(false);
@@ -57,6 +62,7 @@ export function ChatWindow() {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const selectedGraphRef = useRef<ChatTurnGraph | null>(null);
   const graphCloseTimerRef = useRef<number | null>(null);
+  const composerAttachmentsRef = useRef<PendingChatAttachment[]>([]);
 
   const activeConversationId = activeConversation?.id;
   const activeKnowledgeMounts = activeConversationId ? knowledgeMountsByConversation[activeConversationId] ?? [] : [];
@@ -158,9 +164,14 @@ export function ChatWindow() {
       if (graphCloseTimerRef.current != null) {
         window.clearTimeout(graphCloseTimerRef.current);
       }
+      revokePendingAttachmentUrls(composerAttachmentsRef.current);
     },
     [],
   );
+
+  useEffect(() => {
+    composerAttachmentsRef.current = composerAttachments;
+  }, [composerAttachments]);
 
   useEffect(() => {
     const graph = selectedGraphRef.current;
@@ -384,11 +395,17 @@ export function ChatWindow() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!activeConversationId || !input.trim() || isStreaming) {
+    if (!activeConversationId || isStreaming || isUploadingAttachments) {
+      return;
+    }
+    const trimmedInput = input.trim();
+    if (!trimmedInput && composerAttachments.length === 0) {
       return;
     }
 
-    await submitChatMessage(activeConversationId, input.trim());
+    await submitChatMessage(activeConversationId, trimmedInput, {
+      pendingAttachments: composerAttachments,
+    });
   }
 
   async function handleStopGeneration() {
@@ -480,10 +497,32 @@ export function ChatWindow() {
       hidden?: boolean;
       onDone?: (assistant: DraftAssistantMessage | null) => void;
       parentMessageId?: number | null;
+      pendingAttachments?: PendingChatAttachment[];
     } = {},
   ) {
     if (!options.hidden) {
       setShouldAutoScroll(true);
+    }
+    const pendingAttachments = options.pendingAttachments ?? [];
+    let uploadedAttachmentIds: number[] = [];
+    let optimisticAttachments = pendingAttachments.map((attachment) => pendingToOptimisticAttachment(conversationId, attachment));
+    if (pendingAttachments.length > 0) {
+      setIsUploadingAttachments(true);
+      try {
+        const uploaded = await Promise.all(
+          pendingAttachments.map((attachment) => uploadConversationAttachment(conversationId, attachment.file)),
+        );
+        uploadedAttachmentIds = uploaded.map((attachment) => attachment.id);
+        optimisticAttachments = uploaded;
+      } catch (currentError) {
+        setError(
+          conversationId,
+          currentError instanceof Error ? currentError.message : "上传附件失败",
+        );
+        return;
+      } finally {
+        setIsUploadingAttachments(false);
+      }
     }
     const optimisticUserId = -Date.now();
     const optimisticAssistantId = optimisticUserId - 1;
@@ -499,6 +538,7 @@ export function ChatWindow() {
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
       ui_hidden: options.hidden,
+      attachments: optimisticAttachments,
     };
     const optimisticAssistant: DraftAssistantMessage = {
       ...optimisticUser,
@@ -527,13 +567,21 @@ export function ChatWindow() {
       abortController: controller,
     }));
     setInput("");
+    if (!options.hidden && pendingAttachments.length > 0) {
+      setComposerAttachments([]);
+      revokePendingAttachmentUrls(pendingAttachments);
+    }
 
     try {
       await streamChat(
         conversationId,
         content,
         (streamEvent) => dispatchStreamEvent(conversationId, streamEvent),
-        { parentMessageId: options.parentMessageId, signal: controller.signal },
+        {
+          attachmentIds: uploadedAttachmentIds,
+          parentMessageId: options.parentMessageId,
+          signal: controller.signal,
+        },
       );
       if (options.onDone) {
         const latest = streamingStore.peek(conversationId);
@@ -576,6 +624,38 @@ export function ChatWindow() {
       }
       scheduleConversationRefresh();
     }
+  }
+
+  function handleAddFiles(files: File[]) {
+    if (files.length === 0) {
+      return;
+    }
+    setComposerAttachments((current) => {
+      const next = [...current];
+      for (const file of files) {
+        const kind = file.type.startsWith("image/") ? "image" : "file";
+        next.push({
+          localId: `local-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          file,
+          kind,
+          name: file.name || (kind === "image" ? "pasted-image" : "attachment"),
+          mimeType: file.type || "application/octet-stream",
+          sizeBytes: file.size,
+          previewUrl: kind === "image" ? URL.createObjectURL(file) : undefined,
+        });
+      }
+      return next.slice(-20);
+    });
+  }
+
+  function handleRemoveAttachment(localId: string) {
+    setComposerAttachments((current) => {
+      const removed = current.find((attachment) => attachment.localId === localId);
+      if (removed?.previewUrl) {
+        URL.revokeObjectURL(removed.previewUrl);
+      }
+      return current.filter((attachment) => attachment.localId !== localId);
+    });
   }
 
   async function handleSegmentFollowup(request: SegmentFollowupRequest) {
@@ -820,9 +900,13 @@ export function ChatWindow() {
         {error ? <p className="chat-error">{error}</p> : null}
 
         <ChatComposer
+          attachments={composerAttachments}
           input={input}
           isSending={isStreaming}
+          isUploading={isUploadingAttachments}
+          onAddFiles={handleAddFiles}
           onInputChange={setInput}
+          onRemoveAttachment={handleRemoveAttachment}
           onStop={handleStopGeneration}
           onSubmit={handleSubmit}
         />
@@ -910,6 +994,37 @@ function createSegmentId(text: string): string {
 function compactText(text: string, maxLength: number): string {
   const normalized = text.replace(/\s+/g, " ").trim();
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized;
+}
+
+function pendingToOptimisticAttachment(
+  conversationId: number,
+  attachment: PendingChatAttachment,
+): ChatAttachment {
+  return {
+    id: 0,
+    conversation_id: conversationId,
+    message_id: null,
+    kind: attachment.kind,
+    original_name: attachment.name,
+    mime_type: attachment.mimeType,
+    size_bytes: attachment.sizeBytes,
+    width: null,
+    height: null,
+    sha256: "",
+    status: "pending",
+    retention_policy: "chat_only",
+    url: attachment.previewUrl ?? "",
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+}
+
+function revokePendingAttachmentUrls(attachments: PendingChatAttachment[]) {
+  for (const attachment of attachments) {
+    if (attachment.previewUrl) {
+      URL.revokeObjectURL(attachment.previewUrl);
+    }
+  }
 }
 
 function hydrateSegmentFollowups(messages: DraftAssistantMessage[]): DraftAssistantMessage[] {

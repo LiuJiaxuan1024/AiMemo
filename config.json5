@@ -16,6 +16,32 @@
     "running_timeout_seconds": 600,
     "reconciler_interval_seconds": 30.0,
   },
+  "context_pyramid": {
+    // L4 核心长期记忆：稳定偏好、身份、长期目标等，数量通常少但优先级高。
+    "core_memory_tokens": 2400,
+    // L3 检索上下文：个人笔记 RAG 和挂载知识库都会使用这个单层预算。
+    // 两类 L3 同时出现时会分别占用预算，因此这里不要无限调大。
+    "retrieved_memory_tokens": 10000,
+    // L2 对话摘要：承接较早历史，和近期消息冲突时以后者为准。
+    "summary_tokens": 4000,
+    // L1 近期对话：最终 prompt 中直接注入的最近消息窗口。
+    "recent_message_tokens": 8000,
+    // L1+L0 当前对话窗口：主要用于调试和工具规划视图，不等同于单独 L0 上限。
+    "conversation_window_tokens": 10000,
+    // weak 检索最多保留的候选块数，避免弱相关材料挤占上下文。
+    "weak_retrieval_max_chunks": 5,
+  },
+  "attachments": {
+    // 原始附件保存目录；默认落在项目 data 下，避免污染源码目录。
+    "storage_dir": "./data/uploads",
+    // 图片直接进入当前轮视觉理解前，需要先限制体积。
+    "image_max_mb": 10,
+    // 普通文件先作为可回源附件保存，后续再接文件解析 worker。
+    "file_max_mb": 30,
+    "chat_image_default_policy": "chat_only",
+    "auto_extract": true,
+    "allowed_image_mime_types": ["image/jpeg", "image/png", "image/gif", "image/webp"],
+  },
   "elf": {
     // false 时 Web 前端不挂载精灵组件，start-dev 也不启动桌面精灵；
     // 精灵工坊仍可通过侧边按钮打开。

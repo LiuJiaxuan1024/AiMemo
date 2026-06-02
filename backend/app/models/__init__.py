@@ -1,6 +1,7 @@
 from app.models.agent_operation import AgentOperation
 from app.models.background_task import BackgroundTask
 from app.models.chat_message import ChatMessage
+from app.models.chat_attachment import ChatAttachment, ChatAttachmentDerivative
 from app.models.chat_turn import ChatTurn
 from app.models.conversation import Conversation
 from app.models.job import Job
@@ -19,6 +20,8 @@ __all__ = [
     "AgentOperation",
     "BackgroundTask",
     "ChatMessage",
+    "ChatAttachment",
+    "ChatAttachmentDerivative",
     "ChatTurn",
     "Conversation",
     "ConversationKnowledgeMount",

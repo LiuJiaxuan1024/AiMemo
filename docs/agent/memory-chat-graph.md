@@ -30,6 +30,7 @@ flowchart TD
     Dispatch --> K3[build_l3_knowledge_context]
     Dispatch --> L2[build_l2_summary]
     Dispatch --> L1[build_l1_recent_messages]
+    Dispatch --> LX[build_lx_attachment_context]
     Dispatch --> L0[build_l0_current_input]
     Dispatch --> Window[build_current_conversation_window]
     L4 --> Merge[merge_prompt_context]
@@ -37,6 +38,7 @@ flowchart TD
     K3 --> Merge
     L2 --> Merge
     L1 --> Merge
+    LX --> Merge
     L0 --> Merge
     Window --> Merge
     Merge --> Agent[agent<br/>ReAct with tools]
@@ -92,6 +94,13 @@ build_l2_summary
 build_l1_recent_messages
   按 token budget 裁剪近期消息窗口。该层主要用于调试和后续状态树，不再单独喂给回答模型。
 
+build_lx_attachment_context
+  处理当前轮和上下文中引用到的图片、文件等附件。
+  它不把图片永久替换成文字；原始附件继续作为证据保存，worker 产出的是基础 metadata，
+  后续可扩展 OCR、caption、key facts、尺寸、来源路径、attachment_id 等可注入 prompt 的派生上下文。
+  agent 默认基于派生文本回答；如果发现派生文本不够，必须能通过 attachment_id/storage_path
+  回到原图重新解析，而不是凭不完整摘要编造。
+
 build_l0_current_input
   构建当前用户输入层。该层作为 L0 单独喂给回答模型和工具规划器。
 
@@ -102,7 +111,7 @@ build_current_conversation_window
   agent 把 L1 历史 assistant 草稿误当成本轮 L0 指令继续执行。
 
 merge_prompt_context
-  按 L4 -> L3 -> L2 -> L1 history -> L0 current 顺序合并上下文。
+  按 L4 -> L3 -> L2 -> L1 history -> Lx attachments -> L0 current 顺序合并上下文。
   输出最终 prompt_context。
 
 agent
@@ -209,6 +218,7 @@ context_l3_knowledge_layer
 context_l2_layer
 context_conversation_window_layer
 context_l1_layer
+context_lx_attachment_layer
 context_l0_layer
 prompt_context
 mounted_knowledge_spaces
@@ -494,6 +504,7 @@ flowchart TD
     Dispatch --> L3[L3 worker<br/>plan / retrieve / grade / build]
     Dispatch --> L2[L2 worker<br/>对话摘要]
     Dispatch --> L1[L1 worker<br/>近期对话窗口]
+    Dispatch --> LX[Lx worker<br/>附件派生上下文]
     Dispatch --> L0[L0 worker<br/>当前输入]
     Dispatch --> Window[L1+L0 worker<br/>当前对话窗口]
 
@@ -501,6 +512,7 @@ flowchart TD
     L3 --> Merge
     L2 --> Merge
     L1 --> Merge
+    LX --> Merge
     L0 --> Merge
     Window -. debug only .-> Merge
 
@@ -514,8 +526,8 @@ flowchart TD
 ```
 
 这里的工具循环发生在 Memory Chat Graph 主干上，而不是隐藏在回答前的上下文构建阶段。
-L0/L1/L2/L3/L4 和 L1+L0 当前对话窗口仍然并行构建；工具是否调用由合并上下文后的 agent 决定。
-`merge_prompt_context` 真正注入模型的是 L4、L3、L2、L1 history、L0 current。
+L0/L1/L2/L3/L4、Lx 附件派生上下文和 L1+L0 当前对话窗口仍然并行构建；工具是否调用由合并上下文后的 agent 决定。
+`merge_prompt_context` 真正注入模型的是 L4、L3、L2、L1 history、Lx attachments、L0 current。
 L1+L0 当前对话窗口保留给调试，不再作为主 prompt 的默认输入。
 
 当前主循环已开放第一批 read/write/exec 工具：
@@ -590,14 +602,16 @@ flowchart TD
     Build --> L3End([L3 END])
 ```
 
-各层预算当前在 `ContextBudget` 中定义：
+各层预算由 `config.json5` 的 `context_pyramid` 覆盖，缺省兜底值定义在 `ContextBudget` 中。
+当前项目配置为：
 
 ```text
-L4 core_memory_tokens: 300
-L3 retrieved_memory_tokens: 1200
-L2 summary_tokens: 500
-L1 recent_message_tokens: 1000
-weak_retrieval_max_chunks: 3
+L4 core_memory_tokens: 2400
+L3 retrieved_memory_tokens: 10000
+L2 summary_tokens: 4000
+L1 recent_message_tokens: 8000
+L1+L0 conversation_window_tokens: 10000
+weak_retrieval_max_chunks: 5
 ```
 
 L3 的使用规则：
@@ -620,10 +634,69 @@ context_l4_layer
 context_l3_layer
 context_l2_layer
 context_l1_layer
+context_lx_attachment_layer
 context_l0_layer
 ```
 
 这里没有使用 `context_layers` 列表 reducer。原因是聊天 graph 使用同一个 `conversation:{id}` thread 跨轮执行，列表 reducer 容易把上一轮 layer 追加进本轮。独立字段更明确，也更利于 checkpoint 调试。
+
+## Lx 附件派生上下文
+
+图片和附件的默认策略是“原始证据 + 派生文本”，而不是“只存图片”或“只存提取文字”：
+
+```text
+原始附件
+  存储在 data/uploads 或配置指定目录。
+  记录 attachment_id、conversation_id、message_id、storage_path、mime_type、size、
+  width、height、sha256、retention_policy。
+
+派生文本
+  记录 OCR、caption、key facts、标签、坐标/尺寸 metadata、生成模型和 source_hash。
+  当前实现先生成基础 metadata 派生文本；OCR、caption、key facts 是后续视觉理解扩展。
+  派生文本用于 prompt_context、embedding 和后续检索。
+
+上下文注入
+  当前轮新图片可以直接进入视觉模型输入，同时写入派生文本。
+  历史图片默认只注入派生文本和 attachment 引用，避免每轮重复加载原图。
+```
+
+`build_lx_attachment_context` 和 L0/L1/L2/L3/L4 同级，由 `dispatch_context_workers`
+并行分发。它的输出形态类似：
+
+```text
+[Attachments]
+- attachment_id: img_...
+  kind: image
+  source: /absolute/or/storage/path
+  derived:
+    caption: ...
+    key_facts:
+      - ...
+    ocr: ...
+  fallback: 如果以上信息不足，可重新解析 attachment_id=img_... 的原图。
+```
+
+运行策略：
+
+```text
+当前轮有新图片
+  -> 验证大小和 mime type
+  -> 保存原图和缩略图
+  -> 同步或快速异步生成本轮回答需要的 caption/key facts
+  -> 把派生文本和 attachment 引用写入 context_lx_attachment_layer
+
+历史上下文提到图片
+  -> 优先读取已保存的 AttachmentDerivative
+  -> 不默认把原图再次塞进模型
+  -> 如果用户追问细节，agent 可通过后续附件解析工具回源读取原图
+
+派生文本不足
+  -> agent 不应基于 caption 猜测
+  -> 使用 attachment_id/storage_path 重新解析图片，或明确说明当前信息不足
+```
+
+长期记忆抽取只消费派生文本和用户确认过的结论。图片本体作为证据链接保留，不能因为
+一次 OCR/caption 结果就把未经确认的视觉细节提升为 L4 核心记忆。
 
 L4 当前读取规则：
 
@@ -693,6 +766,8 @@ content_hash 不重复
 - 不做多 query rewrite。
 - 不做 LLM 检索结果评分。
 - 不做多源检索 worker 和 LLM rerank worker。
+- 当前图片/附件上传、附件表、派生文本表、前端粘贴/选择入口和
+  `build_lx_attachment_context` 已接入；OCR、视觉 caption/key facts、图片解析工具仍待实现。
 - 主对话工具循环已接入 read/write/exec。exec 第一版只支持短时、非交互命令；
   高风险命令会被策略拦截，后续再接 LangGraph `interrupt()` 做人工审批。
 - 当前工具循环由模型 tool_calls 驱动，允许 observation 以 ToolMessage 回到 `agent` 后再次

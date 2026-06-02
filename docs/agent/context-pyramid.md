@@ -13,6 +13,7 @@ backend/app/agent/graphs/memory_chat/nodes.py
   dispatch_context_workers 使用 LangGraph Send 分发上下文 worker。
   merge_prompt_context 汇总 worker 结果。
   generate_answer 只消费 prompt_context，不再自行拼接上下文。
+  build_lx_attachment_context 用于把图片等附件转换为可注入上下文的派生文本。
 
 backend/app/agent/graphs/memory_chat/graph.py
   在 retrieve/grade 或 direct 分支之后加入上下文 worker 分发与汇总节点。
@@ -29,6 +30,7 @@ flowchart TB
     L3[L3 RAG 检索记忆<br/>笔记 chunk / 未来长期记忆检索] --> Prompt
     L2[L2 对话摘要<br/>conversation.summary] --> Prompt
     L1[L1 history<br/>近期历史消息] --> Prompt
+    LX[Lx 附件派生上下文<br/>图片/OCR/文件摘要 + attachment 引用] --> Prompt
     L0[L0 current<br/>当前用户输入] --> Prompt
     Window[L1+L0 当前对话窗口<br/>调试视图，不默认注入] -. debug .-> Prompt
 ```
@@ -57,6 +59,13 @@ L1 近期对话窗口
 L0 当前用户输入
   单独保存本轮必须回答的问题。agent_think 以它作为新任务边界。
 
+Lx 附件派生上下文
+  处理当前轮或被检索到的图片、文件等附件。
+  原始附件作为证据保存到 attachment storage，prompt 中默认注入的是 metadata、
+  未来的 OCR、caption、key facts、尺寸、来源路径等派生文本，而不是把历史图片重新塞进每一轮模型输入。
+  派生文本必须保留 attachment_id / storage_path / source_hash，方便 agent 在派生信息
+  不够时重新打开原图或重新解析。
+
 L1+L0 当前对话窗口
   把近期消息和当前用户输入合并为连续对话，当前输入使用 user(current) 标记。
   该层保留给调试/图状态查看，不再作为最终 prompt 和工具 planner 的默认输入。
@@ -68,15 +77,28 @@ L1+L0 当前对话窗口
 预算定义在 `ContextBudget`：
 
 ```text
-core_memory_tokens = 300
-retrieved_memory_tokens = 1200
-summary_tokens = 500
-conversation_window_tokens = 1200
-recent_message_tokens = 1000
+core_memory_tokens = 1200
+retrieved_memory_tokens = 6000
+summary_tokens = 2000
+conversation_window_tokens = 6000
+recent_message_tokens = 4000
 weak_retrieval_max_chunks = 3
 ```
 
-当前预算是工程初值，不是最终参数。后续可以根据真实对话长度、模型上下文窗口和回答质量继续调。
+运行时会优先读取 `config.json5` 的 `context_pyramid` 配置，当前项目默认配置为：
+
+```json5
+"context_pyramid": {
+  "core_memory_tokens": 2400,
+  "retrieved_memory_tokens": 10000,
+  "summary_tokens": 4000,
+  "recent_message_tokens": 8000,
+  "conversation_window_tokens": 10000,
+  "weak_retrieval_max_chunks": 5,
+}
+```
+
+`retrieved_memory_tokens` 会同时用于个人笔记 RAG 和挂载知识库这两类 L3 层；如果两者同轮出现，会分别占用这一预算。L0 当前用户输入没有单独 token 上限，会原样保留。
 
 ## Worker 模式
 
@@ -89,6 +111,7 @@ flowchart TD
     Dispatch --> L3Worker[build_l3_retrieved_memory<br/>plan/retrieve/grade/build]
     Dispatch --> L2Worker[build_l2_summary]
     Dispatch --> L1Worker[build_l1_recent_messages]
+    Dispatch --> LXWorker[build_lx_attachment_context]
     Dispatch --> L0Worker[build_l0_current_input]
     Dispatch --> WindowWorker[build_current_conversation_window]
 
@@ -96,8 +119,9 @@ flowchart TD
     L3Worker --> Merge
     L2Worker --> Merge
     L1Worker --> Merge
+    LXWorker --> Merge
     L0Worker --> Merge
-WindowWorker -. debug only .-> Merge
+    WindowWorker -. debug only .-> Merge
     Merge --> Generate[generate_answer]
 ```
 
@@ -109,11 +133,12 @@ context_l3_layer
 context_l2_layer
 context_conversation_window_layer
 context_l1_layer
+context_lx_attachment_layer
 context_l0_layer
 ```
 
-`merge_prompt_context` 按 L4 -> L3 -> L2 -> L1 history -> L0 current 顺序还原为
-`PyramidPromptContext`，并渲染为最终 `prompt_context`。L1+L0 当前对话窗口只用于
+`merge_prompt_context` 按 L4 -> L3 -> L2 -> L1 history -> Lx attachments -> L0 current
+顺序还原为 `PyramidPromptContext`，并渲染为最终 `prompt_context`。L1+L0 当前对话窗口只用于
 调试和后续状态树，不再默认进入最终 prompt，避免跨任务 continuation 过触发。
 
 L3 worker 是一个局部 RAG worker：
@@ -126,3 +151,33 @@ plan_l3_retrieval
 ```
 
 主图不再把检索规划放在所有上下文 worker 前面，因此 L0/L1/L2/L4 可以和 L3 检索链路并行执行。
+
+## 图片与附件上下文策略
+
+附件处理不把“记录原图”和“提取文字”做成二选一：
+
+```text
+原始附件
+  作为证据保存，包含 attachment_id、storage_path、mime_type、size、width、height、sha256。
+  对用户可见，也可被 agent 在必要时重新解析。
+
+派生文本
+  作为上下文和检索入口，包含 OCR、caption、key facts、标签、坐标/尺寸 metadata。
+  当前实现先生成基础 metadata 派生文本；OCR、caption、key facts 是后续视觉理解扩展。
+  派生文本是可重算、可过期的，不等同于原图真相。
+
+上下文注入
+  默认注入派生文本和原图引用，不在每轮历史上下文中重复注入完整图片。
+  当前轮新上传图片可以按模型能力直接作为 image block 进入回答模型。
+```
+
+`build_lx_attachment_context` 的目标职责：
+
+```text
+1. 读取当前 user message 关联的附件，以及 L1/L2/L3 中提到的 attachment 引用。
+2. 对当前轮新图片生成或读取派生文本，优先产出足够回答本轮问题的 caption/key facts。
+3. 对历史图片默认只注入已保存派生文本和 attachment_id/storage_path。
+4. 如果派生文本不足，prompt 中必须让 agent 能看到可回源的 attachment 引用，
+   后续通过附件解析工具重新读取原图，而不是基于不完整 caption 编造。
+5. 把最终结果写入 context_lx_attachment_layer，交给 merge_prompt_context 合并。
+```

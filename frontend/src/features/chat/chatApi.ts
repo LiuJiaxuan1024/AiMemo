@@ -1,5 +1,6 @@
 import type {
   ChatActiveTurnList,
+  ChatAttachment,
   ChatMessage,
   ChatStreamEvent,
   ChatTurnGraph,
@@ -103,10 +104,14 @@ export async function streamChat(
   conversationId: number,
   message: string,
   onEvent: (event: ChatStreamEvent) => void,
-  options: { parentMessageId?: number | null; signal?: AbortSignal } = {},
+  options: { attachmentIds?: number[]; parentMessageId?: number | null; signal?: AbortSignal } = {},
 ): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/api/conversations/${conversationId}/chat/stream`, {
-    body: JSON.stringify({ message, parent_message_id: options.parentMessageId ?? null }),
+    body: JSON.stringify({
+      message,
+      parent_message_id: options.parentMessageId ?? null,
+      attachment_ids: options.attachmentIds ?? [],
+    }),
     headers: {
       "Content-Type": "application/json",
     },
@@ -120,6 +125,30 @@ export async function streamChat(
   }
 
   await consumeSseStream(response, onEvent);
+}
+
+export async function uploadConversationAttachment(
+  conversationId: number,
+  file: File,
+): Promise<ChatAttachment> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const response = await fetch(`${API_BASE_URL}/api/conversations/${conversationId}/attachments`, {
+    method: "POST",
+    body: formData,
+  });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `Request failed with status ${response.status}`);
+  }
+  return response.json() as Promise<ChatAttachment>;
+}
+
+export function resolveAttachmentUrl(url: string): string {
+  if (!url || url.startsWith("http://") || url.startsWith("https://") || url.startsWith("data:")) {
+    return url;
+  }
+  return `${API_BASE_URL}${url}`;
 }
 
 export function serializeSegmentFollowupMessage(request: SegmentFollowupRequest): string {

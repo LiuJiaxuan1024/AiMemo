@@ -16,12 +16,18 @@ from app.models.job import Job
 from app.models.long_term_memory import LongTermMemory
 from app.models.note import utc_now
 from app.rag.chunking.tokenizer import count_tokens
+from app.schemas.attachment import ChatAttachmentRead
 from app.schemas.conversation import (
     ChatMessageCreate,
     ChatMessageRead,
     ConversationCreate,
     ConversationListItem,
     ConversationRead,
+)
+from app.services.attachment_service import (
+    delete_attachments_for_conversation,
+    delete_attachments_for_messages,
+    list_message_attachments,
 )
 
 logger = logging.getLogger(__name__)
@@ -81,6 +87,11 @@ def list_messages(session: Session, conversation_id: int) -> list[ChatMessageRea
         .where(ChatMessage.conversation_id == conversation_id)
         .order_by(ChatMessage.created_at, ChatMessage.id)
     ).all()
+    attachments_by_message_id = list_message_attachments(
+        session,
+        conversation_id=conversation_id,
+        message_ids=[message.id or 0 for message in messages],
+    )
     turn_info_by_assistant_message_id = _load_turn_info_by_assistant_message_id(
         session,
         conversation_id=conversation_id,
@@ -88,6 +99,7 @@ def list_messages(session: Session, conversation_id: int) -> list[ChatMessageRea
     return [
         _to_chat_message_read(
             message,
+            attachments=attachments_by_message_id.get(message.id or 0, []),
             turn_id=(turn_info_by_assistant_message_id.get(message.id or {}) or {}).get("turn_id"),
             pending_interrupt=(turn_info_by_assistant_message_id.get(message.id or {}) or {}).get("pending_interrupt"),
         )
@@ -171,6 +183,11 @@ def delete_message_branch(
             )
 
     if delete_ids:
+        delete_attachments_for_messages(
+            session,
+            conversation_id=conversation_id,
+            message_ids=delete_ids,
+        )
         memories = session.exec(
             select(LongTermMemory).where(
                 LongTermMemory.source_type == "chat_message",
@@ -231,6 +248,8 @@ def delete_conversation(session: Session, conversation_id: int) -> None:
         ).all()
         if message.id is not None
     ]
+    delete_attachments_for_conversation(session, conversation_id=conversation_id)
+
     if chat_message_ids:
         memories = session.exec(
             select(LongTermMemory).where(
@@ -501,6 +520,7 @@ def _pending_interrupt_from_turn(turn: ChatTurn) -> dict | None:
 def _to_chat_message_read(
     message: ChatMessage,
     *,
+    attachments: list[ChatAttachmentRead] | None = None,
     turn_id: int | None = None,
     pending_interrupt: dict | None = None,
 ) -> ChatMessageRead:
@@ -513,6 +533,7 @@ def _to_chat_message_read(
         checkpoint_id=message.checkpoint_id,
         status=message.status,
         token_count=message.token_count,
+        attachments=attachments or [],
         turn_id=turn_id,
         pending_interrupt=pending_interrupt,
         created_at=message.created_at,

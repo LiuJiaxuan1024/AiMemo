@@ -13,6 +13,7 @@ from app.models.agent_operation import AgentOperation
 from app.models.chat_message import ChatMessage
 from app.models.chat_turn import ChatTurn
 from app.models.note import utc_now
+from app.services.attachment_service import list_message_attachments
 from app.schemas.chat import (
     ChatActiveTurnListRead,
     ChatActiveTurnRead,
@@ -32,6 +33,7 @@ MEMORY_CHAT_NODE_ORDER = [
     "build_l3_knowledge_context",
     "build_l2_summary",
     "build_l1_recent_messages",
+    "build_lx_attachment_context",
     "build_l0_current_input",
     "build_current_conversation_window",
     "merge_prompt_context",
@@ -326,8 +328,8 @@ def _to_chat_active_turn_read(session: Session, turn: ChatTurn) -> ChatActiveTur
         status=turn.status,
         node_statuses=_decode_json_object(turn.node_statuses),
         pending_interrupt=pending_interrupt,
-        user_message=_message_to_read(user, turn.id) if user else None,
-        assistant_message=_message_to_read(assistant, turn.id, pending_interrupt=pending_interrupt) if assistant else None,
+        user_message=_message_to_read(session, user, turn.id) if user else None,
+        assistant_message=_message_to_read(session, assistant, turn.id, pending_interrupt=pending_interrupt) if assistant else None,
         started_at=turn.created_at,
         updated_at=turn.updated_at,
     )
@@ -340,11 +342,17 @@ def _load_message(session: Session, message_id: int | None) -> ChatMessage | Non
 
 
 def _message_to_read(
+    session: Session,
     message: ChatMessage,
     turn_id: int | None,
     *,
     pending_interrupt: dict | None = None,
 ) -> ChatMessageRead:
+    attachments_by_message_id = list_message_attachments(
+        session,
+        conversation_id=message.conversation_id,
+        message_ids=[message.id or 0],
+    )
     return ChatMessageRead(
         id=message.id or 0,
         conversation_id=message.conversation_id,
@@ -354,6 +362,7 @@ def _message_to_read(
         checkpoint_id=message.checkpoint_id,
         status=message.status,
         token_count=message.token_count,
+        attachments=attachments_by_message_id.get(message.id or 0, []),
         turn_id=turn_id,
         pending_interrupt=pending_interrupt,
         created_at=message.created_at,

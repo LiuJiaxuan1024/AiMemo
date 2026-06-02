@@ -9,8 +9,9 @@ from app.schemas.search import NoteSearchResult
 class ChatRequest(BaseModel):
     """发送给 memory_chat_graph 的用户输入。"""
 
-    message: str = Field(min_length=1)
+    message: str = Field(default="")
     parent_message_id: int | None = None
+    attachment_ids: list[int] = Field(default_factory=list, max_length=20)
 
 
 class ChatResumeRequest(BaseModel):

@@ -43,10 +43,39 @@ export interface ChatMessage {
   checkpoint_id: string | null;
   status: string;
   token_count: number;
+  attachments?: ChatAttachment[];
   turn_id?: number | null;
   pending_interrupt?: UserInputRequest | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface ChatAttachment {
+  id: number;
+  conversation_id: number;
+  message_id: number | null;
+  kind: "image" | "file" | string;
+  original_name: string;
+  mime_type: string;
+  size_bytes: number;
+  width: number | null;
+  height: number | null;
+  sha256: string;
+  status: string;
+  retention_policy: string;
+  url: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PendingChatAttachment {
+  localId: string;
+  file: File;
+  kind: "image" | "file";
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  previewUrl?: string;
 }
 
 export interface ChatMessageWithTurn extends ChatMessage {
