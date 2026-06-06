@@ -6,6 +6,7 @@ import {
   Trash2,
   FileText,
   FolderPlus,
+  Image as ImageIcon,
   Layers3,
   RefreshCw,
   Search,
@@ -16,6 +17,8 @@ import {
   archiveKnowledgeSpace,
   createKnowledgeSpace,
   deleteKnowledgeDocument,
+  getKnowledgeOcrStatus,
+  installKnowledgeOcr,
   listKnowledgeChunks,
   listKnowledgeDocuments,
   listKnowledgeSpaces,
@@ -25,6 +28,7 @@ import {
 import type {
   KnowledgeChunk,
   KnowledgeDocument,
+  KnowledgeOcrStatus,
   KnowledgeSearchResultItem,
   KnowledgeSpace,
 } from "../../features/knowledge/types";
@@ -63,6 +67,13 @@ export function KnowledgePage() {
   });
   const documents = documentsQuery.data ?? [];
   const selectedDocument = documents.find((document) => document.id === selectedDocumentId) ?? documents[0] ?? null;
+
+  const ocrStatusQuery = useQuery({
+    queryKey: ["knowledge", "ocr", "status"],
+    queryFn: getKnowledgeOcrStatus,
+    staleTime: 60_000,
+  });
+  const ocrStatus = ocrStatusQuery.data ?? null;
 
   const chunksQuery = useQuery({
     enabled: Boolean(selectedDocument?.id),
@@ -132,6 +143,16 @@ export function KnowledgePage() {
     onError: (caught) => setError(errorMessage(caught, "上传文档失败")),
   });
 
+  const installOcrMutation = useMutation({
+    mutationFn: installKnowledgeOcr,
+    onSuccess: async (result) => {
+      await queryClient.invalidateQueries({ queryKey: ["knowledge", "ocr", "status"] });
+      await queryClient.invalidateQueries({ queryKey: ["background_tasks"] });
+      setError(result.after_status.ready ? "" : result.message);
+    },
+    onError: (caught) => setError(errorMessage(caught, "安装 OCR 失败")),
+  });
+
   const searchMutation = useMutation({
     mutationFn: searchKnowledge,
     onSuccess: (response) => {
@@ -166,7 +187,7 @@ export function KnowledgePage() {
     });
   }
 
-  function handleUpload(event: FormEvent<HTMLFormElement>) {
+  async function handleUpload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedSpace) {
       setError("请先创建知识空间");
@@ -175,6 +196,51 @@ export function KnowledgePage() {
     if (!uploadFile) {
       setError("请选择要上传的文档");
       return;
+    }
+    if (documentMayContainImages(uploadFile)) {
+      let currentOcrStatus = ocrStatus;
+      try {
+        currentOcrStatus = await queryClient.fetchQuery({
+          queryKey: ["knowledge", "ocr", "status"],
+          queryFn: getKnowledgeOcrStatus,
+          staleTime: 60_000,
+        });
+      } catch {
+        currentOcrStatus = null;
+      }
+      if (!currentOcrStatus?.ready) {
+        if (currentOcrStatus?.install_running) {
+          const shouldContinue = window.confirm(buildOcrUploadWarning(currentOcrStatus));
+          if (!shouldContinue) {
+            return;
+          }
+        } else if (currentOcrStatus?.status === "provider_not_configured") {
+          const shouldContinue = window.confirm(buildOcrUploadWarning(currentOcrStatus));
+          if (!shouldContinue) {
+            return;
+          }
+        } else {
+          const shouldInstall = window.confirm(buildOcrInstallPrompt(currentOcrStatus));
+          if (shouldInstall) {
+            const installedStatus = await runOcrInstall();
+            if (installedStatus?.install_running) {
+              setError("OCR 安装已启动，请等待安装完成后再上传需要图片 OCR 的文档。");
+              return;
+            }
+            if (!installedStatus?.ready) {
+              const shouldContinue = window.confirm(buildOcrUploadWarning(installedStatus));
+              if (!shouldContinue) {
+                return;
+              }
+            }
+          } else {
+            const shouldContinue = window.confirm(buildOcrUploadWarning(currentOcrStatus));
+            if (!shouldContinue) {
+              return;
+            }
+          }
+        }
+      }
     }
     uploadMutation.mutate({
       spaceId: selectedSpace.id,
@@ -185,6 +251,27 @@ export function KnowledgePage() {
 
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     setUploadFile(event.target.files?.[0] ?? null);
+  }
+
+  async function runOcrInstall(): Promise<KnowledgeOcrStatus | null> {
+    try {
+      const result = await installOcrMutation.mutateAsync();
+      await queryClient.invalidateQueries({ queryKey: ["knowledge", "ocr", "status"] });
+      await queryClient.invalidateQueries({ queryKey: ["background_tasks"] });
+      return result.after_status;
+    } catch {
+      return null;
+    }
+  }
+
+  async function handleInstallOcr() {
+    const confirmed = window.confirm(
+      "一键安装 OCR 会调用系统包管理器下载并安装 Tesseract OCR，可能修改系统 PATH 或触发系统安装提示。是否继续？"
+    );
+    if (!confirmed) {
+      return;
+    }
+    await runOcrInstall();
   }
 
   function handleSearch(event: FormEvent<HTMLFormElement>) {
@@ -339,7 +426,13 @@ export function KnowledgePage() {
               <span>{uploadFile?.name ?? "选择 TXT / MD / DOCX / PPTX / PDF"}</span>
               <input accept=".txt,.text,.md,.markdown,.docx,.pptx,.pdf" onChange={handleFileChange} type="file" />
             </label>
-            <Button disabled={!selectedSpace || uploadMutation.isPending} size="sm" type="submit" variant="primary">
+            <OcrStatusLine
+              isInstalling={installOcrMutation.isPending}
+              isLoading={ocrStatusQuery.isFetching && !ocrStatus}
+              onInstall={() => void handleInstallOcr()}
+              status={ocrStatus}
+            />
+            <Button disabled={!selectedSpace || uploadMutation.isPending || installOcrMutation.isPending} size="sm" type="submit" variant="primary">
               上传并处理
             </Button>
           </form>
@@ -371,6 +464,60 @@ export function KnowledgePage() {
         </section>
       </div>
     </section>
+  );
+}
+
+function OcrStatusLine({
+  isInstalling,
+  isLoading,
+  onInstall,
+  status,
+}: {
+  isInstalling: boolean;
+  isLoading: boolean;
+  onInstall: () => void;
+  status: KnowledgeOcrStatus | null;
+}) {
+  if (isLoading) {
+    return <div className="knowledge-ocr-status muted">正在检测图片转文本能力...</div>;
+  }
+  if (!status) {
+    return (
+      <div className="knowledge-ocr-status warning">
+        <span>未完成图片转文本状态检测。</span>
+        <Button disabled={isInstalling} onClick={onInstall} size="sm" variant="secondary">
+          {isInstalling ? "安装中..." : "一键安装 OCR"}
+        </Button>
+      </div>
+    );
+  }
+  if (status.ready) {
+    return (
+      <div className="knowledge-ocr-status ready">
+        <span>{status.message || (status.available_languages.length > 0 ? `OCR 可用：${status.available_languages.join(", ")}` : "图片转文本可用")}</span>
+      </div>
+    );
+  }
+  if (status.install_running) {
+    const taskLabel = status.install_task_ids.length > 0 ? `后台任务 ${status.install_task_ids[0]}` : "后台任务";
+    return (
+      <div className="knowledge-ocr-status muted">
+        <span>OCR 安装正在运行：{taskLabel}，可在后台任务面板查看进度。</span>
+        <Button disabled size="sm" variant="secondary">
+          安装中...
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <div className="knowledge-ocr-status warning">
+      <span>{status.message}</span>
+      {status.status === "provider_not_configured" ? null : (
+        <Button disabled={isInstalling} onClick={onInstall} size="sm" variant="secondary">
+          {isInstalling ? "安装中..." : status.status === "missing_languages" ? "一键安装语言包" : "一键安装 OCR"}
+        </Button>
+      )}
+    </div>
   );
 }
 
@@ -415,6 +562,16 @@ function DocumentList({
             <StatusBadge status={document.status} />
             <small>{document.chunk_count} chunks</small>
           </span>
+          {document.image_asset_count > 0 ? (
+            <span className="knowledge-document-card__image-progress">
+              <ImageIcon aria-hidden="true" size={14} />
+              <small>
+                图片 {document.image_asset_processed_count}/{document.image_asset_count}
+                {document.image_text_chunk_count > 0 ? ` · ${document.image_text_chunk_count} chunks` : ""}
+                {document.image_asset_failed_count > 0 ? ` · 失败 ${document.image_asset_failed_count}` : ""}
+              </small>
+            </span>
+          ) : null}
           {document.error_message ? <span className="knowledge-document-card__error">{document.error_message}</span> : null}
           {document.status === "failed" || document.status === "ready" ? (
             <span className="knowledge-document-card__actions">
@@ -491,9 +648,16 @@ function DocumentDetail({
   document: KnowledgeDocument | null;
   isLoading: boolean;
 }) {
+  const [chunkKindFilter, setChunkKindFilter] = useState<ChunkKind | "all">("all");
   if (!document) {
     return <EmptyState>选择一个文档查看 chunk 预览。</EmptyState>;
   }
+  const visibleChunks = chunks.filter((chunk) => {
+    if (chunkKindFilter === "all") {
+      return true;
+    }
+    return getChunkKind(chunk) === chunkKindFilter;
+  });
   return (
     <div className="knowledge-detail">
       <div className="knowledge-detail-hero">
@@ -510,6 +674,18 @@ function DocumentDetail({
           <small>chunks</small>
         </span>
         <span>
+          <strong>{document.text_chunk_count}</strong>
+          <small>text chunks</small>
+        </span>
+        <span>
+          <strong>{document.image_asset_count ? `${document.image_asset_processed_count}/${document.image_asset_count}` : "0"}</strong>
+          <small>images</small>
+        </span>
+        <span>
+          <strong>{document.image_text_chunk_count}</strong>
+          <small>image chunks</small>
+        </span>
+        <span>
           <strong>{document.token_count}</strong>
           <small>tokens</small>
         </span>
@@ -518,13 +694,29 @@ function DocumentDetail({
           <small>parser</small>
         </span>
       </div>
+      <div className="knowledge-chunk-filter" aria-label="Chunk 来源筛选">
+        {(["all", "text", "table", "image"] as const).map((kind) => (
+          <button
+            className={chunkKindFilter === kind ? "selected" : ""}
+            key={kind}
+            onClick={() => setChunkKindFilter(kind)}
+            type="button"
+          >
+            {chunkKindLabel(kind)}
+          </button>
+        ))}
+      </div>
       <div className="knowledge-chunk-list">
         {isLoading ? <div className="module-loading">正在读取 chunks...</div> : null}
         {!isLoading && chunks.length === 0 ? <EmptyState>文档处理完成后会在这里显示 chunk。</EmptyState> : null}
-        {chunks.map((chunk) => (
+        {!isLoading && chunks.length > 0 && visibleChunks.length === 0 ? <EmptyState>没有这个来源类型的 chunk。</EmptyState> : null}
+        {visibleChunks.map((chunk) => (
           <article className="knowledge-chunk-card" key={chunk.id}>
             <header>
-              <Badge tone={chunk.embedding_status === "completed" ? "success" : "warning"}>#{chunk.chunk_index}</Badge>
+              <span>
+                <Badge tone={chunk.embedding_status === "completed" ? "success" : "warning"}>#{chunk.chunk_index}</Badge>
+                <Badge tone={getChunkKind(chunk) === "image" ? "info" : "neutral"}>{chunkKindLabel(getChunkKind(chunk))}</Badge>
+              </span>
               <small>{chunk.token_count} tokens</small>
             </header>
             <p>{chunk.text}</p>
@@ -534,6 +726,93 @@ function DocumentDetail({
       </div>
     </div>
   );
+}
+
+type ChunkKind = "text" | "table" | "image";
+
+function getChunkKind(chunk: KnowledgeChunk): ChunkKind {
+  const metadata = parseChunkMetadata(chunk.metadata_json);
+  const modalities = arrayFrom(metadata.source_modalities);
+  const blockTypes = arrayFrom(metadata.block_types);
+  if (modalities.some((item) => item.startsWith("image")) || blockTypes.includes("image")) {
+    return "image";
+  }
+  if (modalities.includes("table") || blockTypes.includes("table")) {
+    return "table";
+  }
+  return "text";
+}
+
+function chunkKindLabel(kind: ChunkKind | "all") {
+  const labels: Record<ChunkKind | "all", string> = {
+    all: "全部",
+    text: "正文",
+    table: "表格",
+    image: "图片",
+  };
+  return labels[kind];
+}
+
+function parseChunkMetadata(value: string | null): Record<string, unknown> {
+  if (!value) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+function arrayFrom(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((item) => String(item));
+}
+
+function documentMayContainImages(file: File): boolean {
+  const name = file.name.toLowerCase();
+  return [".pdf", ".docx", ".pptx", ".md", ".markdown"].some((suffix) => name.endsWith(suffix));
+}
+
+function buildOcrUploadWarning(status: KnowledgeOcrStatus | null): string {
+  if (!status) {
+    return [
+      "当前无法检测图片转文本状态。",
+      "如果文档中包含图片，图片内容可能无法转成可检索文本。",
+      "是否仍然继续上传并处理正文内容？",
+    ].join("\n");
+  }
+  const lines = [
+    status.message,
+    "如果文档中包含图片，图片内容可能无法转成可检索文本；正文、表格等可解析文本仍会继续处理。",
+  ];
+  if (status.status !== "provider_not_configured" && !status.tesseract_available) {
+    lines.push("需要安装 Tesseract OCR，并确保 tesseract 命令在 PATH 中。");
+  }
+  if (status.missing_languages.length > 0) {
+    lines.push(`缺少语言包：${status.missing_languages.join(", ")}`);
+  }
+  lines.push("是否仍然继续上传？");
+  return lines.join("\n");
+}
+
+function buildOcrInstallPrompt(status: KnowledgeOcrStatus | null): string {
+  const isMissingLanguages = status?.status === "missing_languages";
+  const lines = [
+    status?.message ?? "当前无法检测图片转文本状态。",
+    isMissingLanguages ? "是否现在一键安装缺失的 OCR 语言包？" : "是否现在一键安装 Tesseract OCR？",
+    isMissingLanguages
+      ? "语言包会下载到应用数据目录，并通过后台任务显示下载进度。"
+      : "安装会调用系统包管理器下载组件，可能修改系统 PATH 或触发系统安装提示。",
+    "选择“确定”开始安装；选择“取消”后可继续选择是否仅上传正文内容。",
+  ];
+  if (status?.missing_languages.length) {
+    lines.push(`当前缺少语言包：${status.missing_languages.join(", ")}`);
+  }
+  return lines.join("\n");
 }
 
 function SearchBox({

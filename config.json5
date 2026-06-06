@@ -43,14 +43,50 @@
     "vision_model": "qwen-vl-plus",
     "allowed_image_mime_types": ["image/jpeg", "image/png", "image/gif", "image/webp"],
   },
+  "knowledge": {
+    "image_text_extraction": {
+      // 知识库图片默认使用低成本 qwen-vl-ocr，避免本地 OCR 在 logo/架构图中产生乱码噪声。
+      // 可选：qwen_vl_ocr / local_ocr / off。
+      "mode": "qwen_vl_ocr",
+      "provider": "dashscope",
+      "model": "qwen-vl-ocr",
+      "max_image_bytes": 5242880,
+      "max_images_per_document": 80,
+      "min_confidence": 0.45,
+      "timeout_seconds": 60,
+      // 本地 OCR 仅作为手动降级模式使用。
+      "ocr_languages": "chi_sim+eng",
+      "ocr_timeout_seconds": 15,
+    },
+  },
   "models": {
-    "agent_chat": {
+    // "agent_chat": {
+    //   // 第一阶段只把主聊天/通用文本生成模型做成可选项。
+    //   // 密钥只写环境变量名，不要把真实 key 写进 config.json5。
+    //   "provider": "dashscope",
+    //   "model": "qwen3.5-plus",
+    //   "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    //   "api_key_env": "DASHSCOPE_API_KEY",
+    //   "temperature": 0.2,
+    //   "streaming": true,
+    //   "capabilities": {
+    //     // Memory Chat ReAct agent 依赖 tool calling。
+    //     "tool_calling": true,
+    //     "json_mode": true,
+    //     "vision": false,
+    //   },
+    //   "extra_body": {
+    //     // Qwen3.5 默认可能开启 thinking，普通对话路径先关闭以降低首 token 延迟。
+    //     "enable_thinking": false,
+    //   },
+    // },
+        "agent_chat": {
       // 第一阶段只把主聊天/通用文本生成模型做成可选项。
       // 密钥只写环境变量名，不要把真实 key 写进 config.json5。
-      "provider": "dashscope",
-      "model": "qwen3.5-plus",
-      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-      "api_key_env": "DASHSCOPE_API_KEY",
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "base_url": "https://api.deepseek.com",
+      "api_key_env": "DEEPSEEK_API_KEY",
       "temperature": 0.2,
       "streaming": true,
       "capabilities": {

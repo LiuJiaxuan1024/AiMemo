@@ -160,6 +160,33 @@ class Settings(BaseSettings):
             ["image/jpeg", "image/png", "image/gif", "image/webp"],
         )
     ]
+    knowledge_image_text_extraction_mode: str = str(
+        _config_value("knowledge.image_text_extraction.mode", "qwen_vl_ocr")
+    )
+    knowledge_image_text_extraction_provider: str = str(
+        _config_value("knowledge.image_text_extraction.provider", "dashscope")
+    )
+    knowledge_image_text_extraction_model: str = str(
+        _config_value("knowledge.image_text_extraction.model", "qwen-vl-ocr")
+    )
+    knowledge_image_text_extraction_max_image_bytes: int = int(
+        _config_value("knowledge.image_text_extraction.max_image_bytes", 5 * 1024 * 1024)
+    )
+    knowledge_image_text_extraction_max_images_per_document: int = int(
+        _config_value("knowledge.image_text_extraction.max_images_per_document", 80)
+    )
+    knowledge_image_text_extraction_min_confidence: float = float(
+        _config_value("knowledge.image_text_extraction.min_confidence", 0.45)
+    )
+    knowledge_image_text_extraction_timeout_seconds: int = int(
+        _config_value("knowledge.image_text_extraction.timeout_seconds", 60)
+    )
+    knowledge_image_ocr_languages: str = str(
+        _config_value("knowledge.image_text_extraction.ocr_languages", "chi_sim+eng")
+    )
+    knowledge_image_ocr_timeout_seconds: int = int(
+        _config_value("knowledge.image_text_extraction.ocr_timeout_seconds", 15)
+    )
     voice_enabled: bool = bool(_config_value("voice.enabled", True))
     voice_asr_provider: str = str(_config_value("voice.asr_provider", "aliyun_dashscope"))
     voice_tts_provider: str = str(_config_value("voice.tts_provider", "aliyun_dashscope"))

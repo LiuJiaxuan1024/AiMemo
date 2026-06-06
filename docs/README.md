@@ -9,14 +9,15 @@
 3. [流程图](./architecture/flows.md)
 4. [Memo 知库模块设计](./architecture/knowledge-base-module.md)
 5. [Memo 知库第一版工程设计](./architecture/knowledge-base-implementation-design.md)
-6. [本地任务系统](./backend/jobs.md)
-7. [Memory Chat Graph](./agent/memory-chat-graph.md)
-8. [长期记忆管理](./backend/memories.md)
-9. [Local Operator Agent](./agent/local-operator-agent.md)
-10. [前后台任务边界](./agent/background-vs-foreground.md)
-11. [前端说明](./frontend/README.md)
-12. [Memo Elf 桌面化架构](./desktop/memo-elf-desktop-architecture.md)
-13. [语音工坊第一版设计](./desktop/voice-workshop-design.md)
+6. [从本地 OCR 切换到 qwen-vl-ocr](./backend/qwen-vl-ocr-migration.md)
+7. [本地任务系统](./backend/jobs.md)
+8. [Memory Chat Graph](./agent/memory-chat-graph.md)
+9. [长期记忆管理](./backend/memories.md)
+10. [Local Operator Agent](./agent/local-operator-agent.md)
+11. [前后台任务边界](./agent/background-vs-foreground.md)
+12. [前端说明](./frontend/README.md)
+13. [Memo Elf 桌面化架构](./desktop/memo-elf-desktop-architecture.md)
+14. [语音工坊第一版设计](./desktop/voice-workshop-design.md)
 
 ## 当前实现
 
@@ -40,6 +41,7 @@
 - [精灵事件中心](./backend/elf-events.md)
 - [向量存储](./backend/vector-storage.md)
 - [向量检索](./backend/vector-search.md)
+- [从本地 OCR 切换到 qwen-vl-ocr](./backend/qwen-vl-ocr-migration.md)
 - [阿里云远程语音能力接入设计](./desktop/aliyun-voice-provider.md)
 
 ### Agent / Graph

@@ -59,6 +59,11 @@ def delete_knowledge_document(session: Session, document_id: int) -> KnowledgeDo
     document.error_code = None
     document.error_message = None
     document.chunk_count = 0
+    document.text_chunk_count = 0
+    document.image_asset_count = 0
+    document.image_asset_processed_count = 0
+    document.image_text_chunk_count = 0
+    document.image_asset_failed_count = 0
     document.token_count = 0
     document.updated_at = utc_now()
     session.add(document)
@@ -198,6 +203,11 @@ def to_document_read(document: KnowledgeDocument) -> KnowledgeDocumentRead:
         chunk_strategy=document.chunk_strategy,
         status=document.status,
         chunk_count=document.chunk_count,
+        text_chunk_count=document.text_chunk_count,
+        image_asset_count=document.image_asset_count,
+        image_asset_processed_count=document.image_asset_processed_count,
+        image_text_chunk_count=document.image_text_chunk_count,
+        image_asset_failed_count=document.image_asset_failed_count,
         token_count=document.token_count,
         error_code=document.error_code,
         error_message=document.error_message,

@@ -11,6 +11,7 @@ from app.agent.checkpoints import get_sqlite_checkpointer
 from app.agent.embeddings import embed_texts
 from app.agent.graphs.knowledge_ingest.nodes import (
     EmbeddingGenerator,
+    ImageTextExtractor,
     build_generate_embeddings_node,
     build_load_document_node,
     build_mark_failed_document,
@@ -31,10 +32,11 @@ def build_knowledge_ingest_graph(
     *,
     session_factory: SessionFactory,
     embedding_generator: EmbeddingGenerator = embed_texts,
+    image_text_extractor: ImageTextExtractor | None = None,
 ):
     graph = StateGraph(KnowledgeIngestGraphState)
     graph.add_node("load_document", build_load_document_node(session_factory))
-    graph.add_node("parse_and_chunk", build_parse_and_chunk_node())
+    graph.add_node("parse_and_chunk", build_parse_and_chunk_node(image_text_extractor))
     graph.add_node("persist_chunks", build_persist_chunks_node(session_factory))
     graph.add_node("generate_embeddings", build_generate_embeddings_node(embedding_generator))
     graph.add_node("write_vector_index", build_write_vector_index_node(session_factory))
@@ -55,6 +57,7 @@ def run_knowledge_ingest_graph(
     session_factory: SessionFactory,
     checkpoint_path: str,
     embedding_generator: EmbeddingGenerator = embed_texts,
+    image_text_extractor: ImageTextExtractor | None = None,
     interrupt_after: list[str] | None = None,
 ) -> None:
     payload = decode_payload(job.payload)
@@ -68,6 +71,7 @@ def run_knowledge_ingest_graph(
         app = build_knowledge_ingest_graph(
             session_factory=session_factory,
             embedding_generator=embedding_generator,
+            image_text_extractor=image_text_extractor,
         ).compile(checkpointer=checkpointer)
         config = {"configurable": {"thread_id": thread_id}}
         snapshot = app.get_state(config)

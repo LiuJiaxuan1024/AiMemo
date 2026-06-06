@@ -2,6 +2,8 @@ import type {
   KnowledgeChunk,
   KnowledgeDocument,
   KnowledgeDocumentUploadResponse,
+  KnowledgeOcrInstallResult,
+  KnowledgeOcrStatus,
   KnowledgeSearchResponse,
   KnowledgeSpace,
 } from "./types";
@@ -52,6 +54,17 @@ export function archiveKnowledgeSpace(spaceId: number): Promise<KnowledgeSpace> 
 
 export function listKnowledgeDocuments(spaceId: number): Promise<KnowledgeDocument[]> {
   return request<KnowledgeDocument[]>(`/api/knowledge/spaces/${spaceId}/documents`);
+}
+
+export function getKnowledgeOcrStatus(): Promise<KnowledgeOcrStatus> {
+  return request<KnowledgeOcrStatus>("/api/knowledge/ocr/status");
+}
+
+export function installKnowledgeOcr(): Promise<KnowledgeOcrInstallResult> {
+  return request<KnowledgeOcrInstallResult>("/api/knowledge/ocr/install", {
+    method: "POST",
+    body: JSON.stringify({ confirm_install: true }),
+  });
 }
 
 export async function uploadKnowledgeDocument(spaceId: number, file: File, title?: string): Promise<KnowledgeDocumentUploadResponse> {

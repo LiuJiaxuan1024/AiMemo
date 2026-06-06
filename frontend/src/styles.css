@@ -6764,8 +6764,10 @@ textarea {
 
 .knowledge-panel-title,
 .knowledge-document-card__footer,
+.knowledge-document-card__image-progress,
 .knowledge-detail-hero,
 .knowledge-chunk-card header,
+.knowledge-chunk-card header > span,
 .knowledge-result-card header,
 .knowledge-result-card footer {
   align-items: center;
@@ -6897,10 +6899,18 @@ textarea {
 .knowledge-space-card small,
 .knowledge-document-card__file,
 .knowledge-document-card small,
+.knowledge-document-card__image-progress,
 .knowledge-result-card footer,
 .knowledge-chunk-card small {
   color: var(--color-text-muted);
   font-size: var(--font-size-sm);
+}
+
+.knowledge-document-card__image-progress {
+  align-items: center;
+  display: inline-flex;
+  gap: var(--space-1);
+  min-width: 0;
 }
 
 .knowledge-space-card__main small,
@@ -6938,6 +6948,36 @@ textarea {
 
 .knowledge-file-picker input {
   display: none;
+}
+
+.knowledge-ocr-status {
+  align-items: center;
+  border-radius: var(--radius-xs);
+  display: flex;
+  font-size: var(--font-size-xs);
+  gap: var(--space-2);
+  justify-content: space-between;
+  line-height: 1.45;
+  padding: var(--space-2) var(--space-3);
+}
+
+.knowledge-ocr-status span {
+  min-width: 0;
+}
+
+.knowledge-ocr-status.ready {
+  background: var(--color-success-bg);
+  color: var(--color-brand-700);
+}
+
+.knowledge-ocr-status.warning {
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+}
+
+.knowledge-ocr-status.muted {
+  background: var(--color-bg-sunken);
+  color: var(--color-text-muted);
 }
 
 .knowledge-document-card__footer {
@@ -7038,7 +7078,7 @@ textarea {
 .knowledge-detail {
   display: grid;
   gap: var(--space-3);
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
 }
@@ -7078,6 +7118,32 @@ textarea {
   display: grid;
   gap: var(--space-2);
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.knowledge-chunk-filter {
+  align-items: center;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  min-height: 28px;
+}
+
+.knowledge-chunk-filter button {
+  background: var(--color-bg-base);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-pill);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  line-height: 1;
+  min-height: 28px;
+  padding: 0 var(--space-2);
+}
+
+.knowledge-chunk-filter button.selected,
+.knowledge-chunk-filter button:hover {
+  border-color: var(--color-brand-300);
+  color: var(--color-text-strong);
 }
 
 .knowledge-meta-grid span {

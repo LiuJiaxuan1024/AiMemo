@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, File, Form, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlmodel import Session
 
 from app.core.database import get_session
@@ -7,6 +7,9 @@ from app.schemas.knowledge import (
     KnowledgeChunkDraftRead,
     KnowledgeDocumentRead,
     KnowledgeDocumentUploadResponse,
+    KnowledgeOcrInstallRequest,
+    KnowledgeOcrInstallResponse,
+    KnowledgeOcrStatusRead,
     KnowledgeSearchRequest,
     KnowledgeSearchResponse,
     KnowledgeSearchResultItem,
@@ -22,6 +25,7 @@ from app.services.knowledge_document_service import (
     list_knowledge_documents,
     upload_knowledge_document,
 )
+from app.services.knowledge_ocr_service import get_knowledge_ocr_status, install_knowledge_ocr
 from app.services.knowledge_search_service import KnowledgeSearchResult, search_knowledge
 from app.services.knowledge_space_service import (
     archive_knowledge_space,
@@ -92,6 +96,20 @@ def search_knowledge_api(
         mode=payload.mode,
     )
     return _to_search_response(result)
+
+
+@router.get("/ocr/status", response_model=KnowledgeOcrStatusRead)
+def get_knowledge_ocr_status_api() -> KnowledgeOcrStatusRead:
+    return KnowledgeOcrStatusRead(**get_knowledge_ocr_status())
+
+
+@router.post("/ocr/install", response_model=KnowledgeOcrInstallResponse)
+def install_knowledge_ocr_api(payload: KnowledgeOcrInstallRequest) -> KnowledgeOcrInstallResponse:
+    try:
+        result = install_knowledge_ocr(confirm_install=payload.confirm_install)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return KnowledgeOcrInstallResponse(**result)
 
 
 @router.get("/spaces/{space_id}/documents", response_model=list[KnowledgeDocumentRead])

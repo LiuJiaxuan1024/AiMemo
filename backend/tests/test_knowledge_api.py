@@ -139,6 +139,84 @@ def test_documents_and_chunks_endpoints_are_available_before_ingest(session: Ses
     assert missing_chunks_response.status_code == 404
 
 
+def test_knowledge_ocr_status_endpoint_returns_environment_status(session: Session) -> None:
+    client = _client(session)
+
+    response = client.get("/api/knowledge/ocr/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert isinstance(payload["ready"], bool)
+    assert payload["status"]
+    assert isinstance(payload["tesseract_available"], bool)
+    assert isinstance(payload["available_languages"], list)
+    assert isinstance(payload["required_languages"], list)
+    assert isinstance(payload["missing_languages"], list)
+    assert isinstance(payload["python_packages"], dict)
+    assert payload["message"]
+
+
+def test_knowledge_ocr_install_endpoint_requires_confirmation_and_returns_result(
+    session: Session,
+    monkeypatch,
+) -> None:
+    from app.api import knowledge as knowledge_api
+
+    client = _client(session)
+
+    rejected = client.post("/api/knowledge/ocr/install", json={"confirm_install": False})
+    assert rejected.status_code == 400
+
+    status_payload = {
+        "mode": "ocr_first",
+        "ready": True,
+        "status": "ready",
+        "tesseract_available": True,
+        "tesseract_path": "tesseract",
+        "tesseract_version": "tesseract 5.0.0",
+        "tessdata_path": None,
+        "available_languages": ["chi_sim", "eng"],
+        "required_languages": ["chi_sim", "eng"],
+        "missing_languages": [],
+        "install_running": False,
+        "install_processes": [],
+        "install_task_ids": [],
+        "python_packages": {"Pillow": True, "pytesseract": False},
+        "message": "本地 OCR 可用。",
+    }
+
+    def fake_install_knowledge_ocr(*, confirm_install: bool) -> dict:
+        assert confirm_install is True
+        return {
+            "supported": True,
+            "installed": True,
+            "command_results": [
+                {
+                    "task_id": "bg-ocr-test",
+                    "command": "winget install --id UB-Mannheim.TesseractOCR",
+                    "exit_code": 0,
+                    "stdout": "ok",
+                    "stderr": "",
+                    "message": "",
+                }
+            ],
+            "install_task_id": "bg-ocr-test",
+            "before_status": {**status_payload, "ready": False, "status": "missing_tesseract"},
+            "after_status": status_payload,
+            "message": "OCR 安装完成。",
+        }
+
+    monkeypatch.setattr(knowledge_api, "install_knowledge_ocr", fake_install_knowledge_ocr)
+
+    response = client.post("/api/knowledge/ocr/install", json={"confirm_install": True})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["installed"] is True
+    assert payload["after_status"]["ready"] is True
+    assert payload["command_results"][0]["exit_code"] == 0
+
+
 def test_upload_document_stores_file_and_previews_chunk_drafts(session: Session, tmp_path, monkeypatch) -> None:
     from app.services import knowledge_document_service
 
@@ -163,6 +241,9 @@ def test_upload_document_stores_file_and_previews_chunk_drafts(session: Session,
     assert document["original_filename"] == "guide.md"
     assert document["parser"] == "markdown"
     assert document["status"] == "pending"
+    assert document["image_asset_count"] == 0
+    assert document["image_asset_processed_count"] == 0
+    assert document["image_text_chunk_count"] == 0
     assert document["storage_path"].startswith(f"files/{space_id}/{document['id']}/")
 
     list_response = client.get(f"/api/knowledge/spaces/{space_id}/documents")

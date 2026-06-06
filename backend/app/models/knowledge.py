@@ -37,6 +37,11 @@ class KnowledgeDocument(SQLModel, table=True):
     chunk_strategy: str = Field(default="heading_paragraph_token", max_length=80)
     status: str = Field(default="pending", index=True, max_length=24)
     chunk_count: int = Field(default=0)
+    text_chunk_count: int = Field(default=0)
+    image_asset_count: int = Field(default=0)
+    image_asset_processed_count: int = Field(default=0)
+    image_text_chunk_count: int = Field(default=0)
+    image_asset_failed_count: int = Field(default=0)
     token_count: int = Field(default=0)
     error_code: str | None = Field(default=None, max_length=80)
     error_message: str | None = None

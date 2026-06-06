@@ -42,6 +42,11 @@ class KnowledgeDocumentRead(BaseModel):
     chunk_strategy: str
     status: str
     chunk_count: int
+    text_chunk_count: int
+    image_asset_count: int
+    image_asset_processed_count: int
+    image_text_chunk_count: int
+    image_asset_failed_count: int
     token_count: int
     error_code: str | None
     error_message: str | None
@@ -83,6 +88,47 @@ class KnowledgeChunkRead(BaseModel):
     metadata_json: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class KnowledgeOcrStatusRead(BaseModel):
+    mode: str
+    ready: bool
+    status: str
+    tesseract_available: bool
+    tesseract_path: str | None
+    tesseract_version: str | None
+    tessdata_path: str | None = None
+    available_languages: list[str]
+    required_languages: list[str]
+    missing_languages: list[str]
+    install_running: bool = False
+    install_processes: list[str] = Field(default_factory=list)
+    install_task_ids: list[str] = Field(default_factory=list)
+    python_packages: dict[str, bool]
+    message: str
+
+
+class KnowledgeOcrInstallRequest(BaseModel):
+    confirm_install: bool = False
+
+
+class KnowledgeOcrInstallCommandResult(BaseModel):
+    task_id: str | None = None
+    command: str
+    exit_code: int | None
+    stdout: str
+    stderr: str
+    message: str
+
+
+class KnowledgeOcrInstallResponse(BaseModel):
+    supported: bool
+    installed: bool
+    command_results: list[KnowledgeOcrInstallCommandResult]
+    install_task_id: str | None = None
+    before_status: KnowledgeOcrStatusRead
+    after_status: KnowledgeOcrStatusRead
+    message: str
 
 
 class KnowledgeSearchRequest(BaseModel):

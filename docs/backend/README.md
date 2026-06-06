@@ -32,6 +32,8 @@ backend/app/
 - `app/api/app_config.py`: 暴露前端 / 桌面运行时配置。
 - `app/api/elf_voice.py`: 暴露桌面精灵语音模式、ASR 和 TTS 接口。
 - `app/api/voice_profiles.py`: 暴露语音工坊声线 CRUD、试听和声音设计接口。
+- `app/services/knowledge_image_text_service.py`: 知识库图片转文本服务，默认调用 DashScope `qwen-vl-ocr` 并做结构化解析和质量过滤。
+- `app/services/knowledge_ocr_service.py`: 知识库图片转文本状态检测。默认 qwen 模式只检查 DashScope Key；`local_ocr` 模式下才检测 / 安装 Tesseract。
 
 ## 数据库
 
@@ -58,6 +60,27 @@ backend/data/ai_note.db
 
 语音模块默认走阿里百炼 / DashScope 远程能力，复用 `DASHSCOPE_API_KEY`，不再要求下载本地
 ASR / TTS 模型。
+
+知识库图片转文本默认也走 DashScope `qwen-vl-ocr`，配置位于
+`knowledge.image_text_extraction`：
+
+```json5
+{
+  "knowledge": {
+    "image_text_extraction": {
+      "mode": "qwen_vl_ocr",
+      "provider": "dashscope",
+      "model": "qwen-vl-ocr",
+      "max_image_bytes": 5242880,
+      "max_images_per_document": 80,
+      "min_confidence": 0.45,
+      "timeout_seconds": 60
+    }
+  }
+}
+```
+
+`mode=off` 时跳过图片转文本；`mode=local_ocr` 时才启用本地 Tesseract 检测和一键安装流程。本地 OCR 不再作为 qwen-vl-ocr 缺 Key 或失败时的自动兜底，避免把噪声 OCR 结果写入知识库索引。
 
 ## 当前 Note 模型
 
@@ -86,4 +109,5 @@ notes
 - [长期记忆管理](./memories.md)
 - [向量存储](./vector-storage.md)
 - [向量检索](./vector-search.md)
+- [从本地 OCR 切换到 qwen-vl-ocr](./qwen-vl-ocr-migration.md)
 - [阿里云远程语音能力接入设计](../desktop/aliyun-voice-provider.md)

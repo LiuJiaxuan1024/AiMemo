@@ -52,6 +52,8 @@ Knowledge Document / 知识文档
 
 Knowledge Chunk / 知识片段
   文档解析和分块后的可检索片段。
+  不管来源是正文、表格、页内图片、扫描件 OCR 还是视觉模型描述，进入检索层时都统一表现为 text chunk。
+  原始格式只作为 citation / metadata 保留，不作为对话时的检索概念暴露给 Agent。
 
 Citation / 引用
   Agent 回答时指向具体文档、页码、标题路径或 chunk 的来源信息。
@@ -181,6 +183,88 @@ KnowledgeDocument.status = pending
 Job.graph_name = knowledge_ingest_graph
 ```
 
+导入阶段需要同时统计文档内的图片资源，给用户一个处理总览：
+
+```text
+图片资源总数
+  例如 PDF 页内图片、DOCX/PPTX 嵌入图、HTML img、Markdown 本地/远程图片。
+
+已转文本图片数
+  已通过 OCR / vision caption / key facts 转成可检索文本 chunk 的图片数量。
+  当前默认使用 DashScope `qwen-vl-ocr` 生成结构化图片文本。本地 OCR 只作为
+  `mode=local_ocr` 的手动降级模式，不在 qwen 缺 Key 或失败时自动兜底。
+
+图片 chunk 数
+  图片资源可能生成 0-N 个文本 chunk，例如整图描述、OCR 文本、局部图表说明。
+
+失败图片数
+  图片损坏、过大、模型失败或不支持格式时单独计数，不应导致整篇文档必然失败。
+```
+
+用户在上传列表和文档详情里应能看到类似状态：
+
+```text
+图片资源：12 张
+转文本：8 / 12
+图片 chunk：15
+失败：1
+```
+
+这件事只发生在 ingest / 调试 UI 层。后续对话检索时，Agent 不需要知道“这是图片 chunk 还是正文 chunk”才能回答；它只接收统一的文本检索片段和必要来源信息。
+
+图片转文本状态检测：
+
+```text
+GET /api/knowledge/ocr/status
+  路径保留历史命名 `/ocr/status`，实际表示知识库图片转文本能力状态。
+
+mode=qwen_vl_ocr
+  检查 DASHSCOPE_API_KEY 是否配置。
+  ready=true 表示可调用 qwen-vl-ocr。
+  ready=false / provider_not_configured 表示正文仍可入库，但图片不会生成可检索文本。
+
+mode=local_ocr
+  检测 tesseract 命令、可用语言包、缺失语言包和 Python OCR 包状态。
+
+上传提醒
+  用户上传 PDF / DOCX / PPTX / Markdown 等可能包含图片资源的文档时，
+  如果图片转文本能力未就绪，前端在提交前提醒“图片内容可能无法转成可检索文本”。
+
+边界
+  qwen 模式不安装本地 OCR；缺 Key 时提示配置 DASHSCOPE_API_KEY。
+  local_ocr 模式才允许用户明确点击并授权安装 Tesseract / 语言包。
+```
+
+本地 OCR 一键安装降级模式：
+
+```text
+POST /api/knowledge/ocr/install
+  请求体必须包含 confirm_install=true。
+  仅在 mode=local_ocr 且本地 OCR 未就绪时使用。
+  后端根据当前平台选择包管理器安装 Tesseract OCR。Windows 下安装命令必须创建
+  BackgroundTask，而不是裸 subprocess / Popen，避免浏览器请求长时间卡住，也避免刷新后
+  丢失“正在安装”的状态。
+
+Windows
+  优先使用 winget 安装 UB-Mannheim.TesseractOCR。
+
+macOS / Linux
+  可使用 Homebrew、apt、dnf、pacman 等常见包管理器；需要系统权限时由系统包管理器处理。
+
+用户体验
+  qwen 模式缺 Key 时不展示“一键安装 OCR”按钮，只提示配置 provider。
+  local_ocr 模式下上传区展示“一键安装 OCR”按钮。
+  用户点击导入可能包含图片的文档时，如果 local OCR 未就绪，先询问是否立即安装。
+  一键安装启动后，前端刷新 /api/background_tasks，让用户可在后台任务面板查看当前命令、
+  stdout / stderr 和运行状态。
+  如果刷新页面后 OCR 安装后台任务仍在 running，status 接口应返回 install_running=true、
+  install_task_ids=[...]，前端继续显示安装中，并提示用户到后台任务面板查看进度或终止任务。
+  如果已检测到 Tesseract 但缺少 `chi_sim` 等语言包，一键安装应创建语言包下载后台任务，
+  将所需 `.traineddata` 放入应用托管的 `data/tessdata` 目录；OCR 执行时使用
+  `--tessdata-dir` 指向该目录，避免写入 `Program Files` 和管理员权限依赖。
+  安装失败或安装后仍缺语言包时，允许用户选择继续上传正文内容，但图片不会转成可检索文本。
+```
+
 ### 挂载到对话
 
 用户进入对话页面，可以在当前 conversation 上挂载知识空间：
@@ -259,6 +343,11 @@ parser
 chunk_strategy
 status: pending | parsing | chunking | embedding | indexing | ready | failed
 chunk_count
+text_chunk_count
+image_asset_count
+image_asset_processed_count
+image_text_chunk_count
+image_asset_failed_count
 error_code
 error_message
 created_at
@@ -282,6 +371,19 @@ metadata_json
 created_at
 updated_at
 ```
+
+`metadata_json` 至少需要保留 chunk 来源类型，方便引用、调试和回到原文定位：
+
+```text
+source_modality: text | table | image_ocr | image_caption | image_key_facts
+asset_id
+page_number
+bounding_box
+heading_path
+parser
+```
+
+检索层排序和上下文打包仍把它们统一当作文本 chunk；`source_modality` 不用于让 Agent 分开检索格式，只用于解释来源和回溯证据。
 
 ### KnowledgeEmbedding
 
@@ -339,12 +441,18 @@ permission
 ```mermaid
 flowchart TD
   LoadDocument[load_document] --> Parse[parse_document]
-  Parse --> Normalize[normalize_blocks]
-  Normalize --> Chunk[chunk_document]
+  Parse --> TextBlocks[extract_text_blocks]
+  Parse --> ImageAssets[extract_image_assets]
+  ImageAssets --> ImageWorkers[parallel image_to_text workers<br/>OCR / caption / key facts]
+  TextBlocks --> Normalize[normalize_text_blocks]
+  ImageWorkers --> Normalize
+  Normalize --> Chunk[chunk_document<br/>统一生成 text chunks]
   Chunk --> Embed[embed_chunks]
   Embed --> Index[index_chunks]
   Index --> Ready[mark_ready]
   Parse -->|失败| Failed[mark_failed]
+  ImageWorkers -->|单图失败| Partial[record image failure<br/>继续处理其他资源]
+  Partial --> Normalize
   Embed -->|失败| Failed
 ```
 
@@ -357,11 +465,24 @@ load_document
 parse_document
   根据 MIME / 扩展名选择 parser。
 
-normalize_blocks
-  统一成标题、段落、表格、页码等中间结构。
+extract_text_blocks
+  从正文、标题、表格、备注等结构中抽取文本 block。
+
+extract_image_assets
+  从 PDF / DOCX / PPTX / HTML / Markdown 中抽取图片资源，记录 asset_id、页码、
+  bbox、alt、caption、source_uri 和 hash。
+
+parallel image_to_text workers
+  对图片资源并行生成派生文本：OCR 文本、整体 caption、图表/截图 key facts。
+  单张图片失败只记录失败原因和计数，不应让整篇文档直接失败。
+  当前默认采用 qwen-vl-ocr 成本策略：使用 OCR 专用视觉模型返回结构化 JSON，
+  并经过 should_index、confidence 和乱码噪声过滤后才生成图片文本 block。
+
+normalize_text_blocks
+  把正文 block、表格 block 和图片派生文本统一成文本 block，同时保留来源 metadata。
 
 chunk_document
-  按策略生成 KnowledgeChunk。
+  按策略生成 KnowledgeChunk。此后检索层只面对 text chunk，不再关心原始格式是正文还是图片。
 
 embed_chunks
   调用现有 embedding provider。
@@ -482,8 +603,14 @@ flowchart TD
   Upload[用户导入文档] --> CreateDoc[创建 KnowledgeDocument]
   CreateDoc --> StartJob[创建 knowledge_ingest_graph job]
   StartJob --> Parse[解析文档]
-  Parse --> Normalize[规范化 block]
-  Normalize --> Chunk[分块]
+  Parse --> Text[抽取正文/表格文本]
+  Parse --> Images[抽取图片资源并统计数量]
+  Images --> Progress[更新图片转文本进度]
+  Images --> Vision[并行 OCR / vision 转文本]
+  Vision --> Progress
+  Text --> Normalize[统一规范化为文本 block]
+  Vision --> Normalize
+  Normalize --> Chunk[分块为统一文本 chunk]
   Chunk --> Dedup[去重 / hash]
   Dedup --> Embed[生成 embedding]
   Embed --> VectorIndex[写入 sqlite-vec]
@@ -498,10 +625,12 @@ flowchart TD
 解析层
   不同格式走不同 parser，但输出统一 block 结构。
   block 至少保留 text、page_number、heading_path、source_offset。
+  图片资源先作为 asset 被抽取，再由 OCR / vision worker 生成 text block。
 
 分块层
   第一版默认使用“标题 / 段落优先 + token 上限”的混合策略。
   不建议只按固定长度硬切，否则引用体验差。
+  正文、表格、图片派生文本最终都进入同一个 chunk pipeline。
 
 去重层
   用 content_hash 避免重复 chunk 反复入库。
@@ -510,6 +639,29 @@ flowchart TD
 索引层
   向量索引用 sqlite-vec。
   关键词索引优先考虑 SQLite FTS5；如果第一版时间紧，可先保留 title/text LIKE 作为降级。
+```
+
+图片资源处理策略：
+
+```text
+统一入口
+  PDF 扫描图、文档内截图、流程图、表格图片、Markdown/HTML 图片都先抽成 image asset。
+
+并行处理
+  每个 image asset 可作为独立 worker 处理，适合 LangGraph Send 或后台 job fan-out。
+  worker 输出 OCR、caption、key facts 等派生文本。
+
+统一入库
+  图片派生文本不单独走“图片检索池”，而是写成 KnowledgeChunk.text。
+  metadata_json 保留 asset_id、page_number、bbox、source_modality，供引用和回源。
+
+用户可观察
+  文档列表和详情页展示图片资源总数、已处理数、失败数、图片 chunk 数。
+  这样用户知道复杂 PDF 或 PPT 里的图片仍在被转成可检索内容。
+
+对话屏蔽格式
+  Agent 检索时只看到文本 chunk 与 citation 信息，不需要区分“来自正文”或“来自图片”。
+  除非用户明确要求查看原图或排查 OCR/视觉结果，否则最终回答不强调 chunk 的原始格式。
 ```
 
 第一版 chunk 建议：
@@ -767,6 +919,8 @@ content:
 不要把 metadata 和正文混成一团。
 超过 token budget 时优先保留高分、高多样性、高标题匹配结果。
 保留原文，不要先让模型总结后再回答；总结会损失引用精度。
+屏蔽格式概念：正文、表格、图片 OCR、图片描述都统一以 content 文本进入 prompt。
+必要的 source_modality 只保留在 citation/debug 中，用于回源，不作为回答模型的检索分支。
 ```
 
 与现有上下文金字塔关系：
@@ -1012,6 +1166,36 @@ DELETE /api/conversations/{conversation_id}/knowledge-mounts/{space_id}
 顶部：上传文档、导入 URL、搜索
 ```
 
+文档列表建议展示：
+
+```text
+文档状态
+chunk_count
+图片资源：已转文本数 / 总数
+图片 chunk 数
+失败图片数
+最后处理时间
+```
+
+文档详情建议增加“资源转文本”区域：
+
+```text
+图片资源总览
+  total_images
+  processed_images
+  failed_images
+  image_text_chunks
+
+资源明细
+  asset_id
+  page_number / heading_path
+  status: pending | processing | completed | failed
+  generated_chunk_count
+  error_message
+```
+
+这个区域面向用户解释上传处理进度，不改变对话检索的统一 chunk 抽象。
+
 对话页增加一个轻量入口：
 
 ```text
@@ -1073,10 +1257,10 @@ Memory Chat Graph
 ```text
 1. 新增“知库”路由和导航。
 2. 支持创建 / 选择知识空间。
-3. 支持上传 PDF / Markdown / TXT / DOCX。
+3. 支持上传 PDF / Markdown / TXT / DOCX，并统计文档内图片资源。
 4. 使用 knowledge_ingest_graph 后台处理文档。
 5. 存储 KnowledgeDocument / KnowledgeChunk / KnowledgeEmbedding。
-6. 知库页面内支持搜索和 chunk 预览。
+6. 知库页面内支持搜索、chunk 预览和图片资源转文本进度总览。
 7. 对话支持手动挂载知识空间。
 8. Agent 新增 knowledge_search 工具，并强制只检索已挂载空间。
 9. 回答中展示引用来源。
@@ -1087,7 +1271,6 @@ Memory Chat Graph
 ```text
 网页爬取
 文件夹实时同步
-OCR
 复杂表格结构理解
 多向量库切换
 本地 embedding 模型配置 UI

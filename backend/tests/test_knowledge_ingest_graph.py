@@ -42,6 +42,7 @@ def test_knowledge_ingest_graph_writes_chunks_and_vectors(
         session_factory=session_factory,
         checkpoint_path=str(tmp_path / "checkpoints.db"),
         embedding_generator=fake_embeddings,
+        image_text_extractor=lambda asset: f"{asset.location_label} 展示 Amazon DynamoDB 的关键概念。",
     )
 
     session.refresh(document)
@@ -55,6 +56,53 @@ def test_knowledge_ingest_graph_writes_chunks_and_vectors(
     with connect_vector_store() as connection:
         rows = connection.execute("select rowid from vec_knowledge_chunks").fetchall()
     assert rows == [(chunk.id,) for chunk in chunks]
+
+
+def test_knowledge_ingest_graph_records_image_chunk_stats(
+    session,
+    session_factory,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from app.services import knowledge_document_service
+
+    monkeypatch.setattr(settings, "database_url", f"sqlite:///{tmp_path / 'test.db'}")
+    monkeypatch.setattr(settings, "embedding_dimensions", 4)
+    monkeypatch.setattr(knowledge_document_service, "KNOWLEDGE_DATA_ROOT", tmp_path / "knowledge")
+    ensure_knowledge_vector_store()
+
+    document = _make_document(session, tmp_path, "image-guide.md", "# 图示\n\n![架构图](arch.png)\n\n正文。")
+    job = enqueue_job(
+        session,
+        job_type=JobType.KNOWLEDGE_INGEST.value,
+        graph_name=GraphName.KNOWLEDGE_INGEST.value,
+        payload={"document_id": document.id, "content_hash": document.content_hash},
+    )
+    session.commit()
+    session.refresh(job)
+
+    def fake_embeddings(texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0, 0.0, float(index)] for index, _ in enumerate(texts)]
+
+    run_knowledge_ingest_graph(
+        job,
+        session_factory=session_factory,
+        checkpoint_path=str(tmp_path / "checkpoints.db"),
+        embedding_generator=fake_embeddings,
+        image_text_extractor=lambda asset: f"{asset.location_label} 展示 Amazon DynamoDB 的关键概念。",
+    )
+
+    session.refresh(document)
+    chunks = session.exec(select(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id)).all()
+    image_chunks = [chunk for chunk in chunks if chunk.metadata_json and "image_asset" in chunk.metadata_json]
+
+    assert document.status == "ready"
+    assert document.image_asset_count == 1
+    assert document.image_asset_processed_count == 1
+    assert document.image_asset_failed_count == 0
+    assert document.image_text_chunk_count == len(image_chunks) == 1
+    assert document.text_chunk_count == document.chunk_count - document.image_text_chunk_count
+    assert "Amazon DynamoDB" in image_chunks[0].text
 
 
 def test_knowledge_ingest_graph_resumes_after_generate_without_reembedding(

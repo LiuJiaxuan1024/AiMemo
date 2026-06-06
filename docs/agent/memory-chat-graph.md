@@ -599,12 +599,19 @@ L3 worker 内部流程：
 flowchart TD
     L3Start([L3 START]) --> Plan[plan_l3_retrieval]
     Plan --> Route{needs_retrieval?}
-    Route -->|yes| Retrieve[retrieve_notes]
+    Route -->|yes| Query[build retrieval_query]
+    Query --> Embed[query embedding]
+    Embed --> Vector[(vec_note_chunks)]
+    Vector --> Join[读取 notechunk + note]
+    Join --> TextChunks[统一文本 chunk candidates<br/>正文 / 附件派生文本 / 未来图片文本]
+    TextChunks --> Retrieve[retrieve_notes]
     Retrieve --> Grade[grade_retrieval]
     Grade --> Build[build_l3_context_layer]
     Route -->|no| Build
     Build --> L3End([L3 END])
 ```
+
+个人笔记检索层只处理文本 chunk。当前主要来源是用户笔记正文；后续如果个人笔记里包含图片、附件或截图，也应先在写入/后台处理阶段转成 OCR、caption、key facts 等派生文本，再以 `notechunk.text` 或等价检索块进入同一流程。对话时屏蔽“原始格式”概念，Agent 只看到可引用的文本片段。
 
 各层预算由 `config.json5` 的 `context_pyramid` 覆盖，缺省兜底值定义在 `ContextBudget` 中。
 当前项目配置为：

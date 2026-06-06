@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.rag.document_parsers.base import DocumentBlock, DocumentParseError
+from app.rag.document_parsers.base import DocumentBlock, DocumentImageAsset, DocumentParseError
 from app.rag.document_parsers.base import ParsedDocument, normalize_text
 
 
@@ -19,6 +19,7 @@ def parse_pptx(path: Path) -> ParsedDocument:
         raise DocumentParseError("DOCUMENT_PARSE_FAILED", f"PPTX 解析失败：{exc}") from exc
 
     blocks: list[DocumentBlock] = []
+    image_assets: list[DocumentImageAsset] = []
     title = ""
     for slide_index, slide in enumerate(presentation.slides, start=1):
         slide_title = _slide_title(slide)
@@ -37,8 +38,12 @@ def parse_pptx(path: Path) -> ParsedDocument:
             )
 
         shape_texts: list[str] = []
+        image_index = 0
         for shape in slide.shapes:
             shape_texts.extend(_shape_texts(shape, MSO_SHAPE_TYPE))
+            for image_asset in _shape_image_assets(shape, MSO_SHAPE_TYPE, slide_index, heading_path, image_index):
+                image_index += 1
+                image_assets.append(image_asset)
         for offset, text in enumerate(_dedupe_preserve_order(shape_texts)):
             if slide_title and text == slide_title:
                 continue
@@ -67,7 +72,7 @@ def parse_pptx(path: Path) -> ParsedDocument:
 
     if not blocks:
         raise DocumentParseError("DOCUMENT_TEXT_EMPTY", "未能从 PPTX 中提取到文本。它可能主要由图片组成。")
-    return ParsedDocument(parser="pptx", blocks=blocks, title=title or path.stem)
+    return ParsedDocument(parser="pptx", blocks=blocks, title=title or path.stem, image_assets=image_assets)
 
 
 def _slide_title(slide) -> str:
@@ -93,6 +98,36 @@ def _shape_texts(shape, shape_type_enum) -> list[str]:
         for child_shape in shape.shapes:
             texts.extend(_shape_texts(child_shape, shape_type_enum))
     return texts
+
+
+def _shape_image_assets(shape, shape_type_enum, slide_index: int, heading_path: list[str], image_offset: int) -> list[DocumentImageAsset]:
+    assets: list[DocumentImageAsset] = []
+    if getattr(shape, "shape_type", None) == shape_type_enum.PICTURE:
+        asset_index = image_offset + 1
+        alt_text = getattr(shape, "alternative_text", None) or getattr(shape, "name", None)
+        image = getattr(shape, "image", None)
+        assets.append(
+            DocumentImageAsset(
+                asset_id=f"pptx-slide-{slide_index}-image-{asset_index}",
+                parser="pptx",
+                location_label=f"Slide {slide_index} 图片 {asset_index}",
+                heading_path=list(heading_path),
+                page_number=slide_index,
+                source_offset=asset_index,
+                alt_text=normalize_text(str(alt_text or "")) or None,
+                data=getattr(image, "blob", None) if image is not None else None,
+                mime_type=getattr(image, "content_type", None) if image is not None else None,
+                width=int(getattr(shape, "width", 0) or 0) or None,
+                height=int(getattr(shape, "height", 0) or 0) or None,
+            )
+        )
+    if getattr(shape, "shape_type", None) == shape_type_enum.GROUP:
+        nested_offset = image_offset + len(assets)
+        for child_shape in shape.shapes:
+            child_assets = _shape_image_assets(child_shape, shape_type_enum, slide_index, heading_path, nested_offset)
+            nested_offset += len(child_assets)
+            assets.extend(child_assets)
+    return assets
 
 
 def _text_frame_text(text_frame) -> str:

@@ -35,6 +35,14 @@ def build_chunk_drafts(blocks: list[DocumentBlock]) -> list[KnowledgeChunkDraft]
     current_tokens = 0
 
     for block in normalized_blocks:
+        if block.block_type == "image":
+            if current:
+                _append_chunk(drafts, current)
+                current = []
+                current_tokens = 0
+            _append_chunk(drafts, [block])
+            continue
+
         block_tokens = count_tokens(_block_text(block))
         if block_tokens > KNOWLEDGE_CHUNK_MAX_TOKENS:
             if current:
@@ -65,7 +73,7 @@ def _append_chunk(drafts: list[KnowledgeChunkDraft], blocks: list[DocumentBlock]
     if not text:
         return
     first = blocks[0]
-    metadata = {"block_types": [block.block_type for block in blocks]}
+    metadata = _chunk_metadata(blocks)
     drafts.append(
         KnowledgeChunkDraft(
             chunk_index=len(drafts),
@@ -89,7 +97,8 @@ def _append_oversized_block_chunks(drafts: list[KnowledgeChunkDraft], block: Doc
         end = min(start + KNOWLEDGE_CHUNK_MAX_TOKENS, len(tokens))
         chunk_text = decode_tokens(tokens[start:end]).strip()
         if chunk_text:
-            metadata = {"block_types": [block.block_type], "split_from_oversized_block": True}
+            metadata = _chunk_metadata([block])
+            metadata["split_from_oversized_block"] = True
             drafts.append(
                 KnowledgeChunkDraft(
                     chunk_index=len(drafts),
@@ -120,3 +129,31 @@ def _last_heading_path(blocks: list[DocumentBlock]) -> list[str]:
         if block.heading_path:
             return list(block.heading_path)
     return []
+
+
+def _chunk_metadata(blocks: list[DocumentBlock]) -> dict:
+    block_types = [block.block_type for block in blocks]
+    source_modalities = _dedupe_values(
+        str(block.metadata.get("source_modality") or block.block_type) for block in blocks
+    )
+    asset_ids = _dedupe_values(str(block.metadata.get("asset_id") or "") for block in blocks)
+    metadata = {
+        "block_types": block_types,
+        "source_modalities": source_modalities,
+    }
+    if asset_ids:
+        metadata["asset_ids"] = asset_ids
+    if len(blocks) == 1 and blocks[0].metadata:
+        metadata["source_metadata"] = dict(blocks[0].metadata)
+    return metadata
+
+
+def _dedupe_values(values) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result

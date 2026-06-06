@@ -24,6 +24,11 @@ export interface KnowledgeDocument {
   chunk_strategy: string;
   status: string;
   chunk_count: number;
+  text_chunk_count: number;
+  image_asset_count: number;
+  image_asset_processed_count: number;
+  image_text_chunk_count: number;
+  image_asset_failed_count: number;
   token_count: number;
   error_code: string | null;
   error_message: string | null;
@@ -40,6 +45,41 @@ export interface KnowledgeDocumentUploadResponse {
     graph_name: string;
     status: string;
   } | null;
+}
+
+export interface KnowledgeOcrStatus {
+  mode: string;
+  ready: boolean;
+  status: string;
+  tesseract_available: boolean;
+  tesseract_path: string | null;
+  tesseract_version: string | null;
+  tessdata_path: string | null;
+  available_languages: string[];
+  required_languages: string[];
+  missing_languages: string[];
+  install_running: boolean;
+  install_processes: string[];
+  install_task_ids: string[];
+  python_packages: Record<string, boolean>;
+  message: string;
+}
+
+export interface KnowledgeOcrInstallResult {
+  supported: boolean;
+  installed: boolean;
+  command_results: Array<{
+    task_id: string | null;
+    command: string;
+    exit_code: number | null;
+    stdout: string;
+    stderr: string;
+    message: string;
+  }>;
+  install_task_id: string | null;
+  before_status: KnowledgeOcrStatus;
+  after_status: KnowledgeOcrStatus;
+  message: string;
 }
 
 export interface KnowledgeChunk {

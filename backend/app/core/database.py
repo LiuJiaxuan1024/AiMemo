@@ -186,6 +186,18 @@ def migrate_existing_sqlite_schema() -> None:
             },
         )
 
+    if KnowledgeDocument.__tablename__ in table_names:
+        _add_missing_columns(
+            KnowledgeDocument.__tablename__,
+            {
+                "text_chunk_count": "INTEGER DEFAULT 0",
+                "image_asset_count": "INTEGER DEFAULT 0",
+                "image_asset_processed_count": "INTEGER DEFAULT 0",
+                "image_text_chunk_count": "INTEGER DEFAULT 0",
+                "image_asset_failed_count": "INTEGER DEFAULT 0",
+            },
+        )
+
     _migrate_pk_to_autoincrement(table_names)
 
 
