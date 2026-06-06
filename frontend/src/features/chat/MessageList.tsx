@@ -1,5 +1,5 @@
 import { Check, GitBranch, Maximize2, MessageCircleQuestion, MoreHorizontal, Send, Square, Trash2, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 
 import { Button, EmptyState } from "../../shared/ui";
@@ -1623,44 +1623,148 @@ function ChronologicalTimeline({
   // 把所有未挂到 segment 的 thought（一般是 step_index=0 的全局/兜底 thought）放最前面。
   const orphanThoughts = orphansBeforeSegments(thoughtsByStep, segments);
   const showThinkingTail = isStreaming && !showWarmingUp && shouldShowThinkingTail(segments);
-  return (
-    <div className="chat-segment-timeline">
-      {showWarmingUp ? <TypingIndicator compact /> : null}
-      {orphanThoughts.length > 0 ? <SegmentThoughts thoughts={orphanThoughts} /> : null}
-      {segments.map((segment, idx) => {
-        const isLast = idx === lastIndex;
-        const segmentStreaming = isStreaming && isLast && segment.tools.length === 0;
-        const stepThoughts = thoughtsByStep.get(segment.step_index) ?? [];
-        return (
-          <div className="chat-segment" key={`step-${segment.step_index}`}>
-            {stepThoughts.length > 0 ? <SegmentThoughts thoughts={stepThoughts} /> : null}
-            {segment.text.length > 0 ? (
-              <StreamingMarkdown
-                activeSegmentId={activeSegmentId}
-                content={segment.text}
-                followupThreads={followupThreads}
-                onOpenSegment={onOpenSegment}
-                streaming={segmentStreaming}
-              />
-            ) : null}
-            {segment.tools.length > 0 ? (
-              <div className="chat-segment__tools">
-                {segment.tools.map((tool) => (
-                  <ToolCallCard
-                    key={tool.tool_call_id || `${tool.tool_name}-${segment.step_index}`}
-                    toolName={tool.tool_name}
-                    args={tool.arguments}
-                    summary={tool.result_summary || tool.message}
-                    status={toolCardStatus(tool)}
-                  />
-                ))}
-              </div>
-            ) : null}
+  const items: TimelineItem[] = [];
+  if (showWarmingUp) {
+    items.push({
+      kind: "work",
+      key: "warming-up",
+      node: <TypingIndicator compact />,
+    });
+  }
+  if (orphanThoughts.length > 0) {
+    items.push({
+      kind: "work",
+      key: "orphan-thoughts",
+      node: <SegmentThoughts thoughts={orphanThoughts} />,
+    });
+  }
+
+  segments.forEach((segment, idx) => {
+    const isLast = idx === lastIndex;
+    const segmentStreaming = isStreaming && isLast && segment.tools.length === 0;
+    const stepThoughts = thoughtsByStep.get(segment.step_index) ?? [];
+
+    if (stepThoughts.length > 0) {
+      items.push({
+        kind: "work",
+        key: `step-${segment.step_index}-${idx}-thoughts`,
+        node: <SegmentThoughts thoughts={stepThoughts} />,
+      });
+    }
+
+    if (segment.text.length > 0) {
+      items.push({
+        kind: "answer",
+        key: `step-${segment.step_index}-${idx}-text`,
+        node: (
+          <div className="chat-segment" key={`step-${segment.step_index}-text`}>
+            <StreamingMarkdown
+              activeSegmentId={activeSegmentId}
+              content={segment.text}
+              followupThreads={followupThreads}
+              onOpenSegment={onOpenSegment}
+              streaming={segmentStreaming}
+            />
           </div>
-        );
-      })}
-      {showThinkingTail ? <TypingIndicator compact variant="tail" /> : null}
-    </div>
+        ),
+      });
+    }
+
+    if (segment.tools.length > 0) {
+      items.push({
+        kind: "work",
+        key: `step-${segment.step_index}-${idx}-tools`,
+        node: (
+          <div className="chat-segment" key={`step-${segment.step_index}-tools`}>
+            <div className="chat-segment__tools">
+              {segment.tools.map((tool) => (
+                <ToolCallCard
+                  key={tool.tool_call_id || `${tool.tool_name}-${segment.step_index}`}
+                  toolName={tool.tool_name}
+                  args={tool.arguments}
+                  summary={tool.result_summary || tool.message}
+                  status={toolCardStatus(tool)}
+                />
+              ))}
+            </div>
+          </div>
+        ),
+      });
+    }
+  });
+
+  if (showThinkingTail) {
+    items.push({
+      kind: "work",
+      key: "thinking-tail",
+      node: <TypingIndicator compact variant="tail" />,
+    });
+  }
+
+  return <div className="chat-segment-timeline">{renderTimelineItems(items, isStreaming)}</div>;
+}
+
+type TimelineItem = {
+  kind: "work" | "answer";
+  key: string;
+  node: ReactNode;
+};
+
+function renderTimelineItems(items: TimelineItem[], isStreaming: boolean) {
+  const rendered: ReactNode[] = [];
+  let workGroup: TimelineItem[] = [];
+
+  const flushWorkGroup = () => {
+    if (workGroup.length === 0) {
+      return;
+    }
+    const group = workGroup;
+    workGroup = [];
+    rendered.push(
+      <ToolProcessWindow isStreaming={isStreaming} key={`work-${group[0].key}`}>
+        {group.map((item) => (
+          <div className="chat-tool-process-window__item" key={item.key}>
+            {item.node}
+          </div>
+        ))}
+      </ToolProcessWindow>,
+    );
+  };
+
+  for (const item of items) {
+    if (item.kind === "work") {
+      workGroup.push(item);
+      continue;
+    }
+    flushWorkGroup();
+    rendered.push(<div key={item.key}>{item.node}</div>);
+  }
+  flushWorkGroup();
+  return rendered;
+}
+
+function ToolProcessWindow({
+  children,
+  isStreaming,
+}: {
+  children: ReactNode;
+  isStreaming: boolean;
+}) {
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!isStreaming || !bodyRef.current) {
+      return;
+    }
+    bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+  }, [children, isStreaming]);
+
+  return (
+    <section className="chat-tool-process-window" aria-label="工具调用过程">
+      <div className="chat-tool-process-window__body" ref={bodyRef}>
+        {children}
+      </div>
+    </section>
   );
 }
 

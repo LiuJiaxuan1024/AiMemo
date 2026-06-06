@@ -33,6 +33,8 @@ READ_TOOL_NAMES = {
     "search_files",
     "search_text",
     "get_file_info",
+    "remote_connectivity_check",
+    "remote_verify_http",
 }
 WRITE_TOOL_NAMES = {
     "write_file",
@@ -40,6 +42,8 @@ WRITE_TOOL_NAMES = {
 EXEC_TOOL_NAMES = {
     "exec_command",
     "exec_command_background",
+    "remote_upload_file",
+    "remote_exec",
     "read_background_output",
     "kill_background_task",
     "list_background_tasks",
@@ -680,6 +684,26 @@ def _normalize_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> dict
                 arguments.get("max_output_bytes") or settings.local_operator_exec_default_max_output_bytes
             ),
         }
+    if tool_name == "remote_connectivity_check":
+        return _normalize_remote_ssh_arguments(arguments)
+    if tool_name == "remote_upload_file":
+        return {
+            **_normalize_remote_ssh_arguments(arguments),
+            "local_path": _clean_tool_path(str(arguments.get("local_path") or "")),
+            "remote_path": str(arguments.get("remote_path") or ""),
+        }
+    if tool_name == "remote_exec":
+        return {
+            **_normalize_remote_ssh_arguments(arguments),
+            "command": str(arguments.get("command") or ""),
+            "timeout_ms": int(arguments.get("timeout_ms") or settings.local_operator_exec_default_timeout_ms),
+        }
+    if tool_name == "remote_verify_http":
+        return {
+            "url": str(arguments.get("url") or ""),
+            "expected_text": arguments.get("expected_text"),
+            "timeout_seconds": int(arguments.get("timeout_seconds") or 10),
+        }
     if tool_name == "exec_command_background":
         return {
             "command": str(arguments.get("command") or ""),
@@ -703,6 +727,18 @@ def _normalize_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> dict
             include_finished = str(raw).lower() not in {"false", "0", "no", "off"}
         return {"include_finished": include_finished}
     return {}
+
+
+def _normalize_remote_ssh_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "host": str(arguments.get("host") or ""),
+        "username": str(arguments.get("username") or ""),
+        "port": int(arguments.get("port") or 22),
+        "identity_file": _clean_tool_path(str(arguments.get("identity_file") or ""))
+        if arguments.get("identity_file")
+        else None,
+        "connect_timeout_seconds": int(arguments.get("connect_timeout_seconds") or 10),
+    }
 
 
 def _looks_like_project_existence_request(text: str) -> bool:
@@ -877,6 +913,25 @@ def _observation_to_lines(observation: LocalOperatorObservation) -> list[str]:
             "```text",
             str(data.get("stdout") or data.get("stderr") or "(no output)"),
             "```",
+        ]
+    if tool_name == "remote_connectivity_check":
+        return [
+            f"- 远程连接检查完成：{data.get('username')}@{data.get('host')}:{data.get('port')}，status={data.get('status')}。"
+        ]
+    if tool_name == "remote_upload_file":
+        return [
+            f"- 远程上传完成：`{data.get('local_path')}` -> `{data.get('username')}@{data.get('host')}:{data.get('remote_path')}`。"
+        ]
+    if tool_name == "remote_exec":
+        return [
+            f"- 已执行远程命令 `{data.get('remote_command')}`，target=`{data.get('username')}@{data.get('host')}:{data.get('port')}`，exit_code={data.get('exit_code')}：",
+            "```text",
+            str(data.get("stdout") or data.get("stderr") or "(no output)"),
+            "```",
+        ]
+    if tool_name == "remote_verify_http":
+        return [
+            f"- HTTP 验证完成：`{data.get('url')}`，status_code={data.get('status_code')}，contains_expected_text={data.get('contains_expected_text')}。"
         ]
     return [f"- `{tool_name}` 返回：{data}"]
 

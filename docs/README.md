@@ -52,6 +52,7 @@
 - [Memory Chat Graph](./agent/memory-chat-graph.md)
 - [Context Pyramid](./agent/context-pyramid.md)
 - [聊天模型 Provider 适配设计](./agent/model-provider-adapter.md)
+- [远程服务器操作失败复盘与改进说明](./agent/remote-server-operation-failure-analysis.md)
 - [Conversation Summary Graph](./agent/conversation-summary-graph.md)
 - [Conversation Memory Graph](./agent/conversation-memory-graph.md)
 - [Conversation Title Graph](./agent/conversation-title-graph.md)

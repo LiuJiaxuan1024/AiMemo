@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -19,6 +20,7 @@ AGENT_CHAT_SLOT = "agent_chat"
 _planner_chat_model: ChatOpenAI | None = None
 _vision_chat_model: ChatOpenAI | None = None
 _chat_model_cache: dict[str, ChatOpenAI] = {}
+_model_cache_lock = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -70,12 +72,13 @@ def get_chat_model(slot: str) -> ChatOpenAI:
 
     config = _resolve_agent_chat_config()
     _validate_agent_chat_config(config)
-    if config.cache_key not in _chat_model_cache:
-        _chat_model_cache[config.cache_key] = _build_openai_compatible_chat_model(
-            config=config,
-            cache_name=slot,
-        )
-    return _chat_model_cache[config.cache_key]
+    with _model_cache_lock:
+        if config.cache_key not in _chat_model_cache:
+            _chat_model_cache[config.cache_key] = _build_openai_compatible_chat_model(
+                config=config,
+                cache_name=slot,
+            )
+        return _chat_model_cache[config.cache_key]
 
 
 def get_agent_chat_model_with_tools(tools: list[BaseTool]):
@@ -98,13 +101,14 @@ def get_planner_chat_model() -> ChatOpenAI:
     """
 
     global _planner_chat_model
-    if _planner_chat_model is None:
-        _planner_chat_model = _build_dashscope_chat_model(
-            model=PLANNER_CHAT_MODEL,
-            streaming=False,
-            cache_name="planner",
-        )
-    return _planner_chat_model
+    with _model_cache_lock:
+        if _planner_chat_model is None:
+            _planner_chat_model = _build_dashscope_chat_model(
+                model=PLANNER_CHAT_MODEL,
+                streaming=False,
+                cache_name="planner",
+            )
+        return _planner_chat_model
 
 
 def get_vision_chat_model() -> ChatOpenAI:
@@ -114,13 +118,14 @@ def get_vision_chat_model() -> ChatOpenAI:
     """
 
     global _vision_chat_model
-    if _vision_chat_model is None:
-        _vision_chat_model = _build_dashscope_chat_model(
-            model=settings.attachments_vision_model,
-            streaming=False,
-            cache_name="vision",
-        )
-    return _vision_chat_model
+    with _model_cache_lock:
+        if _vision_chat_model is None:
+            _vision_chat_model = _build_dashscope_chat_model(
+                model=settings.attachments_vision_model,
+                streaming=False,
+                cache_name="vision",
+            )
+        return _vision_chat_model
 
 
 def warmup_agent_models() -> None:
@@ -167,9 +172,10 @@ def reset_agent_models() -> None:
     """
 
     global _planner_chat_model, _vision_chat_model
-    _chat_model_cache.clear()
-    _planner_chat_model = None
-    _vision_chat_model = None
+    with _model_cache_lock:
+        _chat_model_cache.clear()
+        _planner_chat_model = None
+        _vision_chat_model = None
 
 
 def _resolve_agent_chat_config() -> ChatModelConfig:

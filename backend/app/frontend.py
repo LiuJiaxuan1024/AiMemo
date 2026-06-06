@@ -1,3 +1,4 @@
+import mimetypes
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -11,6 +12,8 @@ def mount_frontend_app(app: FastAPI) -> None:
     产品入口统一为 http://127.0.0.1:8000/app。开发期仍可单独启动 Vite，
     但桌面精灵和普通用户不再依赖 5173 端口是否存在。
     """
+
+    _register_frontend_mime_types()
 
     dist_dir = _frontend_dist_dir()
     assets_dir = dist_dir / "assets"
@@ -47,3 +50,12 @@ def _frontend_dist_dir() -> Path:
     """
 
     return Path(__file__).resolve().parents[2] / "frontend" / "dist"
+
+
+def _register_frontend_mime_types() -> None:
+    """固定 Vite 构建产物的 MIME 类型，避免受 Windows 注册表污染影响。"""
+
+    mimetypes.add_type("text/javascript", ".js", strict=True)
+    mimetypes.add_type("text/javascript", ".mjs", strict=True)
+    mimetypes.add_type("text/css", ".css", strict=True)
+    mimetypes.add_type("application/wasm", ".wasm", strict=True)

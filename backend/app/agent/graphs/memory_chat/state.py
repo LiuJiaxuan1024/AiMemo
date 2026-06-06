@@ -140,6 +140,31 @@ class AgentWorldStatePayload(TypedDict, total=False):
     failures: list[dict]
 
 
+class RemoteTaskPhasePayload(TypedDict, total=False):
+    """远程任务状态机中的一个阶段。"""
+
+    id: str
+    label: str
+    status: Literal["pending", "running", "completed", "failed", "blocked", "skipped"]
+    tool_name: str
+    summary: str
+    error_code: str
+
+
+class RemoteTaskSessionPayload(TypedDict, total=False):
+    """一次远程服务器操作的跨工具会话摘要。"""
+
+    id: str
+    status: Literal["collecting_target", "running", "blocked", "verifying", "completed", "failed"]
+    current_phase: str
+    target: dict
+    auth: dict
+    artifacts: dict
+    phases: list[RemoteTaskPhasePayload]
+    blocked_reason: str
+    next_actions: list[str]
+
+
 class TurnMessagePayload(TypedDict, total=False):
     """单轮 graph 内部追加的消息流。
 
@@ -219,6 +244,7 @@ class MemoryChatGraphState(TypedDict, total=False):
     agent_step_index: int
     task: AgentTaskPayload
     world_state: AgentWorldStatePayload
+    remote_task_session: RemoteTaskSessionPayload
     verification: dict
     replan_required: bool
     agent_decision: dict

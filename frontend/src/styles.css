@@ -3196,16 +3196,37 @@ textarea {
   min-width: 0;
 }
 
+.chat-tool-process-window {
+  background: rgba(248, 250, 252, 0.66);
+  border: 1px solid rgba(203, 213, 225, 0.72);
+  border-radius: 10px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.chat-tool-process-window__body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: min(24vh, 220px);
+  min-width: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 10px 12px;
+  scrollbar-gutter: stable;
+}
+
+.chat-tool-process-window__item {
+  max-width: 100%;
+  min-width: 0;
+}
+
 .chat-segment__tools {
   display: flex;
   flex-direction: column;
   gap: 4px;
   max-width: 100%;
-  max-height: 260px;
   min-width: 0;
-  overflow: auto;
-  padding-right: 2px;
-  scrollbar-gutter: stable;
 }
 
 .chat-segment-thoughts {

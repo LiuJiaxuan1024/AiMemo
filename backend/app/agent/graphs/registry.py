@@ -1,11 +1,5 @@
 from dataclasses import dataclass
 
-from app.agent.checkpoints import get_sqlite_checkpointer
-from app.agent.graphs.conversation_memory.graph import build_conversation_memory_graph
-from app.agent.graphs.conversation_summary.graph import build_conversation_summary_graph
-from app.agent.graphs.knowledge_ingest.graph import build_knowledge_ingest_graph
-from app.agent.graphs.note_embedding.graph import build_note_embedding_graph
-from app.agent.graphs.note_metadata.graph import build_note_metadata_graph
 from app.core.config import settings
 from app.core.database import session_scope
 from app.jobs.models import GraphName
@@ -33,6 +27,9 @@ def get_job_graph_view(job: Job) -> JobGraphView:
 
 
 def _get_note_metadata_graph_view(job: Job) -> JobGraphView:
+    from app.agent.checkpoints import get_sqlite_checkpointer
+    from app.agent.graphs.note_metadata.graph import build_note_metadata_graph
+
     thread_id = job.thread_id or f"job:{job.id}"
     with get_sqlite_checkpointer(settings.langgraph_checkpoint_path) as checkpointer:
         app = build_note_metadata_graph(session_factory=session_scope).compile(
@@ -49,6 +46,9 @@ def _get_note_metadata_graph_view(job: Job) -> JobGraphView:
 
 
 def _get_note_embedding_graph_view(job: Job) -> JobGraphView:
+    from app.agent.checkpoints import get_sqlite_checkpointer
+    from app.agent.graphs.note_embedding.graph import build_note_embedding_graph
+
     thread_id = job.thread_id or f"job:{job.id}"
     with get_sqlite_checkpointer(settings.langgraph_checkpoint_path) as checkpointer:
         app = build_note_embedding_graph(session_factory=session_scope).compile(
@@ -65,6 +65,9 @@ def _get_note_embedding_graph_view(job: Job) -> JobGraphView:
 
 
 def _get_knowledge_ingest_graph_view(job: Job) -> JobGraphView:
+    from app.agent.checkpoints import get_sqlite_checkpointer
+    from app.agent.graphs.knowledge_ingest.graph import build_knowledge_ingest_graph
+
     thread_id = job.thread_id or f"job:{job.id}"
     with get_sqlite_checkpointer(settings.langgraph_checkpoint_path) as checkpointer:
         app = build_knowledge_ingest_graph(session_factory=session_scope).compile(
@@ -81,6 +84,9 @@ def _get_knowledge_ingest_graph_view(job: Job) -> JobGraphView:
 
 
 def _get_conversation_summary_graph_view(job: Job) -> JobGraphView:
+    from app.agent.checkpoints import get_sqlite_checkpointer
+    from app.agent.graphs.conversation_summary.graph import build_conversation_summary_graph
+
     thread_id = job.thread_id or f"job:{job.id}"
     with get_sqlite_checkpointer(settings.langgraph_checkpoint_path) as checkpointer:
         app = build_conversation_summary_graph(session_factory=session_scope).compile(
@@ -97,6 +103,9 @@ def _get_conversation_summary_graph_view(job: Job) -> JobGraphView:
 
 
 def _get_conversation_memory_graph_view(job: Job) -> JobGraphView:
+    from app.agent.checkpoints import get_sqlite_checkpointer
+    from app.agent.graphs.conversation_memory.graph import build_conversation_memory_graph
+
     thread_id = job.thread_id or f"job:{job.id}"
     with get_sqlite_checkpointer(settings.langgraph_checkpoint_path) as checkpointer:
         app = build_conversation_memory_graph(session_factory=session_scope).compile(

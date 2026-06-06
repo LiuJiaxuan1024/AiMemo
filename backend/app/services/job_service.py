@@ -1,7 +1,6 @@
 from fastapi import HTTPException, status
 from sqlmodel import Session, desc, select
 
-from app.agent.graphs.registry import get_job_graph_view
 from app.jobs.models import JobStatus
 from app.jobs.payloads import decode_payload
 from app.models.job import Job
@@ -25,6 +24,8 @@ def get_job(session: Session, job_id: int) -> JobRead:
 
 
 def get_job_graph(session: Session, job_id: int) -> JobGraphRead:
+    from app.agent.graphs.registry import get_job_graph_view
+
     job = session.get(Job, job_id)
     if job is None:
         raise HTTPException(

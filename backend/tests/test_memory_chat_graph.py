@@ -787,6 +787,121 @@ def test_task_runtime_nodes_track_world_state_and_verification():
     assert verified["replan_required"] is False
 
 
+def test_remote_task_session_is_created_for_remote_goal():
+    planned = build_plan_task_node()(
+        {
+            "conversation_id": 1,
+            "user_message": "登录远程服务器，把静态页面上传到 nginx 并部署",
+            "thought_events": [],
+        }
+    )
+
+    remote_session = planned["remote_task_session"]
+    assert remote_session["status"] == "collecting_target"
+    assert remote_session["current_phase"] == "collect_target"
+    assert remote_session["auth"]["method"] == "ssh_key_or_agent"
+    assert "remote_* 工具" in "\n".join(planned["task"]["acceptance_criteria"])
+
+
+def test_remote_task_session_blocks_on_interactive_auth():
+    planned = build_plan_task_node()(
+        {
+            "conversation_id": 1,
+            "user_message": "连接远程服务器并上传 nginx 页面",
+            "thought_events": [],
+        }
+    )
+    state = {
+        **planned,
+        "agent_step_index": 1,
+        "tool_observations": [
+            {
+                "tool_call_id": "call-ssh",
+                "tool_name": "remote_connectivity_check",
+                "arguments": {"host": "example.com", "username": "root", "port": 22},
+                "ok": False,
+                "data": {"host": "example.com", "username": "root", "port": 22},
+                "error_code": "INTERACTIVE_AUTH_REQUIRED",
+                "message": "需要交互式认证。",
+                "blocked": True,
+            }
+        ],
+    }
+
+    observed = build_observe_tool_result_node()(state)
+    remote_session = observed["remote_task_session"]
+    assert remote_session["status"] == "blocked"
+    assert remote_session["current_phase"] == "collect_auth"
+    assert "configure_ssh_key" in remote_session["next_actions"]
+
+    verified = build_verify_goal_node()({**state, **observed})
+    assert verified["verification"]["status"] == "needs_user_input"
+    assert "request_user_input" in verified["verification"]["reason"]
+
+
+def test_remote_task_session_completes_after_upload_and_http_verify():
+    planned = build_plan_task_node()(
+        {
+            "conversation_id": 1,
+            "user_message": "上传静态页面到远程 nginx 并验证",
+            "thought_events": [],
+        }
+    )
+    observations = [
+        {
+            "tool_call_id": "call-connect",
+            "tool_name": "remote_connectivity_check",
+            "arguments": {"host": "example.com", "username": "root", "port": 22},
+            "ok": True,
+            "data": {"host": "example.com", "username": "root", "port": 22, "status": "reachable"},
+            "error_code": "",
+            "message": "",
+            "blocked": False,
+        },
+        {
+            "tool_call_id": "call-upload",
+            "tool_name": "remote_upload_file",
+            "arguments": {
+                "host": "example.com",
+                "username": "root",
+                "local_path": "E:/tmp/index.html",
+                "remote_path": "/usr/share/nginx/html/index.html",
+            },
+            "ok": True,
+            "data": {
+                "host": "example.com",
+                "username": "root",
+                "local_path": "E:/tmp/index.html",
+                "remote_path": "/usr/share/nginx/html/index.html",
+            },
+            "error_code": "",
+            "message": "",
+            "blocked": False,
+        },
+        {
+            "tool_call_id": "call-http",
+            "tool_name": "remote_verify_http",
+            "arguments": {"url": "http://example.com", "expected_text": "hello"},
+            "ok": True,
+            "data": {"url": "http://example.com", "status_code": 200, "contains_expected_text": True},
+            "error_code": "",
+            "message": "",
+            "blocked": False,
+        },
+    ]
+    state = {**planned, "agent_step_index": 1, "tool_observations": observations}
+
+    observed = build_observe_tool_result_node()(state)
+    remote_session = observed["remote_task_session"]
+    assert remote_session["status"] == "completed"
+    assert remote_session["current_phase"] == "done"
+    assert remote_session["target"]["remote_path"] == "/usr/share/nginx/html/index.html"
+    assert remote_session["target"]["verified_url"] == "http://example.com"
+
+    verified = build_verify_goal_node()({**state, **observed})
+    assert verified["verification"]["status"] == "ready_for_final"
+
+
 def test_initial_chat_turn_statuses_include_dynamic_tool_loop_nodes():
     """前端 graph 状态表应覆盖主图里的动态任务和 exec/verify 节点。"""
 

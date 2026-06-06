@@ -5,7 +5,6 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from sqlmodel import Session, select
 
 from app.agent.graphs.conversation_title.state import ConversationTitleGraphState
-from app.agent.model import get_agent_chat_model
 from app.models.chat_message import ChatMessage
 from app.models.conversation import Conversation
 from app.models.note import utc_now
@@ -112,6 +111,8 @@ def route_after_load_title(state: ConversationTitleGraphState) -> str:
 
 def generate_conversation_title(first_user_message: str) -> str:
     """用 qwen3.5-plus 给会话生成一个 ≤ 16 字的中文短标题。"""
+
+    from app.agent.model import get_agent_chat_model
 
     response = get_agent_chat_model().invoke(
         [

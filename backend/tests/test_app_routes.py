@@ -1,3 +1,5 @@
+import mimetypes
+
 from app.main import create_app
 
 
@@ -30,3 +32,12 @@ def test_app_registers_search_routes():
     assert "/api/background_tasks/{task_id}" in paths
     assert "/api/background_tasks/{task_id}/output" in paths
     assert "/api/background_tasks/{task_id}/kill" in paths
+
+
+def test_frontend_static_module_mime_types_are_registered():
+    create_app()
+
+    assert mimetypes.guess_type("index-test.js")[0] == "text/javascript"
+    assert mimetypes.guess_type("chunk-test.mjs")[0] == "text/javascript"
+    assert mimetypes.guess_type("style-test.css")[0] == "text/css"
+    assert mimetypes.guess_type("module-test.wasm")[0] == "application/wasm"

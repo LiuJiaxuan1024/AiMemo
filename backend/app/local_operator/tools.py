@@ -12,6 +12,7 @@ from app.local_operator.background_command import pool as background_pool, evalu
 from app.local_operator.command import LocalCommandExecutor, evaluate_command_policy
 from app.local_operator.filesystem import KnownReadFile, LocalFilesystemError, LocalFilesystemService, tool_result_to_json
 from app.local_operator.policy import LocalOperatorPolicy
+from app.local_operator.remote import RemoteOperatorService
 from app.local_operator.schemas import (
     ExecCommandBackgroundInput,
     ExecCommandInput,
@@ -22,6 +23,10 @@ from app.local_operator.schemas import (
     ReadDocumentInput,
     ReadBackgroundOutputInput,
     ReadFileInput,
+    RemoteConnectivityCheckInput,
+    RemoteExecInput,
+    RemoteUploadFileInput,
+    RemoteVerifyHttpInput,
     SearchFilesInput,
     SearchTextInput,
     ToolResult,
@@ -49,6 +54,7 @@ def create_read_tools(
 
     filesystem = LocalFilesystemService(policy, known_read_files=known_read_files)
     command_executor = LocalCommandExecutor(policy)
+    remote_operator = RemoteOperatorService(policy)
     known_existing_paths = known_existing_paths or set()
 
     def run_with_audit(
@@ -295,6 +301,115 @@ def create_read_tools(
             approval_required=False,
         )
 
+    @tool(args_schema=RemoteConnectivityCheckInput)
+    def remote_connectivity_check(
+        host: str,
+        username: str,
+        port: int = 22,
+        identity_file: str | None = None,
+        connect_timeout_seconds: int = 10,
+    ) -> str:
+        """检查远程 SSH 是否能以非交互方式连接。
+
+        仅支持已配置 SSH key 或本机 SSH agent；不会输入密码。
+        """
+
+        args = {
+            "host": host,
+            "username": username,
+            "port": port,
+            "identity_file": identity_file,
+            "connect_timeout_seconds": connect_timeout_seconds,
+        }
+        return run_with_audit(
+            "remote_connectivity_check",
+            args,
+            lambda: remote_operator.connectivity_check(**args),
+            operation_type="exec",
+            risk_level="medium",
+            approval_required=False,
+        )
+
+    @tool(args_schema=RemoteUploadFileInput)
+    def remote_upload_file(
+        host: str,
+        username: str,
+        local_path: str,
+        remote_path: str,
+        port: int = 22,
+        identity_file: str | None = None,
+        connect_timeout_seconds: int = 10,
+    ) -> str:
+        """通过 SCP 上传单个本地文件到远程服务器。
+
+        local_path 必须在授权 workspace 内，remote_path 必须是远程绝对路径。
+        """
+
+        args = {
+            "host": host,
+            "username": username,
+            "local_path": local_path,
+            "remote_path": remote_path,
+            "port": port,
+            "identity_file": identity_file,
+            "connect_timeout_seconds": connect_timeout_seconds,
+        }
+        return run_with_audit(
+            "remote_upload_file",
+            args,
+            lambda: remote_operator.upload_file(**args),
+            operation_type="exec",
+            risk_level="high",
+            approval_required=True,
+        )
+
+    @tool(args_schema=RemoteExecInput)
+    def remote_exec(
+        host: str,
+        username: str,
+        command: str,
+        port: int = 22,
+        identity_file: str | None = None,
+        connect_timeout_seconds: int = 10,
+        timeout_ms: int = settings.local_operator_exec_default_timeout_ms,
+    ) -> str:
+        """在远程服务器执行短时、非交互命令。
+
+        该工具拒绝 sudo、su、递归删除、关机等高风险远程命令。
+        """
+
+        args = {
+            "host": host,
+            "username": username,
+            "command": command,
+            "port": port,
+            "identity_file": identity_file,
+            "connect_timeout_seconds": connect_timeout_seconds,
+            "timeout_ms": timeout_ms,
+        }
+        return run_with_audit(
+            "remote_exec",
+            args,
+            lambda: remote_operator.exec(**args),
+            operation_type="exec",
+            risk_level="high",
+            approval_required=True,
+        )
+
+    @tool(args_schema=RemoteVerifyHttpInput)
+    def remote_verify_http(url: str, expected_text: str | None = None, timeout_seconds: int = 10) -> str:
+        """请求 HTTP/HTTPS 地址，验证远程部署结果是否可访问。"""
+
+        args = {"url": url, "expected_text": expected_text, "timeout_seconds": timeout_seconds}
+        return run_with_audit(
+            "remote_verify_http",
+            args,
+            lambda: remote_operator.verify_http(**args),
+            operation_type="read",
+            risk_level="low",
+            approval_required=False,
+        )
+
     @tool(args_schema=ReadBackgroundOutputInput)
     def read_background_output(task_id: str, since_line: int = 0, max_lines: int = 50) -> str:
         """读取后台任务的输出与当前状态。
@@ -379,6 +494,10 @@ def create_read_tools(
         "write_file": write_file,
         "exec_command": exec_command,
         "exec_command_background": exec_command_background,
+        "remote_connectivity_check": remote_connectivity_check,
+        "remote_upload_file": remote_upload_file,
+        "remote_exec": remote_exec,
+        "remote_verify_http": remote_verify_http,
         "read_background_output": read_background_output,
         "kill_background_task": kill_background_task,
         "list_background_tasks": list_background_tasks,

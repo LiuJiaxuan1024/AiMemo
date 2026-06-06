@@ -173,7 +173,7 @@ def evaluate_command_policy(command: str) -> CommandPolicyDecision:
     if _has_background_operator(lowered):
         return CommandPolicyDecision(False, "暂不支持后台命令或后台运算符。", "high")
     if _looks_interactive(lowered):
-        return CommandPolicyDecision(False, "暂不支持交互式命令。", "high")
+        return CommandPolicyDecision(False, "暂不支持交互式命令；远程 SSH/SCP 操作请使用远程操作工具。", "high")
     if _looks_like_download_and_execute(lowered):
         return CommandPolicyDecision(False, "命令疑似下载后执行远程代码。", "high")
     if _contains_dangerous_command(lowered):
@@ -308,6 +308,7 @@ def _looks_interactive(command: str) -> bool:
         r"\bvim?\b",
         r"\bemacs\b",
         r"\bssh\b",
+        r"^\s*(?:scp|sftp|plink|pscp)\b",
         r"\bftp\b",
         r"\bmysql\b",
         r"\bpsql\b",

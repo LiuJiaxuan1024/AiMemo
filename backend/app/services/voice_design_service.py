@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 
 from fastapi import HTTPException, status
-from langchain_openai import ChatOpenAI
 from sqlmodel import Session
 
 from app.core.config import settings
@@ -58,6 +57,8 @@ def _build_voice_prompt(payload: VoiceDesignRequest) -> dict[str, str]:
     fallback = _fallback_prompt_plan(payload)
     if not settings.dashscope_api_key:
         return fallback
+
+    from langchain_openai import ChatOpenAI
 
     llm = ChatOpenAI(
         api_key=settings.dashscope_api_key,

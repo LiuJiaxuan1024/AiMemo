@@ -136,6 +136,7 @@ def test_warmup_agent_models_creates_cached_instances(monkeypatch):
     """startup warmup 只创建实例，不发起 LLM 请求。"""
 
     reset_agent_models()
+    monkeypatch.setattr("app.agent.model.get_project_config_value", lambda path, default: default)
     monkeypatch.setattr(settings, "dashscope_api_key", "test-key")
 
     warmup_agent_models()
@@ -148,6 +149,7 @@ def test_warmup_agent_models_does_not_raise_on_client_init_failure(monkeypatch):
     """模型 client 预热失败不应阻断 FastAPI startup。"""
 
     reset_agent_models()
+    monkeypatch.setattr("app.agent.model.get_project_config_value", lambda path, default: default)
     monkeypatch.setattr(settings, "dashscope_api_key", "test-key")
     monkeypatch.setattr(
         "app.agent.model.get_planner_chat_model",

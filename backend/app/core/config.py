@@ -217,6 +217,10 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     chat_model: str = ""
     embedding_model: str = ""
+    agent_model_warmup_enabled: bool = bool(_config_value("models.warmup_on_startup", False))
+    agent_model_background_warmup_enabled: bool = bool(
+        _config_value("models.background_warmup_on_startup", True)
+    )
     # Local Operator read-only 默认允许仓库根目录和当前用户 Home。
     # 这里可以追加更多根目录，使用分号或逗号分隔，例如：
     # LOCAL_OPERATOR_WORKSPACE_ROOTS=E:\Ai记;D:\资料;~/Documents

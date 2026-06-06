@@ -26,6 +26,10 @@ agent
 | `write_file` | 创建或整文件覆盖文本文件 | 覆盖已有文件前要求完整 `read_file`，除非用户明确确认绕过 |
 | `exec_command` | 前台执行短时非交互命令 | 返回 stdout/stderr/exit_code；非 0 退出码是工具失败，供 agent 重规划 |
 | `exec_command_background` | 后台启动长跑服务 | 仅用于 flask/uvicorn/npm dev 等持续运行服务 |
+| `remote_connectivity_check` | 检查远程 SSH 非交互连接 | 仅支持 SSH key / 本机 SSH agent，不输入密码 |
+| `remote_upload_file` | 上传单个本地文件到远程服务器 | `local_path` 必须在授权 roots 内，`remote_path` 必须是远程绝对路径 |
+| `remote_exec` | 执行短时远程命令 | 拒绝 `sudo`、`su`、递归删除、关机等高风险命令 |
+| `remote_verify_http` | 验证远程 HTTP/HTTPS 结果 | 用于部署后的页面 / 接口可访问性检查 |
 | `read_background_output` | 读取后台任务输出 | 通过 task_id 轮询状态和日志 |
 | `kill_background_task` | 停止后台任务 | 会终止进程树 |
 | `list_background_tasks` | 列出当前会话后台任务 | 含历史 / orphaned |
@@ -191,6 +195,7 @@ backend/app/agent/graphs/local_operator/
 | `schemas.py` | 定义工具入参、工具返回、错误结构、审计记录输入等 Pydantic/SQLModel schema。 |
 | `policy.py` | 路径授权、敏感文件判断、大小限制、ignore 规则、风险等级判断。 |
 | `filesystem.py` | 真正执行 list/read/search/info 的文件系统服务，不直接暴露给模型。 |
+| `remote.py` | 封装非交互 SSH/SCP 与 HTTP 验证，识别认证失败、超时、远程路径错误等结构化状态。 |
 | `audit.py` | 写入 `agent_operations` 审计表，封装 start/complete/fail/block 等状态更新。 |
 | `tools.py` | 使用 LangChain `@tool` 包装 filesystem service，并在工具调用前后写审计。 |
 | `state.py` | 定义 Local Operator Graph 的 state。 |
@@ -791,6 +796,75 @@ Memory Chat Graph 的系统提示词里包含一条硬性约束：
 实现细节、状态机、平台差异（Windows 不能用 `DETACHED_PROCESS` 等踩坑）见
 [Background Tasks 后端](../backend/background-tasks.md) 和
 [Background Tasks API](../api/background-tasks.md)。
+
+### 远程操作工具
+
+远程服务器、SSH、SCP、nginx、部署、上传静态页面这类任务不能再让模型拼原始
+`ssh/scp` 命令。当前第一阶段已经加入专用远程工具：
+
+```text
+remote_connectivity_check(host, username, port?, identity_file?)
+  检查本机是否能以非交互方式连接远程服务器。
+
+remote_upload_file(host, username, local_path, remote_path, port?, identity_file?)
+  通过 scp 上传单个文件。
+
+remote_exec(host, username, command, port?, identity_file?, timeout_ms?)
+  执行短时非交互远程命令。
+
+remote_verify_http(url, expected_text?)
+  请求 HTTP/HTTPS 地址，验证部署结果。
+```
+
+设计边界：
+
+- 工具只支持 SSH key 或本机 SSH agent，不接收密码，也不会等待交互输入。
+- 认证失败、密码提示、host key 问题会归类为 `INTERACTIVE_AUTH_REQUIRED`，由 agent 调用
+  `request_user_input` 让用户选择配置 SSH key、手动处理或取消。
+- `exec_command` 会拦截原始 `scp/sftp/plink/pscp`，并提示使用远程操作工具。
+- 远程部署的完成条件至少包含一次成功上传或远程执行，以及一次远程文件、服务或 HTTP 验证。
+
+### 远程任务 Session
+
+Phase 2 在 Memory Chat Graph 的 checkpoint state 中加入 `remote_task_session`，把一次远程变更任务
+从零散工具调用提升为可恢复的状态机：
+
+```text
+collect_target
+  收集 host、username、port、remote_path、url 等目标信息。
+
+collect_auth
+  通过 remote_connectivity_check 确认 SSH key / agent 是否可用。
+
+prepare_artifact
+  记录本地产物准备状态，例如 write_file 或 remote_upload_file 使用的 local_path。
+
+transfer
+  记录 remote_upload_file 是否成功。
+
+remote_apply
+  记录 remote_exec 是否成功；如果上传后直接 HTTP 验证完成，可标记 skipped。
+
+verify
+  记录 remote_verify_http 或其他验证步骤。
+```
+
+`remote_task_session` 会进入 `_build_task_runtime_context`，下一轮 ReAct agent 能看到：
+
+```text
+status
+current_phase
+target
+auth
+artifacts
+phases
+blocked_reason
+next_actions
+```
+
+当认证、目标路径或本机 SSH/SCP 能力缺失时，session 会进入 `blocked`，`verify_goal` 会把
+`verification.status` 设置成 `needs_user_input`。这时 agent 不能继续原样调用远程工具，必须走
+`request_user_input` 收集 SSH key、目标路径、手动执行方案或取消操作等恢复决策。
 
 ### 条件边设计
 

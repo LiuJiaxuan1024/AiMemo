@@ -6,7 +6,6 @@ from sqlmodel import Session, col, select
 
 from app.agent.graphs.conversation_summary.state import ConversationSummaryGraphState
 from app.agent.graphs.memory_chat.state import ChatMessagePayload
-from app.agent.model import get_agent_chat_model
 from app.models.chat_message import ChatMessage
 from app.models.conversation import Conversation
 from app.models.note import utc_now
@@ -134,6 +133,8 @@ def generate_conversation_summary(
     L2 摘要只服务当前 conversation 的上下文压缩，不等同于 L4 长期核心记忆。
     稳定偏好、身份和长期目标后续应由独立长期记忆 graph 抽取。
     """
+
+    from app.agent.model import get_agent_chat_model
 
     old_summary_text = old_summary.strip() or "暂无旧摘要。"
     messages_text = "\n".join(

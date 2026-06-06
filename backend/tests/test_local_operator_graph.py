@@ -8,14 +8,18 @@ from sqlmodel import select
 
 from app.agent.graphs.memory_chat.nodes import _configured_local_operator_workspace_roots
 from app.agent.graphs.memory_chat.nodes import _default_local_operator_workspace_roots
+from app.agent.graphs.memory_chat.nodes import _build_react_agent_system_prompt
+from app.agent.graphs.memory_chat.nodes import _infer_acceptance_criteria
 from app.agent.graphs.local_operator.nodes import _build_local_operator_planner_prompt
 from app.agent.graphs.local_operator.nodes import _rule_plan_action
 from app.agent.graphs.local_operator.graph import get_local_operator_graph_mermaid
 from app.agent.graphs.local_operator.graph import run_local_operator_graph
 from app.core.config import settings
 from app.local_operator.filesystem import LocalFilesystemService
-from app.local_operator.command import LocalCommandExecutor
+from app.local_operator.command import LocalCommandExecutor, evaluate_command_policy
 from app.local_operator.policy import LocalOperatorPolicy
+from app.local_operator.remote import RemoteOperatorService
+from app.local_operator.schemas import ToolResult
 from app.local_operator.tools import create_read_tools
 from app.models.agent_operation import AgentOperation
 
@@ -488,6 +492,78 @@ def test_exec_command_blocks_destructive_command(tmp_path: Path):
     assert result.ok is False
     assert result.error_code == "COMMAND_BLOCKED"
     assert result.blocked is True
+
+
+def test_exec_command_blocks_raw_scp_and_points_to_remote_tools():
+    decision = evaluate_command_policy("scp index.html root@example.com:/usr/share/nginx/html/index.html")
+
+    assert decision.allowed is False
+    assert decision.risk_level == "high"
+    assert "远程操作工具" in decision.reason
+
+
+def test_create_read_tools_exposes_remote_tools(session_factory, tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    tools = create_read_tools(
+        session_factory=session_factory,
+        policy=LocalOperatorPolicy.from_roots([str(workspace)]),
+        conversation_id=101,
+        turn_id=202,
+    )
+
+    assert "remote_connectivity_check" in tools
+    assert "remote_upload_file" in tools
+    assert "remote_exec" in tools
+    assert "remote_verify_http" in tools
+
+
+def test_remote_connectivity_classifies_interactive_auth(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = RemoteOperatorService(LocalOperatorPolicy.from_roots([str(workspace)]))
+
+    monkeypatch.setattr("app.local_operator.remote.shutil.which", lambda name: name)
+    monkeypatch.setattr(
+        "app.local_operator.remote._run_process",
+        lambda *args, **kwargs: ToolResult(
+            ok=False,
+            tool_name="remote_process",
+            data={
+                "stdout": "",
+                "stderr": "Permission denied (publickey,password).",
+                "timed_out": False,
+                "exit_code": 255,
+            },
+            error_code="REMOTE_PROCESS_EXITED_NON_ZERO",
+            message="远程进程命令以非 0 状态退出。",
+        ),
+    )
+
+    result = service.connectivity_check(host="example.com", username="root")
+
+    assert result.ok is False
+    assert result.tool_name == "remote_connectivity_check"
+    assert result.error_code == "INTERACTIVE_AUTH_REQUIRED"
+    assert result.blocked is True
+
+
+def test_memory_chat_prompt_requires_remote_tools_for_server_operations():
+    prompt = _build_react_agent_system_prompt()
+
+    assert "remote_connectivity_check" in prompt
+    assert "remote_upload_file" in prompt
+    assert "不要把 ssh/scp" in prompt
+
+
+def test_remote_acceptance_criteria_requires_tool_and_verification():
+    criteria = _infer_acceptance_criteria("登录远程服务器，把静态页面上传到 nginx 并部署")
+    text = "\n".join(criteria)
+
+    assert "remote_* 工具" in text
+    assert "remote_upload_file/remote_exec" in text
+    assert "remote_verify_http" in text
 
 
 def test_local_operator_graph_reads_file_and_writes_audit(

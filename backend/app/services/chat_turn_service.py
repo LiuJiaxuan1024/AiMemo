@@ -4,9 +4,6 @@ from datetime import timedelta
 from fastapi import HTTPException, status
 from sqlmodel import Session, select
 
-from app.agent.checkpoints import get_sqlite_checkpointer
-from app.agent.graphs.memory_chat.graph import build_memory_chat_graph
-from app.agent.graphs.memory_chat.graph import get_memory_chat_graph_mermaid
 from app.core.config import settings
 from app.core.database import session_scope
 from app.models.agent_operation import AgentOperation
@@ -573,6 +570,9 @@ def get_chat_turn_state_history(
             detail="Chat turn graph was not found",
         )
 
+    from app.agent.checkpoints import get_sqlite_checkpointer
+    from app.agent.graphs.memory_chat.graph import build_memory_chat_graph
+
     with get_sqlite_checkpointer(checkpoint_path or settings.langgraph_checkpoint_path) as checkpointer:
         app = build_memory_chat_graph(session_factory=session_scope).compile(checkpointer=checkpointer)
         config = {"configurable": {"thread_id": turn.thread_id}}
@@ -588,6 +588,8 @@ def get_chat_turn_state_history(
 
 
 def _to_chat_turn_graph_read(turn: ChatTurn) -> ChatTurnGraphRead:
+    from app.agent.graphs.memory_chat.graph import get_memory_chat_graph_mermaid
+
     node_statuses = _decode_json_object(turn.node_statuses)
     debug_payload = _decode_json_any(turn.debug_payload, fallback={})
     mermaid = _highlight_memory_chat_mermaid(get_memory_chat_graph_mermaid(), node_statuses)

@@ -1,3 +1,5 @@
+import threading
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -15,13 +17,15 @@ from app.api.memories import router as memories_router
 from app.api.notes import router as notes_router
 from app.api.search import router as search_router
 from app.api.voice_profiles import router as voice_profiles_router
-from app.agent.model import warmup_agent_models
 from app.core.config import settings
 from app.core.database import create_db_and_tables
 from app.frontend import mount_frontend_app
 from app.jobs.reconciler import run_job_reconcile_once, start_job_reconciler, stop_job_reconciler
 from app.jobs.worker import start_job_worker, stop_job_worker
 from app.local_operator.background_command import pool as background_shell_pool
+
+
+_agent_model_warmup_thread: threading.Thread | None = None
 
 
 def create_app() -> FastAPI:
@@ -54,7 +58,12 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def on_startup() -> None:
         create_db_and_tables()
-        warmup_agent_models()
+        if settings.agent_model_warmup_enabled:
+            from app.agent.model import warmup_agent_models
+
+            warmup_agent_models()
+        elif settings.agent_model_background_warmup_enabled:
+            _start_agent_model_background_warmup()
         if settings.job_reconciler_enabled:
             run_job_reconcile_once()
             start_job_reconciler()
@@ -88,6 +97,26 @@ def create_app() -> FastAPI:
         background_shell_pool.shutdown_all()
 
     return app
+
+
+def _start_agent_model_background_warmup() -> None:
+    """后台预热 agent 模型，避免阻塞 FastAPI startup。"""
+
+    global _agent_model_warmup_thread
+    if _agent_model_warmup_thread and _agent_model_warmup_thread.is_alive():
+        return
+
+    def warmup() -> None:
+        from app.agent.model import warmup_agent_models
+
+        warmup_agent_models()
+
+    _agent_model_warmup_thread = threading.Thread(
+        target=warmup,
+        name="agent-model-warmup",
+        daemon=True,
+    )
+    _agent_model_warmup_thread.start()
 
 
 app = create_app()

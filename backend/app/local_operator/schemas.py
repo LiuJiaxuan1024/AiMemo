@@ -137,3 +137,34 @@ class SearchTextInput(BaseModel):
 
 class GetFileInfoInput(BaseModel):
     path: str = Field(description="要查看信息的文件或目录路径，必须位于授权 workspace 内。必须是绝对路径，例如 E:\\demo 或 /home/user/demo。")
+
+
+class RemoteSshBaseInput(BaseModel):
+    host: str = Field(description="远程服务器主机名或 IP，不要包含用户名或协议。")
+    username: str = Field(description="SSH 用户名。")
+    port: int = Field(default=22, ge=1, le=65535, description="SSH 端口，默认 22。")
+    identity_file: str | None = Field(
+        default=None,
+        description="可选 SSH 私钥路径。必须位于授权 workspace roots 内；不要传入私钥内容。",
+    )
+    connect_timeout_seconds: int = Field(default=10, ge=3, le=60, description="SSH 连接超时秒数。")
+
+
+class RemoteConnectivityCheckInput(RemoteSshBaseInput):
+    """检查远程 SSH 是否能以非交互方式连接。"""
+
+
+class RemoteUploadFileInput(RemoteSshBaseInput):
+    local_path: str = Field(description="要上传的本地文件路径，必须位于授权 workspace 内。")
+    remote_path: str = Field(description="远程目标文件路径，例如 /usr/share/nginx/html/index.html。")
+
+
+class RemoteExecInput(RemoteSshBaseInput):
+    command: str = Field(description="要在远程服务器执行的短时非交互命令。不要传入需要密码、TTY 或交互确认的命令。")
+    timeout_ms: int = Field(default=settings.local_operator_exec_default_timeout_ms, description="远程命令超时时间，单位毫秒。")
+
+
+class RemoteVerifyHttpInput(BaseModel):
+    url: str = Field(description="要验证的 HTTP/HTTPS URL。")
+    expected_text: str | None = Field(default=None, description="可选：响应中应该包含的文本片段。")
+    timeout_seconds: int = Field(default=10, ge=3, le=60, description="HTTP 请求超时秒数。")
