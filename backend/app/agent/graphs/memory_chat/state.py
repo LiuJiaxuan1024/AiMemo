@@ -186,7 +186,7 @@ class ContextLayerPayload(TypedDict):
     worker 节点只写普通 dict，确保内容可以稳定进入 LangGraph checkpoint。
     """
 
-    level: int
+    level: int | float
     name: str
     content: str
     budget_tokens: int | None
@@ -226,6 +226,7 @@ class MemoryChatGraphState(TypedDict, total=False):
     knowledge_retrieval_debug: dict
     context_conversation_window_layer: ContextLayerPayload
     context_l0_layer: ContextLayerPayload
+    context_l0_adjacent_layer: ContextLayerPayload
     context_l1_layer: ContextLayerPayload
     context_l2_layer: ContextLayerPayload
     context_l3_layer: ContextLayerPayload

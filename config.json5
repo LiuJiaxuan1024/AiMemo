@@ -18,16 +18,19 @@
   },
   "context_pyramid": {
     // L4 核心长期记忆：稳定偏好、身份、长期目标等，数量通常少但优先级高。
-    "core_memory_tokens": 24000,
+    "core_memory_tokens": 2400,
     // L3 检索上下文：个人笔记 RAG 和挂载知识库都会使用这个单层预算。
     // 两类 L3 同时出现时会分别占用预算，因此这里不要无限调大。
-    "retrieved_memory_tokens": 100000,
+    "retrieved_memory_tokens": 12000,
     // L2 对话摘要：承接较早历史，和近期消息冲突时以后者为准。
-    "summary_tokens": 40000,
+    "summary_tokens": 4000,
     // L1 近期对话：最终 prompt 中直接注入的最近消息窗口。
-    "recent_message_tokens": 80000,
+    "recent_message_tokens": 8000,
+    // L0.5 最近邻接上下文：专门处理“继续/完整代码/这个/上面”等省略指代。
+    // 预算必须小而近，避免旧摘要或远期历史抢走当前问题的解释权。
+    "adjacent_message_tokens": 1200,
     // L1+L0 当前对话窗口：主要用于调试和工具规划视图，不等同于单独 L0 上限。
-    "conversation_window_tokens": 100000,
+    "conversation_window_tokens": 10000,
     // weak 检索最多保留的候选块数，避免弱相关材料挤占上下文。
     "weak_retrieval_max_chunks": 5,
   },
@@ -65,33 +68,13 @@
     "background_warmup_on_startup": true,
     // 调试用：true 时会在 startup 内同步预热模型，可能让后端启动卡顿。
     "warmup_on_startup": false,
-    "agent_chat": {
-      // 第一阶段只把主聊天/通用文本生成模型做成可选项。
-      // 密钥只写环境变量名，不要把真实 key 写进 config.json5。
-      "provider": "dashscope",
-      "model": "qwen3.5-plus",
-      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-      "api_key_env": "DASHSCOPE_API_KEY",
-      "temperature": 0.2,
-      "streaming": true,
-      "capabilities": {
-        // Memory Chat ReAct agent 依赖 tool calling。
-        "tool_calling": true,
-        "json_mode": true,
-        "vision": false,
-      },
-      "extra_body": {
-        // Qwen3.5 默认可能开启 thinking，普通对话路径先关闭以降低首 token 延迟。
-        "enable_thinking": false,
-      },
-    },
-    //     "agent_chat": {
+    // "agent_chat": {
     //   // 第一阶段只把主聊天/通用文本生成模型做成可选项。
     //   // 密钥只写环境变量名，不要把真实 key 写进 config.json5。
-    //   "provider": "deepseek",
-    //   "model": "deepseek-v4-pro",
-    //   "base_url": "https://api.deepseek.com",
-    //   "api_key_env": "DEEPSEEK_API_KEY",
+    //   "provider": "dashscope",
+    //   "model": "qwen3.5-plus",
+    //   "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    //   "api_key_env": "DASHSCOPE_API_KEY",
     //   "temperature": 0.2,
     //   "streaming": true,
     //   "capabilities": {
@@ -105,6 +88,28 @@
     //     "enable_thinking": false,
     //   },
     // },
+    "agent_chat": {
+      // 第一阶段只把主聊天/通用文本生成模型做成可选项。
+      // 密钥只写环境变量名，不要把真实 key 写进 config.json5。
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "base_url": "https://api.deepseek.com",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "temperature": 0.2,
+      "streaming": true,
+      "capabilities": {
+        // Memory Chat ReAct agent 依赖 tool calling。
+        "tool_calling": true,
+        "json_mode": true,
+        "vision": false,
+      },
+      "extra_body": {
+        // DeepSeek V4 thinking 默认开启；普通聊天路径先关闭以降低延迟和 token 消耗。
+        "thinking": {
+          "type": "disabled",
+        },
+      },
+    },
   },
   "elf": {
     // false 时 Web 前端不挂载精灵组件，start-dev 也不启动桌面精灵；

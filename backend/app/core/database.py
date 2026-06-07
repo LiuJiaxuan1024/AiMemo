@@ -20,6 +20,7 @@ from app.models import (
     ChatTurn,
     Conversation,
     ConversationKnowledgeMount,
+    ElfRuntimeState,
     Job,
     KnowledgeChunk,
     KnowledgeDocument,

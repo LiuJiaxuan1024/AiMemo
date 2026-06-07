@@ -142,6 +142,9 @@ class Settings(BaseSettings):
         _config_value("context_pyramid.conversation_window_tokens", 10_000)
     )
     context_pyramid_recent_message_tokens: int = int(_config_value("context_pyramid.recent_message_tokens", 8_000))
+    context_pyramid_adjacent_message_tokens: int = int(
+        _config_value("context_pyramid.adjacent_message_tokens", 1_200)
+    )
     context_pyramid_weak_retrieval_max_chunks: int = int(
         _config_value("context_pyramid.weak_retrieval_max_chunks", 5)
     )
@@ -269,6 +272,7 @@ class Settings(BaseSettings):
             summary_tokens=self.context_pyramid_summary_tokens,
             conversation_window_tokens=self.context_pyramid_conversation_window_tokens,
             recent_message_tokens=self.context_pyramid_recent_message_tokens,
+            adjacent_message_tokens=self.context_pyramid_adjacent_message_tokens,
             weak_retrieval_max_chunks=self.context_pyramid_weak_retrieval_max_chunks,
         )
 

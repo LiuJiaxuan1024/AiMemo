@@ -91,6 +91,7 @@ load_turn_state
   -> observe_tool_result
   -> verify_goal
   -> agent / final answer
+  -> generate_elf_bubble_answer（仅桌面精灵）
   -> persist_messages
   -> enqueue_conversation_memory_job
 ```
@@ -99,15 +100,17 @@ load_turn_state
 
 ```text
 L0 当前输入
+L0.5 最近邻接上下文
 L1 近期消息
 L2 对话滚动摘要
 L3 检索到的笔记记忆
 L4 长期核心记忆
 ```
 
-其中 L3 context worker 内部负责 plan / rewrite / retrieve / grade。
+其中 L0.5 最近邻接上下文用于绑定“继续/完整代码/这个”等省略指代，优先级高于旧摘要里的历史任务。L3 context worker 内部负责 plan / rewrite / retrieve / grade。
 Local Operator 不再作为上下文 worker 运行；read/write/exec/background 工具已经迁入主对话
 ReAct 工具循环。模型发出 tool call，工具结果作为 `ToolMessage` 回灌给 agent，再由 agent 决定继续调用工具、请求用户选择，或生成最终回答。
+桌面精灵同样必须先经过这条 ReAct 工具循环；`generate_elf_bubble_answer` 只负责把 agent 已完成的最终结果改写为气泡，不负责决定或执行本地工具。
 `plan_task` 会在 agent 前为本轮建立轻量任务对象；`observe_tool_result` 会把工具结果吸收进
 `world_state`；`verify_goal` 会记录当前进展是否需要重规划。第一版 verifier 是确定性轻量规则，后续可替换为更强的目标验收器。
 

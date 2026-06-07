@@ -5358,12 +5358,17 @@ textarea {
 
 .chat-debug-context-level {
   border-radius: 6px;
+  box-sizing: border-box;
+  display: inline-block;
   font-size: 11px;
   font-weight: 700;
+  min-width: 42px;
   padding: 2px 8px;
+  text-align: center;
 }
 
 .chat-debug-context-level-0 { background: var(--color-brand-100); color: var(--color-brand-ink); }
+.chat-debug-context-level-0-5 { background: #dbeafe; color: #1e3a8a; }
 .chat-debug-context-level-1 { background: #fef3c7; color: #78350f; }
 .chat-debug-context-level-2 { background: #ede9fe; color: #4c1d95; }
 .chat-debug-context-level-3 { background: #d1fae5; color: #065f46; }
@@ -5747,6 +5752,118 @@ textarea {
   min-height: 0;
   overflow: hidden;
   padding: 16px;
+}
+
+.elf-runtime-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.elf-runtime-card {
+  background: #fffaf3;
+  border: 1px solid #ead8c0;
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(92, 63, 38, 0.08);
+  min-width: 0;
+  padding: 16px;
+}
+
+.elf-runtime-card--primary {
+  align-items: flex-start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.elf-runtime-card h2,
+.elf-runtime-card h3 {
+  color: #3f2d22;
+  margin: 0;
+}
+
+.elf-runtime-card p {
+  color: #6f5a49;
+  line-height: 1.6;
+  margin: 8px 0 0;
+}
+
+.elf-runtime-card pre {
+  background: rgba(67, 48, 35, 0.06);
+  border-radius: 8px;
+  color: #4d382b;
+  margin: 12px 0 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 12px;
+  white-space: pre-wrap;
+}
+
+.elf-runtime-card--error {
+  background: #fff4ef;
+  border-color: #f1b8aa;
+}
+
+.elf-runtime-kicker {
+  color: #9a6a3b;
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  margin-bottom: 6px;
+  text-transform: uppercase;
+}
+
+.elf-runtime-status {
+  background: #f1e0c9;
+  border-radius: 999px;
+  color: #5c3b21;
+  flex: 0 0 auto;
+  font-size: 0.82rem;
+  font-weight: 800;
+  padding: 6px 10px;
+  white-space: nowrap;
+}
+
+.elf-runtime-status--failed {
+  background: #ffe1da;
+  color: #a33224;
+}
+
+.elf-runtime-status--thinking,
+.elf-runtime-status--tool_running,
+.elf-runtime-status--streaming_answer,
+.elf-runtime-status--waiting_user_input {
+  background: #efe1ff;
+  color: #69449a;
+}
+
+.elf-runtime-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.elf-runtime-field {
+  background: #fffaf3;
+  border: 1px solid #ead8c0;
+  border-radius: 8px;
+  min-width: 0;
+  padding: 12px;
+}
+
+.elf-runtime-field span {
+  color: #8a735f;
+  display: block;
+  font-size: 0.78rem;
+}
+
+.elf-runtime-field strong {
+  color: #3f2d22;
+  display: block;
+  margin-top: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .voice-workshop {
@@ -6236,6 +6353,14 @@ textarea {
 
   .module-page {
     padding: 16px;
+  }
+
+  .elf-runtime-card--primary {
+    display: grid;
+  }
+
+  .elf-runtime-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .app-shell {

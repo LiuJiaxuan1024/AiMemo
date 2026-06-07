@@ -13,6 +13,7 @@ from app.agent.graphs.memory_chat.nodes import (
     NoteRetriever,
     RetrievalPlanner,
     build_current_conversation_window_node,
+    build_l0_adjacent_turn_node,
     build_l0_current_input_node,
     build_l1_recent_messages_node,
     build_l2_summary_node,
@@ -47,6 +48,7 @@ CONTEXT_WORKER_NODES = [
     "build_l2_summary",
     "build_l1_recent_messages",
     "build_lx_attachment_context",
+    "build_l0_adjacent_turn",
     "build_l0_current_input",
     "build_current_conversation_window",
 ]
@@ -59,6 +61,7 @@ def build_memory_chat_graph(
     retriever: NoteRetriever | None = None,
     answer_generator: AnswerGenerator | None = None,
     bubble_answer_generator: ElfBubbleAnswerGenerator | None = None,
+    graph_variant: str = "page",
 ):
     """构建记忆对话 graph。
 
@@ -84,6 +87,7 @@ def build_memory_chat_graph(
     graph.add_node("build_l2_summary", build_l2_summary_node())
     graph.add_node("build_l1_recent_messages", build_l1_recent_messages_node())
     graph.add_node("build_lx_attachment_context", build_lx_attachment_context_node(session_factory))
+    graph.add_node("build_l0_adjacent_turn", build_l0_adjacent_turn_node())
     graph.add_node("build_l0_current_input", build_l0_current_input_node())
     graph.add_node("build_current_conversation_window", build_current_conversation_window_node())
     graph.add_node("merge_prompt_context", build_merge_prompt_context_node())
@@ -92,10 +96,12 @@ def build_memory_chat_graph(
     graph.add_node("tools", build_tools_node(session_factory))
     graph.add_node("observe_tool_result", build_observe_tool_result_node())
     graph.add_node("verify_goal", build_verify_goal_node())
-    graph.add_node(
-        "generate_elf_bubble_answer",
-        build_generate_elf_bubble_answer_node(bubble_answer_generator),
-    )
+    include_elf_bubble_node = graph_variant == "elf"
+    if include_elf_bubble_node:
+        graph.add_node(
+            "generate_elf_bubble_answer",
+            build_generate_elf_bubble_answer_node(bubble_answer_generator),
+        )
     graph.add_node("persist_messages", build_persist_messages_node(session_factory))
 
     graph.add_edge(START, "load_turn_state")
@@ -113,31 +119,26 @@ def build_memory_chat_graph(
     graph.add_edge("build_l2_summary", "merge_prompt_context")
     graph.add_edge("build_l1_recent_messages", "merge_prompt_context")
     graph.add_edge("build_lx_attachment_context", "merge_prompt_context")
+    graph.add_edge("build_l0_adjacent_turn", "merge_prompt_context")
     graph.add_edge("build_l0_current_input", "merge_prompt_context")
     graph.add_edge("build_current_conversation_window", "merge_prompt_context")
     graph.add_edge("merge_prompt_context", "plan_task")
-    graph.add_conditional_edges(
-        "plan_task",
-        _route_after_plan_task,
-        ["agent", "generate_elf_bubble_answer"],
-    )
+    graph.add_edge("plan_task", "agent")
+    route_targets = ["tools", "persist_messages"]
+    if include_elf_bubble_node:
+        route_targets.append("generate_elf_bubble_answer")
     graph.add_conditional_edges(
         "agent",
         route_after_agent,
-        ["tools", "persist_messages", "generate_elf_bubble_answer"],
+        route_targets,
     )
     graph.add_edge("tools", "observe_tool_result")
     graph.add_edge("observe_tool_result", "verify_goal")
     graph.add_edge("verify_goal", "agent")
-    graph.add_edge("generate_elf_bubble_answer", "persist_messages")
+    if include_elf_bubble_node:
+        graph.add_edge("generate_elf_bubble_answer", "persist_messages")
     graph.add_edge("persist_messages", END)
     return graph
-
-
-def _route_after_plan_task(state: MemoryChatGraphState) -> str:
-    if state.get("answer_mode") == "elf_bubble":
-        return "generate_elf_bubble_answer"
-    return "agent"
 
 
 def run_memory_chat_graph(
@@ -177,6 +178,7 @@ def run_memory_chat_graph(
             retriever=retriever,
             answer_generator=answer_generator,
             bubble_answer_generator=bubble_answer_generator,
+            graph_variant=_graph_variant_for_answer_mode(answer_mode),
         ).compile(checkpointer=checkpointer)
         config = {"configurable": {"thread_id": thread_id}}
         snapshot = app.get_state(config)
@@ -248,6 +250,7 @@ def stream_memory_chat_graph(
             retriever=retriever,
             answer_generator=answer_generator,
             bubble_answer_generator=bubble_answer_generator,
+            graph_variant=_graph_variant_for_answer_mode(answer_mode),
         ).compile(checkpointer=checkpointer)
         config = {"configurable": {"thread_id": thread_id}}
         snapshot = app.get_state(config)
@@ -366,6 +369,18 @@ def get_memory_chat_graph_mermaid() -> str:
     graph = build_memory_chat_graph(session_factory=session_scope)
     app = graph.compile()
     return app.get_graph(xray=True).draw_mermaid()
+
+
+def get_elf_memory_chat_graph_mermaid() -> str:
+    """返回 Memo Elf Chat Graph 的 LangGraph Mermaid 图。"""
+
+    graph = build_memory_chat_graph(session_factory=session_scope, graph_variant="elf")
+    app = graph.compile()
+    return app.get_graph(xray=True).draw_mermaid()
+
+
+def _graph_variant_for_answer_mode(answer_mode: str) -> str:
+    return "elf" if answer_mode == "elf_bubble" else "page"
 
 
 def _resolve_graph_input_for_turn(

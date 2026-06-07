@@ -4,6 +4,7 @@ from app.models.chat_message import ChatMessage
 from app.models.chat_attachment import ChatAttachment, ChatAttachmentDerivative
 from app.models.chat_turn import ChatTurn
 from app.models.conversation import Conversation
+from app.models.elf_runtime_state import ElfRuntimeState
 from app.models.job import Job
 from app.models.knowledge import (
     ConversationKnowledgeMount,
@@ -25,6 +26,7 @@ __all__ = [
     "ChatTurn",
     "Conversation",
     "ConversationKnowledgeMount",
+    "ElfRuntimeState",
     "Job",
     "KnowledgeChunk",
     "KnowledgeDocument",

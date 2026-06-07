@@ -1,7 +1,18 @@
+import json
+from datetime import timedelta
 from pathlib import Path
 
-from app.services.elf_chat_service import stream_elf_chat_events
+from app.models.chat_turn import ChatTurn
+from app.models.note import utc_now
+from app.services import chat_turn_buffer
+from app.services.elf_chat_service import (
+    _elf_chat_run_lock,
+    get_elf_chat_status,
+    get_or_create_elf_conversation,
+    stream_elf_chat_events,
+)
 from app.services.elf_event_service import elf_event_service
+from app.services.elf_runtime_state_service import get_elf_runtime_state, update_elf_runtime_state
 
 
 def test_elf_chat_stream_reuses_memory_chat_without_status_elf_events(
@@ -37,7 +48,7 @@ def test_elf_chat_stream_reuses_memory_chat_without_status_elf_events(
 
     elf_event_service.clear()
     monkeypatch.setattr(
-        "app.services.chat_service.stream_memory_chat_graph",
+        "app.agent.graphs.memory_chat.graph.stream_memory_chat_graph",
         fake_stream_memory_chat_graph,
     )
 
@@ -52,3 +63,119 @@ def test_elf_chat_stream_reuses_memory_chat_without_status_elf_events(
     assert any("event: answer_delta" in event for event in events)
     assert any("event: done" in event for event in events)
     assert elf_event_service.list_after(0) == []
+
+
+def test_elf_chat_stream_rejects_when_global_lock_is_busy(session_factory) -> None:
+    assert _elf_chat_run_lock.acquire(blocking=False)
+    try:
+        events = list(stream_elf_chat_events(message="再问一句", session_factory=session_factory))
+    finally:
+        _elf_chat_run_lock.release()
+
+    assert any("ELF_CHAT_BUSY" in event for event in events)
+
+
+def test_elf_chat_status_recovers_orphan_running_turn(session_factory) -> None:
+    chat_turn_buffer.reset_for_tests()
+    conversation = get_or_create_elf_conversation(session_factory=session_factory)
+    assert conversation.id is not None
+
+    with session_factory() as session:
+        turn = ChatTurn(
+            conversation_id=conversation.id,
+            thread_id=f"conversation:{conversation.id}",
+            status="running",
+            node_statuses=json.dumps({"agent": "running"}, ensure_ascii=False),
+            updated_at=utc_now() - timedelta(seconds=1),
+        )
+        session.add(turn)
+        session.commit()
+        turn_id = turn.id
+
+    status = get_elf_chat_status(session_factory=session_factory)
+
+    assert status["busy"] is False
+    assert status["status"] == "idle"
+    assert status["message"] == ""
+    runtime_status = get_elf_runtime_state(session_factory=session_factory)
+    assert runtime_status.status == "failed"
+    assert runtime_status.turn_id == turn_id
+    with session_factory() as session:
+        recovered_turn = session.get(ChatTurn, turn_id)
+        assert recovered_turn is not None
+        assert recovered_turn.status == "failed"
+
+
+def test_elf_chat_status_reports_interrupted_as_waiting_for_choice(session_factory) -> None:
+    chat_turn_buffer.reset_for_tests()
+    conversation = get_or_create_elf_conversation(session_factory=session_factory)
+    assert conversation.id is not None
+    pending_interrupt = {
+        "question": "请选择目录",
+        "options": [{"id": "home", "label": "Home", "value": "home"}],
+    }
+
+    with session_factory() as session:
+        turn = ChatTurn(
+            conversation_id=conversation.id,
+            thread_id=f"conversation:{conversation.id}",
+            status="interrupted",
+            node_statuses=json.dumps({"tools": "interrupted"}, ensure_ascii=False),
+            debug_payload=json.dumps({"pending_interrupt": pending_interrupt}, ensure_ascii=False),
+        )
+        session.add(turn)
+        session.commit()
+        turn_id = turn.id
+        assert turn_id is not None
+        update_elf_runtime_state(
+            session,
+            status="waiting_user_input",
+            conversation_id=conversation.id,
+            turn_id=turn_id,
+            pending_interrupt=pending_interrupt,
+        )
+
+    status = get_elf_chat_status(session_factory=session_factory)
+
+    assert status["busy"] is True
+    assert status["status"] == "interrupted"
+    assert "等你选择" in status["message"]
+    assert "后台处理中" not in status["message"]
+
+
+def test_elf_chat_status_recovers_stale_interrupted_turn_without_runtime_owner(session_factory) -> None:
+    chat_turn_buffer.reset_for_tests()
+    conversation = get_or_create_elf_conversation(session_factory=session_factory)
+    assert conversation.id is not None
+
+    with session_factory() as session:
+        turn = ChatTurn(
+            conversation_id=conversation.id,
+            thread_id=f"conversation:{conversation.id}",
+            status="interrupted",
+            node_statuses=json.dumps({"tools": "interrupted"}, ensure_ascii=False),
+            debug_payload=json.dumps(
+                {
+                    "pending_interrupt": {
+                        "question": "旧选择",
+                        "options": [{"id": "old", "label": "旧选项", "value": "old"}],
+                    }
+                },
+                ensure_ascii=False,
+            ),
+        )
+        session.add(turn)
+        session.commit()
+        turn_id = turn.id
+
+    status = get_elf_chat_status(session_factory=session_factory)
+
+    assert status["busy"] is False
+    assert status["status"] == "idle"
+    runtime_status = get_elf_runtime_state(session_factory=session_factory)
+    assert runtime_status.status == "failed"
+    assert runtime_status.busy is False
+    with session_factory() as session:
+        recovered_turn = session.get(ChatTurn, turn_id)
+        assert recovered_turn is not None
+        assert recovered_turn.status == "failed"

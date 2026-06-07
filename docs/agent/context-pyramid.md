@@ -7,7 +7,7 @@
 ```text
 backend/app/agent/context/pyramid.py
   定义 ContextBudget、ContextLayer、PyramidPromptContext。
-  负责把 L4/L3/L2/L1 history/L0 current 组装成 prompt_context。
+  负责把 L4/L3/L2/L1 history/L0.5 adjacent/L0 current 组装成 prompt_context。
 
 backend/app/agent/graphs/memory_chat/nodes.py
   dispatch_context_workers 使用 LangGraph Send 分发上下文 worker。
@@ -31,6 +31,7 @@ flowchart TB
     L2[L2 对话摘要<br/>conversation.summary] --> Prompt
     L1[L1 history<br/>近期历史消息] --> Prompt
     LX[Lx 附件派生上下文<br/>图片/OCR/文件摘要 + attachment 引用] --> Prompt
+    L05[L0.5 最近邻接上下文<br/>解析继续/完整代码/这个] --> Prompt
     L0[L0 current<br/>当前用户输入] --> Prompt
     Window[L1+L0 当前对话窗口<br/>调试视图，不默认注入] -. debug .-> Prompt
 ```
@@ -55,6 +56,11 @@ L2 对话摘要
 L1 近期对话窗口
   从最新消息向前装入，直到达到 recent_message_tokens。
   最终渲染时恢复为时间正序。该层作为 history 明确标注，不能和当前输入混为同一指令。
+
+L0.5 最近邻接上下文
+  从当前输入前最近 1-2 条 completed 消息中构建一个小窗口，并附加 user(current)。
+  它专门用于解析“继续”“完整代码”“这个/上面/刚才那个”等省略指代。
+  如果 L2 摘要或更早 L1 历史与 L0.5 冲突，回答必须优先绑定 L0.5。
 
 L0 当前用户输入
   单独保存本轮必须回答的问题。agent_think 以它作为新任务边界。
@@ -82,6 +88,7 @@ retrieved_memory_tokens = 6000
 summary_tokens = 2000
 conversation_window_tokens = 6000
 recent_message_tokens = 4000
+adjacent_message_tokens = 1200
 weak_retrieval_max_chunks = 3
 ```
 
@@ -90,15 +97,18 @@ weak_retrieval_max_chunks = 3
 ```json5
 "context_pyramid": {
   "core_memory_tokens": 2400,
-  "retrieved_memory_tokens": 10000,
+  "retrieved_memory_tokens": 12000,
   "summary_tokens": 4000,
   "recent_message_tokens": 8000,
+  "adjacent_message_tokens": 1200,
   "conversation_window_tokens": 10000,
   "weak_retrieval_max_chunks": 5,
 }
 ```
 
-`retrieved_memory_tokens` 会同时用于个人笔记 RAG 和挂载知识库这两类 L3 层；如果两者同轮出现，会分别占用这一预算。L0 当前用户输入没有单独 token 上限，会原样保留。
+`retrieved_memory_tokens` 会同时用于个人笔记 RAG 和挂载知识库这两类 L3 层；如果两者同轮出现，会分别占用这一预算。`adjacent_message_tokens` 必须保持较小，目标是“近而准”，不是替代 L1。L0 当前用户输入没有单独 token 上限，会原样保留。
+
+历史上曾把 `summary_tokens`、`recent_message_tokens`、`conversation_window_tokens` 放到数万甚至十万级，这会让旧题目、旧代码和旧摘要在模型注意力里获得过高权重，出现“用户追问本轮题目，模型回答上一道题”的串题现象。默认预算现在收敛到 4k/8k/10k，并增加 L0.5 邻接层作为省略指代的硬锚点。
 
 ## Worker 模式
 
@@ -112,6 +122,7 @@ flowchart TD
     Dispatch --> L2Worker[build_l2_summary]
     Dispatch --> L1Worker[build_l1_recent_messages]
     Dispatch --> LXWorker[build_lx_attachment_context]
+    Dispatch --> L05Worker[build_l0_adjacent_turn]
     Dispatch --> L0Worker[build_l0_current_input]
     Dispatch --> WindowWorker[build_current_conversation_window]
 
@@ -120,6 +131,7 @@ flowchart TD
     L2Worker --> Merge
     L1Worker --> Merge
     LXWorker --> Merge
+    L05Worker --> Merge
     L0Worker --> Merge
     WindowWorker -. debug only .-> Merge
     Merge --> Generate[generate_answer]
@@ -134,12 +146,25 @@ context_l2_layer
 context_conversation_window_layer
 context_l1_layer
 context_lx_attachment_layer
+context_l0_adjacent_layer
 context_l0_layer
 ```
 
-`merge_prompt_context` 按 L4 -> L3 -> L2 -> L1 history -> Lx attachments -> L0 current
+`merge_prompt_context` 按 L4 -> L3 -> L2 -> L1 history -> Lx attachments -> L0.5 adjacent -> L0 current
 顺序还原为 `PyramidPromptContext`，并渲染为最终 `prompt_context`。L1+L0 当前对话窗口只用于
 调试和后续状态树，不再默认进入最终 prompt，避免跨任务 continuation 过触发。
+
+## 防串题策略
+
+当用户输入很短，且包含“继续”“完整代码”“改一下”“这个不对”等省略指代时，模型最容易从旧摘要或远期历史里捞错主题。当前策略分三层处理：
+
+```text
+1. L0 当前输入仍是必须回答的问题。
+2. L0.5 最近邻接上下文提供最近一轮语义锚点，用于解析省略指代。
+3. L2 滚动摘要只承接较早背景；若和 L0.5/L1 冲突，必须让位于最近上下文。
+```
+
+`conversation_summary_graph` 的摘要 prompt 同步收紧：旧任务不得被写成当前任务；如果新增消息切换主题，旧主题必须降级为历史背景或已解决事项；摘要正文控制在 1200 字以内，避免把大量原始历史重新塞回 L2。
 
 L3 worker 是一个局部 RAG worker：
 

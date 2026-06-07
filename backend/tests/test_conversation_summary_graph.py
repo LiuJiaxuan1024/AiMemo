@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from app.agent.graphs.conversation_summary.graph import run_conversation_summary_graph
+from app.agent.graphs.conversation_summary.nodes import generate_conversation_summary
 from app.jobs.models import GraphName, JobType
 from app.jobs.queue import enqueue_job
 from app.models.chat_message import ChatMessage
@@ -128,6 +129,47 @@ def test_conversation_summary_graph_skips_below_threshold(
     assert calls == []
     assert updated is not None
     assert updated.summary == ""
+
+
+def test_conversation_summary_prompt_demotes_stale_tasks(monkeypatch):
+    captured_messages = []
+
+    class FakeModel:
+        def invoke(self, messages):
+            captured_messages.extend(messages)
+
+            class Response:
+                content = "历史背景：旧题目已解决。当前任务：补全 Test2 代码。"
+
+            return Response()
+
+    monkeypatch.setattr(
+        "app.agent.model.get_agent_chat_model",
+        lambda: FakeModel(),
+    )
+
+    summary = generate_conversation_summary(
+        "当前任务：好友推荐 PySpark 代码。",
+        [
+            {
+                "id": 1,
+                "role": "assistant",
+                "content": "上一轮我们在改 SparkSQL Dataset notEqual(23) 的 Test2 代码。",
+                "token_count": 20,
+            },
+            {
+                "id": 2,
+                "role": "user",
+                "content": "提供完整代码吗",
+                "token_count": 6,
+            },
+        ],
+    )
+
+    prompt_text = "\n".join(str(message.content) for message in captured_messages)
+    assert "不要把旧任务写成当前任务" in prompt_text
+    assert "历史背景" in prompt_text
+    assert summary == "历史背景：旧题目已解决。当前任务：补全 Test2 代码。"
 
 
 def _add_message(

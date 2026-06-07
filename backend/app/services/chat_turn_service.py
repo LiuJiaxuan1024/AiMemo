@@ -31,6 +31,7 @@ MEMORY_CHAT_NODE_ORDER = [
     "build_l2_summary",
     "build_l1_recent_messages",
     "build_lx_attachment_context",
+    "build_l0_adjacent_turn",
     "build_l0_current_input",
     "build_current_conversation_window",
     "merge_prompt_context",
@@ -43,14 +44,21 @@ MEMORY_CHAT_NODE_ORDER = [
     "persist_messages",
 ]
 
+PAGE_MEMORY_CHAT_NODE_ORDER = [
+    node_name
+    for node_name in MEMORY_CHAT_NODE_ORDER
+    if node_name != "generate_elf_bubble_answer"
+]
+
 STALE_CHAT_TURN_TIMEOUT_SECONDS = 10 * 60
 TOOLS_NOT_ENTERED_ERROR_CODE = "TOOLS_NODE_NOT_ENTERED_AFTER_AGENT_TOOL_CALL"
 
 
-def initial_node_statuses() -> dict[str, str]:
+def initial_node_statuses(*, graph_variant: str = "page") -> dict[str, str]:
     """创建一轮 Memory Chat Graph 的初始节点状态表。"""
 
-    return {node_name: "pending" for node_name in MEMORY_CHAT_NODE_ORDER}
+    node_order = MEMORY_CHAT_NODE_ORDER if graph_variant == "elf" else PAGE_MEMORY_CHAT_NODE_ORDER
+    return {node_name: "pending" for node_name in node_order}
 
 
 def create_running_chat_turn(
@@ -58,6 +66,7 @@ def create_running_chat_turn(
     *,
     conversation_id: int,
     thread_id: str,
+    graph_variant: str = "page",
 ) -> ChatTurn:
     """创建 running 状态的 turn 记录。
 
@@ -70,7 +79,7 @@ def create_running_chat_turn(
     turn = ChatTurn(
         conversation_id=conversation_id,
         thread_id=thread_id,
-        node_statuses=json.dumps(initial_node_statuses(), ensure_ascii=False),
+        node_statuses=json.dumps(initial_node_statuses(graph_variant=graph_variant), ensure_ascii=False),
     )
     session.add(turn)
     session.commit()
@@ -573,8 +582,13 @@ def get_chat_turn_state_history(
     from app.agent.checkpoints import get_sqlite_checkpointer
     from app.agent.graphs.memory_chat.graph import build_memory_chat_graph
 
+    node_statuses = _decode_json_object(turn.node_statuses)
+    graph_variant = "elf" if "generate_elf_bubble_answer" in node_statuses else "page"
     with get_sqlite_checkpointer(checkpoint_path or settings.langgraph_checkpoint_path) as checkpointer:
-        app = build_memory_chat_graph(session_factory=session_scope).compile(checkpointer=checkpointer)
+        app = build_memory_chat_graph(
+            session_factory=session_scope,
+            graph_variant=graph_variant,
+        ).compile(checkpointer=checkpointer)
         config = {"configurable": {"thread_id": turn.thread_id}}
         snapshots = list(app.get_state_history(config, limit=limit))
 
@@ -588,11 +602,19 @@ def get_chat_turn_state_history(
 
 
 def _to_chat_turn_graph_read(turn: ChatTurn) -> ChatTurnGraphRead:
-    from app.agent.graphs.memory_chat.graph import get_memory_chat_graph_mermaid
+    from app.agent.graphs.memory_chat.graph import (
+        get_elf_memory_chat_graph_mermaid,
+        get_memory_chat_graph_mermaid,
+    )
 
     node_statuses = _decode_json_object(turn.node_statuses)
     debug_payload = _decode_json_any(turn.debug_payload, fallback={})
-    mermaid = _highlight_memory_chat_mermaid(get_memory_chat_graph_mermaid(), node_statuses)
+    mermaid_source = (
+        get_elf_memory_chat_graph_mermaid()
+        if "generate_elf_bubble_answer" in node_statuses
+        else get_memory_chat_graph_mermaid()
+    )
+    mermaid = _highlight_memory_chat_mermaid(mermaid_source, node_statuses)
     return ChatTurnGraphRead(
         turn_id=turn.id or 0,
         conversation_id=turn.conversation_id,

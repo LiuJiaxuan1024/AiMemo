@@ -17,6 +17,17 @@ ElfMotion = Literal[
     "dragging",
 ]
 ElfEventSource = Literal["jobs", "chat", "memory", "graph", "workshop", "system"]
+ElfRuntimeStatus = Literal[
+    "idle",
+    "thinking",
+    "tool_running",
+    "streaming_answer",
+    "speaking",
+    "waiting_user_input",
+    "completed",
+    "failed",
+    "recovering",
+]
 
 
 class ElfEventCreate(BaseModel):
@@ -51,3 +62,16 @@ class ElfEventRead(ElfEventCreate):
 class ElfEventListRead(BaseModel):
     events: list[ElfEventRead]
     latest_id: int
+
+
+class ElfRuntimeStateRead(BaseModel):
+    status: ElfRuntimeStatus
+    busy: bool
+    conversation_id: int | None = None
+    turn_id: int | None = None
+    pending_interrupt: dict[str, Any] | None = None
+    last_message: str = ""
+    last_bubbles: list[dict[str, Any]] = Field(default_factory=list)
+    last_error: str = ""
+    message: str = ""
+    updated_at: datetime

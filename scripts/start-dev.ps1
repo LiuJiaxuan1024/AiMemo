@@ -271,6 +271,55 @@ function Ensure-FrontendDistForBackendApp {
   }
 }
 
+function Test-AiMemoDevProcessRunning {
+  $repoNeedle = ([string]$repoRoot).ToLowerInvariant()
+  $patterns = @(
+    "uvicorn app.main:app",
+    "start-backend.ps1",
+    "start-frontend.ps1",
+    "vite --host 127.0.0.1",
+    "npm run dev",
+    "tauri dev",
+    "memo-elf-desktop"
+  )
+
+  try {
+    $currentPid = $PID
+    $processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
+    foreach ($process in $processes) {
+      if ($process.ProcessId -eq $currentPid) {
+        continue
+      }
+      $commandLine = [string]$process.CommandLine
+      if ([string]::IsNullOrWhiteSpace($commandLine)) {
+        continue
+      }
+      $lowered = $commandLine.ToLowerInvariant()
+      if (-not $lowered.Contains($repoNeedle)) {
+        continue
+      }
+      foreach ($pattern in $patterns) {
+        if ($lowered.Contains($pattern)) {
+          return $true
+        }
+      }
+    }
+  }
+  catch {
+    return $false
+  }
+  return $false
+}
+
+function Assert-AiMemoNotAlreadyRunning {
+  if (-not (Test-AiMemoDevProcessRunning)) {
+    return
+  }
+  Write-Host "AiMemo dev services already appear to be running for this checkout." -ForegroundColor Yellow
+  Write-Host "Use 'aimemo stop' to stop them, or 'aimemo restart' to restart cleanly." -ForegroundColor Gray
+  exit 2
+}
+
 function Invoke-QuickDoctor {
   if ($SkipDoctor -or -not (Test-Path $doctorScript)) {
     return
@@ -296,7 +345,7 @@ function Invoke-QuickDoctor {
 
 Invoke-QuickDoctor
 Assert-NodeVersion
-& $stopScript
+Assert-AiMemoNotAlreadyRunning
 Ensure-FrontendDependencies
 Ensure-FrontendDistForBackendApp
 

@@ -27,6 +27,23 @@
         "visible": false,
         "skipTaskbar": true,
         "shadow": false
+      },
+      {
+        "title": "Memo Elf Overlay",
+        "label": "elf_overlay",
+        "url": "overlay.html",
+        "width": 300,
+        "height": 120,
+        "x": 1130,
+        "y": 400,
+        "decorations": false,
+        "transparent": true,
+        "backgroundColor": "#00000000",
+        "alwaysOnTop": true,
+        "resizable": false,
+        "visible": false,
+        "skipTaskbar": true,
+        "shadow": false
       }
     ],
     "security": {

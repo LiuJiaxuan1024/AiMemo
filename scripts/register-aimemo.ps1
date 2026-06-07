@@ -2,10 +2,35 @@
 param(
   [switch]$DryRun,
   [switch]$NoPathUpdate,
-  [switch]$Quiet
+  [switch]$Quiet,
+  [switch]$Help
 )
 
 $ErrorActionPreference = "Stop"
+
+function Show-RegisterHelp {
+  Write-Host "Usage: .\scripts\register-aimemo.ps1 [-DryRun] [-NoPathUpdate] [-Quiet]"
+  Write-Host ""
+  Write-Host "Registers the global aimemo command for Windows."
+  Write-Host ""
+  Write-Host "What it does:"
+  Write-Host "  1. Writes aimemo.cmd and aimemo.ps1 wrappers to `%LOCALAPPDATA%\AiMemo\bin."
+  Write-Host "  2. Adds that bin directory to the user PATH unless -NoPathUpdate is set."
+  Write-Host "  3. Lets new terminals run aimemo from any directory."
+  Write-Host ""
+  Write-Host "Options:"
+  Write-Host "  -DryRun        Show planned changes without writing files."
+  Write-Host "  -NoPathUpdate  Write wrappers but do not edit the user PATH."
+  Write-Host "  -Quiet         Reduce output."
+  Write-Host ""
+  Write-Host "Recommended entry point:"
+  Write-Host "  aimemo help register"
+}
+
+if ($Help) {
+  Show-RegisterHelp
+  exit 0
+}
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $aimemoScript = Join-Path $PSScriptRoot "aimemo.ps1"

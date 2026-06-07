@@ -31,6 +31,7 @@ flowchart TD
     Dispatch --> L2[build_l2_summary]
     Dispatch --> L1[build_l1_recent_messages]
     Dispatch --> LX[build_lx_attachment_context]
+    Dispatch --> L05[build_l0_adjacent_turn]
     Dispatch --> L0[build_l0_current_input]
     Dispatch --> Window[build_current_conversation_window]
     L4 --> Merge[merge_prompt_context]
@@ -39,9 +40,11 @@ flowchart TD
     L2 --> Merge
     L1 --> Merge
     LX --> Merge
+    L05 --> Merge
     L0 --> Merge
     Window --> Merge
-    Merge --> Agent[agent<br/>ReAct with tools]
+    Merge --> Plan[plan_task]
+    Plan --> Agent[agent<br/>ReAct with tools]
     Agent --> Route{tool_calls?}
     Route -->|yes| Tools[tools<br/>policy + local operator]
     Tools --> Agent
@@ -56,6 +59,7 @@ flowchart TD
     Load -. checkpoint .-> CP1[(checkpoint)]
     Dispatch -. Send .-> Workers[(context workers)]
     Merge -. checkpoint .-> CP2[(checkpoint)]
+    Plan -. checkpoint .-> CPPlan[(checkpoint)]
     Agent -. checkpoint .-> CP3[(checkpoint)]
     Tools -. checkpoint .-> CP4[(checkpoint)]
     Persist -. checkpoint .-> CP5[(checkpoint)]
@@ -96,7 +100,13 @@ build_l2_summary
   读取 conversation.summary 构建对话摘要层。
 
 build_l1_recent_messages
-  按 token budget 裁剪近期消息窗口。该层主要用于调试和后续状态树，不再单独喂给回答模型。
+  按 token budget 裁剪近期消息窗口。该层作为 L1 history 注入 prompt；
+  如果它和当前输入冲突，应以后续的 L0.5/L0 为准。
+
+build_l0_adjacent_turn
+  构建 L0.5 最近邻接上下文，从当前输入前最近 1-2 条消息和 user(current) 组成小窗口。
+  它专门解决“继续”“提供完整代码”“这个/上面/刚才那个”等省略追问，
+  防止模型从 L2 旧摘要或远期 L1 历史里错绑主题。
 
 build_lx_attachment_context
   处理当前轮和上下文中引用到的图片、文件等附件。
@@ -115,7 +125,7 @@ build_current_conversation_window
   agent 把 L1 历史 assistant 草稿误当成本轮 L0 指令继续执行。
 
 merge_prompt_context
-  按 L4 -> L3 -> L2 -> L1 history -> Lx attachments -> L0 current 顺序合并上下文。
+  按 L4 -> L3 -> L2 -> L1 history -> Lx attachments -> L0.5 adjacent -> L0 current 顺序合并上下文。
   输出最终 prompt_context。
 
 agent
@@ -140,6 +150,9 @@ generate_answer
 
 generate_elf_bubble_answer
   桌面精灵外置聊天的专用回答分支。
+  它只能在 agent 产出最终回答之后执行，不能从 plan_task 直接跳入。
+  精灵入口和普通聊天共享同一条 ReAct 工具链；创建文件、执行命令、请求用户选择等动作
+  必须先由 agent/tools/request_user_input 完成，再由本节点把最终结果改写成气泡。
   该节点要求模型输出结构化 JSON：`bubbles: [{ text, emoji }]`。
   每个 bubble 是一个语义完整的气泡片段，emoji 用于驱动精灵表情。
   一个 bubble 只承载一种主要情绪；如果模型把明显情绪转折塞入同一气泡，
@@ -223,6 +236,7 @@ context_l2_layer
 context_conversation_window_layer
 context_l1_layer
 context_lx_attachment_layer
+context_l0_adjacent_layer
 context_l0_layer
 prompt_context
 mounted_knowledge_spaces
@@ -498,7 +512,7 @@ poor / none
 ## 金字塔上下文构建
 
 当前实现已经把回答上下文从旧 `generate_answer` 节点中拆出，并使用 LangGraph `Send`
-worker 并行构建 L0-L4 五层上下文。本地 read/write/exec 工具不再作为上下文 worker
+worker 并行构建 L0-L4 上下文。本地 read/write/exec 工具不再作为上下文 worker
 提前执行，而是进入 `agent -> tools -> agent` ReAct 主循环。
 这能避免模型在工具执行后无法继续决策，也能减少“说自己写了但其实没继续调用工具”的问题。
 
@@ -509,6 +523,7 @@ flowchart TD
     Dispatch --> L2[L2 worker<br/>对话摘要]
     Dispatch --> L1[L1 worker<br/>近期对话窗口]
     Dispatch --> LX[Lx worker<br/>附件派生上下文]
+    Dispatch --> L05[L0.5 worker<br/>最近邻接上下文]
     Dispatch --> L0[L0 worker<br/>当前输入]
     Dispatch --> Window[L1+L0 worker<br/>当前对话窗口]
 
@@ -517,11 +532,13 @@ flowchart TD
     L2 --> Merge
     L1 --> Merge
     LX --> Merge
+    L05 --> Merge
     L0 --> Merge
     Window -. debug only .-> Merge
 
     Merge --> Prompt[prompt_context]
-    Prompt --> Agent[agent<br/>LLM + tool schema]
+    Prompt --> Plan[plan_task]
+    Plan --> Agent[agent<br/>LLM + tool schema]
     Agent --> Route{tool_calls?}
     Route -->|yes| Tools[tools<br/>Local Operator policy wrapper]
     Tools --> Agent
@@ -530,8 +547,8 @@ flowchart TD
 ```
 
 这里的工具循环发生在 Memory Chat Graph 主干上，而不是隐藏在回答前的上下文构建阶段。
-L0/L1/L2/L3/L4、Lx 附件派生上下文和 L1+L0 当前对话窗口仍然并行构建；工具是否调用由合并上下文后的 agent 决定。
-`merge_prompt_context` 真正注入模型的是 L4、L3、L2、L1 history、Lx attachments、L0 current。
+L0/L0.5/L1/L2/L3/L4、Lx 附件派生上下文和 L1+L0 当前对话窗口仍然并行构建；工具是否调用由合并上下文后的 agent 决定。
+`merge_prompt_context` 真正注入模型的是 L4、L3、L2、L1 history、Lx attachments、L0.5 adjacent、L0 current。
 L1+L0 当前对话窗口保留给调试，不再作为主 prompt 的默认输入。
 
 当前主循环已开放第一批 read/write/exec 工具：
@@ -570,7 +587,7 @@ exec_command
 多轮确认写入
   -> 如果上一轮 assistant 已经给出目标路径和正文
   -> 用户下一轮说“直接保存/写到具体文件”
-  -> agent 根据 prompt_context 中的 L1 历史和 L0 当前输入理解接续语义
+  -> agent 根据 prompt_context 中的 L0.5 最近邻接上下文和 L0 当前输入理解接续语义
   -> 进入 write_file，而不是口头声称已经保存
 ```
 
@@ -618,9 +635,10 @@ flowchart TD
 
 ```text
 L4 core_memory_tokens: 2400
-L3 retrieved_memory_tokens: 10000
+L3 retrieved_memory_tokens: 12000
 L2 summary_tokens: 4000
 L1 recent_message_tokens: 8000
+L0.5 adjacent_message_tokens: 1200
 L1+L0 conversation_window_tokens: 10000
 weak_retrieval_max_chunks: 5
 ```
@@ -646,7 +664,9 @@ context_l3_layer
 context_l2_layer
 context_l1_layer
 context_lx_attachment_layer
+context_l0_adjacent_layer
 context_l0_layer
+context_conversation_window_layer
 ```
 
 这里没有使用 `context_layers` 列表 reducer。原因是聊天 graph 使用同一个 `conversation:{id}` thread 跨轮执行，列表 reducer 容易把上一轮 layer 追加进本轮。独立字段更明确，也更利于 checkpoint 调试。

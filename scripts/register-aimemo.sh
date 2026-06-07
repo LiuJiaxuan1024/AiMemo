@@ -16,13 +16,27 @@ for arg in "$@"; do
     --quiet)
       QUIET=1
       ;;
-    -h|--help)
+    -h|--help|help)
       cat <<'EOF'
 Usage: ./scripts/register-aimemo.sh [--dry-run] [--no-path-update] [--quiet]
 
 Registers the global aimemo command for macOS/Linux by writing a user-local
 wrapper to ~/.local/bin/aimemo and, unless disabled, adding that directory to
 the user's shell startup file.
+
+What it does:
+  1. Writes a wrapper to ~/.local/bin/aimemo by default.
+  2. Adds that bin directory to the user's shell startup file unless
+     --no-path-update is set.
+  3. Lets new terminals run aimemo from any directory.
+
+Options:
+  --dry-run         Show planned changes without writing files.
+  --no-path-update  Write the wrapper but do not edit shell startup files.
+  --quiet           Reduce output.
+
+Recommended entry point:
+  aimemo help register
 EOF
       exit 0
       ;;
@@ -82,8 +96,15 @@ choose_profile_files() {
 path_list_contains() {
   local target="$1"
   local entry
-  IFS=':' read -r -a entries <<< "${PATH:-}"
-  for entry in "${entries[@]}"; do
+  local path_value="${PATH:-}"
+  while [[ -n "$path_value" ]]; do
+    if [[ "$path_value" == *:* ]]; then
+      entry="${path_value%%:*}"
+      path_value="${path_value#*:}"
+    else
+      entry="$path_value"
+      path_value=""
+    fi
     [[ "$entry" == "$target" ]] && return 0
   done
   return 1

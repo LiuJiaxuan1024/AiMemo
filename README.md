@@ -226,6 +226,7 @@ chmod +x scripts/*.sh
 aimemo doctor
 aimemo start
 aimemo stop
+aimemo restart
 ```
 
 如果暂时不想注册，也可以用仓库内路由脚本：
@@ -247,6 +248,16 @@ chmod +x scripts/*.sh
 后端 FastAPI: http://127.0.0.1:8000
 前端 Vite:    http://127.0.0.1:5173/app/
 桌面精灵:      Memo Elf Tauri 窗口
+```
+
+`aimemo start` 只负责启动；如果检测到当前仓库的 AiMemo 开发服务已经在运行，会直接提示并退出，不会隐式停止旧进程。需要重启时使用：
+
+```powershell
+aimemo restart
+```
+
+```bash
+aimemo restart
 ```
 
 一键脚本还会检查后端托管入口 `http://127.0.0.1:8000/app` 使用的

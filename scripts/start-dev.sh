@@ -152,6 +152,23 @@ stop_port_processes() {
   fi
 }
 
+aimemo_dev_process_running() {
+  local repo_escaped
+  repo_escaped="$(printf '%s' "$REPO_ROOT" | sed 's/[.[\*^$()+?{}|\\]/\\&/g')"
+  local pattern
+  pattern="$repo_escaped.*(uvicorn app.main:app|scripts/start-backend.sh|scripts/start-frontend.sh|vite .*--host 127.0.0.1|npm run dev|tauri dev|memo-elf-desktop|memo-elf-native)"
+  pgrep -f "$pattern" >/dev/null 2>&1
+}
+
+assert_aimemo_not_already_running() {
+  if ! aimemo_dev_process_running; then
+    return 0
+  fi
+  echo "AiMemo dev services already appear to be running for this checkout." >&2
+  echo "Use 'aimemo stop' to stop them, or 'aimemo restart' to restart cleanly." >&2
+  exit 2
+}
+
 ensure_frontend_dist_for_backend_app() {
   local frontend_dir="$REPO_ROOT/frontend"
   local index_html="$frontend_dir/dist/index.html"
@@ -212,7 +229,7 @@ run_quick_doctor() {
 
 run_quick_doctor
 assert_node_version
-"$SCRIPT_DIR/stop-dev.sh"
+assert_aimemo_not_already_running
 warn_linux_file_watch_limit
 warn_invalid_proxy_scheme
 ensure_frontend_dependencies

@@ -44,3 +44,27 @@ export interface ElfAssistantProps {
   jobs: Job[];
   onToggleWorkshop: () => void;
 }
+
+export type ElfRuntimeStatus =
+  | "idle"
+  | "thinking"
+  | "tool_running"
+  | "streaming_answer"
+  | "speaking"
+  | "waiting_user_input"
+  | "completed"
+  | "failed"
+  | "recovering";
+
+export interface ElfRuntimeStatusRead {
+  status: ElfRuntimeStatus;
+  busy: boolean;
+  conversation_id?: number | null;
+  turn_id?: number | null;
+  pending_interrupt?: Record<string, unknown> | null;
+  last_message: string;
+  last_bubbles: Array<Record<string, unknown>>;
+  last_error: string;
+  message: string;
+  updated_at: string;
+}

@@ -1064,9 +1064,9 @@ function ContextTab({ graph }: { graph: ChatTurnGraph }) {
           >
             <summary>
               <span
-                className={`chat-debug-context-level chat-debug-context-level-${layer.level}`}
+                className={`chat-debug-context-level chat-debug-context-level-${contextLevelClassSuffix(layer.level)}`}
               >
-                L{layer.level}
+                {contextLevelLabel(layer.level)}
               </span>
               <strong>{layer.name}</strong>
               <small>
@@ -1109,6 +1109,14 @@ function ContextTab({ graph }: { graph: ChatTurnGraph }) {
       ) : null}
     </div>
   );
+}
+
+function contextLevelLabel(level: number): string {
+  return Number.isInteger(level) ? `L${level}` : `L${level.toFixed(1)}`;
+}
+
+function contextLevelClassSuffix(level: number): string {
+  return Number.isInteger(level) ? String(level) : String(level).replace(".", "-");
 }
 
 function PerformanceTab({ graph }: { graph: ChatTurnGraph }) {

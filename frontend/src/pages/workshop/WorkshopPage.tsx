@@ -1,4 +1,4 @@
-import { Brain, Hammer, Volume2 } from "lucide-react";
+import { Brain, Hammer, Sparkles, Volume2 } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
 
 import { PanelHeader } from "../../shared/ui";
@@ -12,6 +12,10 @@ export function WorkshopPage() {
       />
 
       <nav className="workshop-subnav" aria-label="精灵工坊子模块">
+        <NavLink to="/app/workshop/elf">
+          <Sparkles aria-hidden="true" size={16} />
+          精灵
+        </NavLink>
         <NavLink to="/app/workshop/jobs">
           <Hammer aria-hidden="true" size={16} />
           任务

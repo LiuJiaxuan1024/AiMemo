@@ -9,6 +9,7 @@ from time import perf_counter
 from fastapi import HTTPException, status
 from sqlmodel import Session, desc, select
 
+from app.agent.graphs.memory_chat.graph import stream_memory_chat_graph
 from app.core.config import settings
 from app.core.database import session_scope
 from app.models.chat_message import ChatMessage
@@ -162,6 +163,7 @@ def stream_conversation_chat_events(
     checkpoint_path: str | None = None,
     emit_status_events: bool = True,
     answer_mode: str = "text",
+    runtime_scope: str = "page",
 ):
     """生成一轮聊天的 SSE 事件。
 
@@ -187,6 +189,7 @@ def stream_conversation_chat_events(
 
     started_at = perf_counter()
     debug_payload = _create_debug_payload()
+    graph_variant = "elf" if answer_mode == "elf_bubble" else "page"
 
     with session_factory() as session:
         conversation = session.get(Conversation, conversation_id)
@@ -218,6 +221,7 @@ def stream_conversation_chat_events(
             session,
             conversation_id=conversation_id,
             thread_id=langgraph_thread_id,
+            graph_variant=graph_variant,
         )
         turn_id = turn.id or 0
         attach_chat_turn_messages(
@@ -241,8 +245,19 @@ def stream_conversation_chat_events(
         user_message_id = user_message_read.id
         assistant_message_id = assistant_message_read.id
 
-    node_statuses = initial_node_statuses()
+    node_statuses = initial_node_statuses(graph_variant=graph_variant)
     _mark_debug_event(debug_payload, started_at, "turn_created")
+    if runtime_scope == "elf":
+        _update_elf_runtime(
+            session_factory,
+            status="thinking",
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            pending_interrupt={},
+            last_message=message,
+            last_bubbles=[],
+            last_error="",
+        )
     if emit_status_events:
         emit_elf_event(
             ElfEventCreate(
@@ -291,6 +306,7 @@ def stream_conversation_chat_events(
             "resume_payload": None,
             "langgraph_thread_id": langgraph_thread_id,
             "attachment_ids": attachment_ids or [],
+            "runtime_scope": runtime_scope,
         },
         daemon=True,
         name=f"chat-turn-{turn_id}",
@@ -309,6 +325,7 @@ def stream_conversation_chat_resume_events(
     checkpoint_path: str | None = None,
     emit_status_events: bool = True,
     answer_mode: str = "text",
+    runtime_scope: str = "page",
 ):
     """恢复一条因 request_user_input 中断的聊天 turn。"""
 
@@ -356,6 +373,15 @@ def stream_conversation_chat_resume_events(
         )
 
     buffer = chat_turn_buffer.create_fresh(turn_id)
+    if runtime_scope == "elf":
+        _update_elf_runtime(
+            session_factory,
+            status="thinking",
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            pending_interrupt={},
+            last_error="",
+        )
     buffer.append(
         _sse(
             "resume",
@@ -384,6 +410,7 @@ def stream_conversation_chat_resume_events(
             "started_at": started_at,
             "resume_payload": resume_payload,
             "langgraph_thread_id": resume_thread_id,
+            "runtime_scope": runtime_scope,
         },
         daemon=True,
         name=f"chat-turn-resume-{turn_id}",
@@ -432,6 +459,7 @@ def _run_turn_to_buffer(
     resume_payload: dict | None = None,
     langgraph_thread_id: str | None = None,
     attachment_ids: list[int] | None = None,
+    runtime_scope: str = "page",
 ) -> None:
     """Graph worker：在后台线程里跑完一轮 memory_chat_graph，事件全部推进 buffer。
 
@@ -455,9 +483,24 @@ def _run_turn_to_buffer(
     # tool_invocation 用 tool_call_id 去重：custom event 先到，state_update 兜底时
     # 不应再次派发同一条卡片；同时也覆盖 stream_writer 失败时只能从 state 派发的情形。
     emitted_tool_call_ids: set[str] = set()
-    try:
-        from app.agent.graphs.memory_chat.graph import stream_memory_chat_graph
+    last_runtime_status = "thinking" if runtime_scope == "elf" else ""
 
+    def mark_elf_runtime(status: str, **kwargs) -> None:
+        nonlocal last_runtime_status
+        if runtime_scope != "elf":
+            return
+        if status == last_runtime_status and not kwargs:
+            return
+        last_runtime_status = status
+        _update_elf_runtime(
+            session_factory,
+            status=status,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            **kwargs,
+        )
+
+    try:
         for event in stream_memory_chat_graph(
             conversation_id=conversation_id,
             user_message=message,
@@ -526,6 +569,8 @@ def _run_turn_to_buffer(
                 # 同一 tool_call_id 在 running=False 之前不进 dedupe，确保完成事件能照常派发。
                 tool_call_id = str(event.get("tool_call_id") or "")
                 running = bool(event.get("running"))
+                if running:
+                    mark_elf_runtime("tool_running")
                 if tool_call_id and not running and tool_call_id in emitted_tool_call_ids:
                     continue
                 step_index_value = event.get("step_index")
@@ -588,6 +633,7 @@ def _run_turn_to_buffer(
                     buffer.append(_sse("node", {"node": node_name, "node_statuses": node_statuses}))
                 delta = str(event.get("content") or "")
                 assistant_content += delta
+                mark_elf_runtime("streaming_answer", last_message=assistant_content)
                 with session_factory() as session:
                     _update_streaming_assistant_message(
                         session,
@@ -640,6 +686,11 @@ def _run_turn_to_buffer(
                 final_state = event.get("state") if isinstance(event.get("state"), dict) else {}
                 checkpoint_id = final_state.get("graph_checkpoint_id")
                 pending_interrupt = _normalize_interrupt_payload(event.get("interrupt"))
+                mark_elf_runtime(
+                    "waiting_user_input",
+                    pending_interrupt=pending_interrupt,
+                    last_message=assistant_content,
+                )
                 for node_name, node_status in list(node_statuses.items()):
                     if node_status == "running":
                         node_statuses[node_name] = "interrupted"
@@ -797,9 +848,17 @@ def _run_turn_to_buffer(
         done_payload = {"turn_id": turn_id, "response": response.model_dump(mode="json")}
         if answer_mode == "elf_bubble":
             done_payload["bubbles"] = elf_bubbles
+        mark_elf_runtime(
+            "completed",
+            pending_interrupt={},
+            last_message=final_assistant_content,
+            last_bubbles=elf_bubbles,
+            last_error="",
+        )
         buffer.append(_sse("done", done_payload))
     except ChatTurnCancelled as exc:
         logger.info("chat turn %s cancelled", turn_id)
+        mark_elf_runtime("failed", last_error=str(exc))
         buffer.append(
             _sse(
                 "error",
@@ -813,6 +872,7 @@ def _run_turn_to_buffer(
     except Exception as exc:
         logger.exception("chat turn %s worker crashed", turn_id)
         exception_detail = _build_exception_detail(exc)
+        mark_elf_runtime("failed", last_error=exception_detail["message"])
         debug_payload.setdefault("diagnostics", []).append(
             {
                 "code": "CHAT_TURN_WORKER_CRASHED",
@@ -1084,6 +1144,7 @@ def _extract_context_layers(state: dict) -> list[dict]:
         "context_conversation_window_layer",
         "context_l1_layer",
         "context_lx_attachment_layer",
+        "context_l0_adjacent_layer",
         "context_l0_layer",
     ]:
         payload = state.get(key)
@@ -1269,6 +1330,29 @@ def _build_exception_detail(exc: Exception) -> dict:
         "message": f"{exc_type}: {message}",
         "traceback": traceback_text,
     }
+
+
+def _update_elf_runtime(
+    session_factory: SessionFactory,
+    *,
+    status: str,
+    conversation_id: int,
+    turn_id: int,
+    **kwargs,
+) -> None:
+    try:
+        from app.services.elf_runtime_state_service import update_elf_runtime_state
+
+        with session_factory() as session:
+            update_elf_runtime_state(
+                session,
+                status=status,  # type: ignore[arg-type]
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                **kwargs,
+            )
+    except Exception:
+        logger.exception("failed to update elf runtime state for turn %s", turn_id)
 
 
 def _create_streaming_message_pair(

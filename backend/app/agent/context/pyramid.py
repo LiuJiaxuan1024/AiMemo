@@ -17,6 +17,7 @@ class ContextBudget:
       summary_tokens: L2 对话摘要预算，用于承接较早上下文。
       conversation_window_tokens: L1+L0 调试窗口预算。该窗口不再直接注入主 prompt。
       recent_message_tokens: L1 历史消息预算。
+      adjacent_message_tokens: L0.5 最近邻接上下文预算，用于解析“完整代码/继续/这个”等省略指代。
       weak_retrieval_max_chunks: weak 检索结果最多放入多少条，避免弱相关内容污染回答。
     """
 
@@ -25,6 +26,7 @@ class ContextBudget:
     summary_tokens: int = 2000
     conversation_window_tokens: int = 6000
     recent_message_tokens: int = 4000
+    adjacent_message_tokens: int = 1200
     weak_retrieval_max_chunks: int = 3
 
 
@@ -33,7 +35,7 @@ class ContextLayer:
     """最终 Prompt 中的一层上下文。
 
     参数：
-      level: 金字塔层级，L4 最高、L0 最贴近当前输入。
+      level: 金字塔层级，L4 最高、L0 最贴近当前输入；可用 0.5 表示 L0 与 L1 之间的邻接层。
       name: 层名称，用于 prompt 标题和调试展示。
       content: 已经过预算裁剪后的文本。
       budget_tokens: 该层预算。
@@ -41,7 +43,7 @@ class ContextLayer:
       note: 给模型和开发者看的使用说明，例如“weak 检索只能谨慎参考”。
     """
 
-    level: int
+    level: int | float
     name: str
     content: str
     budget_tokens: int | None
@@ -54,7 +56,8 @@ class ContextLayer:
     def to_prompt_section(self) -> str:
         """把单层上下文渲染成稳定的 prompt 片段。"""
 
-        title = f"L{self.level} {self.name}"
+        level_text = f"{self.level:g}" if isinstance(self.level, float) else str(self.level)
+        title = f"L{level_text} {self.name}"
         note = f"\n说明：{self.note}" if self.note else ""
         return f"## {title}{note}\n{self.content}"
 
@@ -132,6 +135,7 @@ def build_memory_chat_prompt_context(
         ),
         build_summary_layer(conversation_summary, selected_budget),
         build_recent_messages_layer(recent_messages, selected_budget),
+        build_adjacent_turn_layer(recent_messages, user_message, selected_budget),
         build_current_input_layer(user_message),
     ]
     return PyramidPromptContext(layers=layers)
@@ -309,6 +313,48 @@ def build_current_conversation_window_layer(
     )
 
 
+def build_adjacent_turn_layer(
+    recent_messages: list[dict[str, Any]],
+    user_message: str,
+    budget: ContextBudget,
+) -> ContextLayer:
+    """构建 L0.5 最近邻接上下文层。
+
+    当用户说“提供完整代码”“继续”“这个不对”这类省略指令时，模型最应该参考
+    紧邻当前输入的上一轮 user/assistant，而不是较早摘要里的历史任务。
+    """
+
+    selected: list[str] = []
+    used_tokens = 0
+    for message in reversed(recent_messages):
+        line = _format_message(message)
+        line_tokens = _message_token_count(message, line)
+        if not selected and line_tokens > budget.adjacent_message_tokens:
+            selected.append(_truncate_text_to_budget(line, budget.adjacent_message_tokens))
+            break
+        if selected and used_tokens + line_tokens > budget.adjacent_message_tokens:
+            break
+        selected.append(line)
+        used_tokens += line_tokens
+        if len(selected) >= 2:
+            break
+
+    current_line = _format_message({"role": "user(current)", "content": user_message})
+    lines = [*reversed(selected), current_line]
+    content = "\n".join(line for line in lines if line.strip())
+    return ContextLayer(
+        level=0.5,
+        name="最近一轮邻接上下文",
+        content=content,
+        budget_tokens=budget.adjacent_message_tokens,
+        used_tokens=count_tokens(content),
+        note=(
+            "用于解析省略指代；如果用户说“完整代码/继续/这个/上面”，"
+            "必须优先绑定到这里的最近一轮，而不是旧摘要中的历史任务。"
+        ),
+    )
+
+
 def build_current_input_layer(user_message: str) -> ContextLayer:
     """构建 L0 当前输入层。"""
 
@@ -328,7 +374,7 @@ def context_layer_from_payload(payload: dict[str, Any]) -> ContextLayer:
 
     kind = payload.get("kind") or "layer"
     return ContextLayer(
-        level=int(payload["level"]),
+        level=_parse_layer_level(payload["level"]),
         name=str(payload["name"]),
         content=str(payload["content"]),
         budget_tokens=payload.get("budget_tokens"),
@@ -344,6 +390,11 @@ def _format_chunk(chunk: dict[str, Any]) -> str:
     score_text = f", score={float(score):.3f}" if score is not None else ""
     content = str(chunk.get("content") or "").strip()
     return f"- [{title}{score_text}] {content}"
+
+
+def _parse_layer_level(value: Any) -> int | float:
+    numeric = float(value)
+    return int(numeric) if numeric.is_integer() else numeric
 
 
 def _format_message(message: dict[str, Any]) -> str:

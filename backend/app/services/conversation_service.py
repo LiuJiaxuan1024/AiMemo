@@ -31,6 +31,7 @@ from app.services.attachment_service import (
 )
 
 logger = logging.getLogger(__name__)
+ELF_CONVERSATION_TITLE = "Memo Elf"
 
 
 def create_conversation(session: Session, payload: ConversationCreate) -> ConversationRead:
@@ -65,7 +66,11 @@ def create_conversation(session: Session, payload: ConversationCreate) -> Conver
 def list_conversations(session: Session) -> list[ConversationListItem]:
     """按更新时间倒序返回对话列表。"""
 
-    conversations = session.exec(select(Conversation).order_by(desc(Conversation.updated_at))).all()
+    conversations = session.exec(
+        select(Conversation)
+        .where(Conversation.title != ELF_CONVERSATION_TITLE)
+        .order_by(desc(Conversation.updated_at))
+    ).all()
     return [_to_conversation_list_item(conversation) for conversation in conversations]
 
 

@@ -2,12 +2,16 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default permissions for the Memo Elf desktop proof of concept.",
-  "windows": ["elf"],
+  "windows": ["elf", "elf_overlay"],
   "permissions": [
     "core:default",
     "core:window:allow-hide",
+    "core:window:allow-outer-position",
+    "core:window:allow-scale-factor",
     "core:window:allow-show",
     "core:window:allow-start-dragging",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-position",
     "core:window:allow-set-size",
     "opener:default"
   ]

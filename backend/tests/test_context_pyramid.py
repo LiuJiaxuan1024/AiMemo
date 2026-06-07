@@ -1,5 +1,6 @@
 from app.agent.context import (
     ContextBudget,
+    build_adjacent_turn_layer,
     build_current_conversation_window_layer,
     build_memory_chat_prompt_context,
 )
@@ -59,6 +60,52 @@ def test_current_conversation_window_merges_recent_messages_and_current_input():
     assert layer.kind == "fused"
     assert "assistant: 我建议保存到 E:\\test\\message.txt" in layer.content
     assert "user(current): 直接保存到这个文件" in layer.content
+
+
+def test_adjacent_turn_layer_prioritizes_latest_turn_for_ambiguous_followup():
+    layer = build_adjacent_turn_layer(
+        [
+            {"role": "user", "content": "帮我写好友推荐的 PySpark 代码", "token_count": 10},
+            {"role": "assistant", "content": "这里是好友推荐的完整代码", "token_count": 10},
+            {"role": "user", "content": "Dataset 过滤年龄不等于 23 应该怎么写？", "token_count": 10},
+            {
+                "role": "assistant",
+                "content": "上一轮我们在改 SparkSQL Dataset notEqual(23) 的 Test2 代码。",
+                "token_count": 10,
+            },
+        ],
+        "提供完整代码吗",
+        ContextBudget(adjacent_message_tokens=80),
+    )
+
+    assert layer.level == 0.5
+    assert layer.name == "最近一轮邻接上下文"
+    assert "notEqual(23)" in layer.content
+    assert "user(current): 提供完整代码吗" in layer.content
+    assert "好友推荐" not in layer.content
+
+
+def test_pyramid_context_places_adjacent_layer_before_current_input():
+    context = build_memory_chat_prompt_context(
+        user_message="提供完整代码吗",
+        recent_messages=[
+            {
+                "role": "assistant",
+                "content": "上一轮我们在改 SparkSQL Dataset notEqual(23) 的 Test2 代码。",
+                "token_count": 10,
+            },
+        ],
+        conversation_summary="历史背景：用户之前也问过好友推荐代码。",
+        retrieved_chunks=[],
+        needs_retrieval=False,
+        retrieval_grade="none",
+    )
+
+    prompt = context.to_prompt()
+    adjacent_index = prompt.index("L0.5 最近一轮邻接上下文")
+    current_index = prompt.index("L0 当前用户输入")
+    assert adjacent_index < current_index
+    assert "notEqual(23)" in prompt
 
 
 def test_pyramid_context_marks_weak_retrieval_as_uncertain_and_limits_chunks():

@@ -21,6 +21,11 @@ const WorkshopJobsPage = lazy(() =>
     default: module.WorkshopJobsPage,
   })),
 );
+const WorkshopElfPage = lazy(() =>
+  import("./pages/workshop/WorkshopElfPage").then((module) => ({
+    default: module.WorkshopElfPage,
+  })),
+);
 const WorkshopMemoriesPage = lazy(() =>
   import("./pages/workshop/WorkshopMemoriesPage").then((module) => ({
     default: module.WorkshopMemoriesPage,
@@ -50,6 +55,7 @@ const router = createBrowserRouter([
         element: withPageSuspense(<WorkshopPage />),
         children: [
           { index: true, element: <Navigate to="/app/workshop/jobs" replace /> },
+          { path: "elf", element: withPageSuspense(<WorkshopElfPage />) },
           { path: "jobs", element: withPageSuspense(<WorkshopJobsPage />) },
           { path: "memories", element: withPageSuspense(<WorkshopMemoriesPage />) },
           { path: "voice", element: withPageSuspense(<WorkshopVoicePage />) },

@@ -5,7 +5,11 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import Interrupt
 from sqlmodel import select
 
-from app.agent.graphs.memory_chat.graph import build_memory_chat_graph, run_memory_chat_graph
+from app.agent.graphs.memory_chat.graph import (
+    build_memory_chat_graph,
+    get_elf_memory_chat_graph_mermaid,
+    run_memory_chat_graph,
+)
 from app.agent.graphs.memory_chat.graph import _resolve_graph_input_for_turn
 from app.agent.checkpoints import get_sqlite_checkpointer
 from app.agent.graphs.memory_chat.nodes import RetrievalPlan
@@ -271,7 +275,7 @@ def test_memory_chat_graph_main_flow_is_flat_context_worker_graph(session_factor
     assert "run_exec_tool" not in mermaid
     assert "build_local_operator_context" not in mermaid
     assert "merge_prompt_context" in mermaid
-    assert "generate_elf_bubble_answer" in mermaid
+    assert "generate_elf_bubble_answer" not in mermaid
     assert "plan_retrieval" not in mermaid
     assert "retrieve_notes" not in mermaid
     assert "grade_retrieval" not in mermaid
@@ -1048,6 +1052,11 @@ def test_memory_chat_graph_elf_bubble_mode_persists_joined_bubbles(
     tmp_path: Path,
 ):
     conversation = create_conversation(session, ConversationCreate(title="精灵气泡"))
+    agent_calls: list[str] = []
+
+    def fake_answer(user_message, recent_messages, retrieved_chunks, needs_retrieval, retrieval_grade):
+        agent_calls.append(user_message)
+        return "我在呀。想聊什么都可以。"
 
     def fake_bubbles(user_message, recent_messages, retrieved_chunks, needs_retrieval, retrieval_grade):
         assert user_message == "在吗"
@@ -1061,14 +1070,34 @@ def test_memory_chat_graph_elf_bubble_mode_persists_joined_bubbles(
         user_message="在吗",
         session_factory=session_factory,
         checkpoint_path=str(tmp_path / "checkpoints.db"),
+        answer_generator=fake_answer,
         bubble_answer_generator=fake_bubbles,
         answer_mode="elf_bubble",
     )
 
     messages = session.exec(select(ChatMessage).order_by(ChatMessage.id)).all()
+    assert agent_calls == ["在吗"]
+    assert result["agent_decision"]["type"] == "final_answer"
     assert result["elf_bubble_answer_parts"][0]["emoji"] == "success_smile"
     assert result["assistant_answer"] == "我在呀。\n\n想聊什么都可以。"
     assert messages[-1].content == "我在呀。\n\n想聊什么都可以。"
+
+
+def test_memory_chat_graph_elf_bubble_mode_does_not_skip_agent(session_factory):
+    graph = build_memory_chat_graph(session_factory=session_factory, graph_variant="elf")
+    mermaid = graph.compile().get_graph().draw_mermaid()
+
+    assert "plan_task" in mermaid
+    assert "agent" in mermaid
+    assert "generate_elf_bubble_answer" in mermaid
+    assert "plan_task -.-> generate_elf_bubble_answer" not in mermaid
+    assert "plan_task --> generate_elf_bubble_answer" not in mermaid
+
+
+def test_elf_memory_chat_mermaid_includes_bubble_node():
+    mermaid = get_elf_memory_chat_graph_mermaid()
+
+    assert "generate_elf_bubble_answer" in mermaid
 
 
 def test_elf_bubble_parser_splits_obvious_emotion_shift():

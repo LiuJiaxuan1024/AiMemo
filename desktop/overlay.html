@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Memo Elf Overlay</title>
+  </head>
+  <body>
+    <main id="overlay-app">
+      <section class="bubble" id="bubble">正在连接 AiMemo...</section>
+      <section class="elf-menu" id="elf-menu" aria-hidden="true">
+        <button id="chat-toggle" type="button">和我聊聊</button>
+        <button id="open-app" type="button">打开 AiMemo</button>
+      </section>
+      <form class="chat-panel" id="chat-panel" aria-hidden="true">
+        <textarea id="chat-input" maxlength="500" placeholder="想和我说什么？" rows="1"></textarea>
+        <button class="voice-hold" id="voice-hold" type="button" hidden>按住说话</button>
+        <button id="chat-send" type="submit">发送</button>
+      </form>
+      <form class="choice-panel" id="choice-panel" aria-hidden="true"></form>
+    </main>
+    <script type="module" src="/src/overlay.ts"></script>
+  </body>
+</html>

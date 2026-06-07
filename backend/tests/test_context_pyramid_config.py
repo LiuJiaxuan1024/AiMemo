@@ -9,6 +9,7 @@ def test_settings_builds_configured_context_pyramid_budget() -> None:
         context_pyramid_summary_tokens=33,
         context_pyramid_conversation_window_tokens=44,
         context_pyramid_recent_message_tokens=55,
+        context_pyramid_adjacent_message_tokens=66,
         context_pyramid_weak_retrieval_max_chunks=6,
     )
 
@@ -19,6 +20,7 @@ def test_settings_builds_configured_context_pyramid_budget() -> None:
     assert budget.summary_tokens == 33
     assert budget.conversation_window_tokens == 44
     assert budget.recent_message_tokens == 55
+    assert budget.adjacent_message_tokens == 66
     assert budget.weak_retrieval_max_chunks == 6
 
 

@@ -33,6 +33,7 @@ from app.agent.context import (
     ContextLayer,
     ContextBudget,
     PyramidPromptContext,
+    build_adjacent_turn_layer,
     build_core_memory_layer,
     build_current_conversation_window_layer,
     build_current_input_layer,
@@ -262,6 +263,7 @@ def build_load_turn_state_node(
                 "knowledge_recall_cache": [],
                 "knowledge_retrieval_debug": {},
                 "context_l0_layer": {},
+                "context_l0_adjacent_layer": {},
                 "context_l1_layer": {},
                 "context_conversation_window_layer": {},
                 "context_l2_layer": {},
@@ -322,6 +324,7 @@ def dispatch_context_workers(state: MemoryChatGraphState) -> list[Send]:
         Send("build_l2_summary", state),
         Send("build_l1_recent_messages", state),
         Send("build_lx_attachment_context", state),
+        Send("build_l0_adjacent_turn", state),
         Send("build_l0_current_input", state),
         Send("build_current_conversation_window", state),
     ]
@@ -811,6 +814,20 @@ def build_l0_current_input_node():
         return {"context_l0_layer": layer.to_payload()}
 
     return build_l0_current_input
+
+
+def build_l0_adjacent_turn_node():
+    """构建 L0.5 最近邻接上下文层。"""
+
+    def build_l0_adjacent_turn(state: MemoryChatGraphState) -> MemoryChatGraphState:
+        layer = build_adjacent_turn_layer(
+            state.get("recent_messages", []),
+            _resolve_user_message(state),
+            _context_budget(),
+        )
+        return {"context_l0_adjacent_layer": layer.to_payload()}
+
+    return build_l0_adjacent_turn
 
 
 def build_agent_node(
@@ -1858,6 +1875,7 @@ def build_merge_prompt_context_node():
             _resolve_context_layer(state, "context_l2_layer"),
             _resolve_context_layer(state, "context_l1_layer"),
             _resolve_context_layer(state, "context_lx_attachment_layer"),
+            _resolve_context_layer(state, "context_l0_adjacent_layer"),
             _resolve_context_layer(state, "context_l0_layer"),
         ]
         layers = [context_layer_from_payload(dict(payload)) for payload in payloads]

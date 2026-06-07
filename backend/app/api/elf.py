@@ -3,9 +3,10 @@ from fastapi.responses import StreamingResponse
 
 from app.schemas.chat import ChatRequest
 from app.schemas.chat import ChatResumeRequest
-from app.schemas.elf import ElfEventCreate, ElfEventListRead, ElfEventRead
-from app.services.elf_chat_service import stream_elf_chat_events, stream_elf_chat_resume_events
+from app.schemas.elf import ElfEventCreate, ElfEventListRead, ElfEventRead, ElfRuntimeStateRead
+from app.services.elf_chat_service import get_elf_chat_status, stream_elf_chat_events, stream_elf_chat_resume_events
 from app.services.elf_event_service import elf_event_service
+from app.services.elf_runtime_state_service import get_elf_runtime_state
 
 
 router = APIRouter(prefix="/elf", tags=["elf"])
@@ -47,6 +48,16 @@ def stream_elf_chat_api(payload: ChatRequest) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get("/chat/status")
+def get_elf_chat_status_api() -> dict:
+    return get_elf_chat_status()
+
+
+@router.get("/runtime/status", response_model=ElfRuntimeStateRead)
+def get_elf_runtime_status_api() -> ElfRuntimeStateRead:
+    return get_elf_runtime_state()
 
 
 @router.post("/chat/turns/{turn_id}/resume/stream")

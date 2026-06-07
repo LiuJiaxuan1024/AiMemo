@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { LogicalSize } from "@tauri-apps/api/dpi";
+import { LogicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import "./styles.css";
@@ -19,6 +20,7 @@ const currentWindow = getCurrentWindow();
 const AIMEMO_BACKEND_URL = import.meta.env.VITE_AIMEMO_BACKEND_URL ?? "http://127.0.0.1:8000";
 const ELF_EVENTS_URL = `${AIMEMO_BACKEND_URL}/api/elf/events`;
 const ELF_CHAT_STREAM_URL = `${AIMEMO_BACKEND_URL}/api/elf/chat/stream`;
+const ELF_RUNTIME_STATUS_URL = `${AIMEMO_BACKEND_URL}/api/elf/runtime/status`;
 const ELF_VOICE_MODE_URL = `${AIMEMO_BACKEND_URL}/api/elf/voice/mode`;
 const ELF_VOICE_SPEAK_URL = `${AIMEMO_BACKEND_URL}/api/elf/voice/speak`;
 const ELF_VOICE_TRANSCRIBE_URL = `${AIMEMO_BACKEND_URL}/api/elf/voice/transcribe`;
@@ -27,10 +29,13 @@ const ELF_CHAT_RESUME_STREAM_URL = (turnId: number) =>
   `${AIMEMO_BACKEND_URL}/api/elf/chat/turns/${turnId}/resume/stream`;
 const isLinuxElfWindow = navigator.userAgent.includes("Linux");
 const ELF_WINDOW_HEIGHT = 420;
+const ELF_SPRITE_WINDOW_WIDTH = 240;
+const ELF_SPRITE_WINDOW_HEIGHT = 300;
 const ELF_COMPACT_WINDOW_WIDTH = 300;
 const ELF_CHOICE_WINDOW_WIDTH = 560;
 const ELF_VOICE_REQUEST_TIMEOUT_MS = 45_000;
 const ELF_CONFIG_RETRY_MS = 1500;
+type OverlayMode = "hidden" | "bubble" | "menu" | "chat" | "choice";
 
 if (isLinuxElfWindow) {
   document.documentElement.classList.add("linux-elf-window");
@@ -50,6 +55,9 @@ let bubbleHideTimer: number | null = null;
 let bubbleSequenceTimer: number | null = null;
 let isElfChatRunning = false;
 let isElfSpeaking = false;
+let isElfBackendBusy = false;
+let elfBackendStatus = "idle";
+let elfBackendMessage = "";
 let isElfVoiceModeEnabled = false;
 let isVoiceRecording = false;
 let mediaRecorder: MediaRecorder | null = null;
@@ -57,7 +65,15 @@ let recordedAudioChunks: Blob[] = [];
 let activeToolCallIds = new Set<string>();
 let toolProgressCount = 0;
 let choiceCloseTimer: number | null = null;
-let elfWindowMode: "compact" | "choice" | null = null;
+let overlayMode: OverlayMode = "hidden";
+let isBubbleVisible = false;
+let bubbleText = "";
+let isMenuOpen = false;
+let isChatPanelOpen = false;
+let isChoicePanelOpen = false;
+let activeChoiceRequest: UserInputRequest | null = null;
+let pendingChoiceResolver: ((answer: UserInputAnswer) => void) | null = null;
+let overlayWindow: WebviewWindow | null = null;
 let voiceQueue: QueuedVoiceBubble[] = [];
 let activeVoiceAudio: HTMLAudioElement | null = null;
 let activeVoiceUrl: string | null = null;
@@ -66,7 +82,15 @@ let streamingBubbleJsonBuffer = "";
 let streamedBubbleCount = 0;
 let queuedVoiceBubbleTextKeys = new Set<string>();
 
-void setElfWindowMode("compact");
+void initializeOverlayWindow();
+void currentWindow.onMoved(() => {
+  if (overlayMode !== "hidden") {
+    void syncOverlayMode();
+  }
+});
+void currentWindow.listen<OverlayCommand>("elf-overlay-command", (event) => {
+  void handleOverlayCommand(event.payload);
+});
 
 elf?.addEventListener("pointerdown", (event) => {
   if (event.button !== 0) {
@@ -106,6 +130,9 @@ elf?.addEventListener("lostpointercapture", endPointerInteraction);
 elf?.addEventListener("click", () => {
   if (suppressClick) {
     suppressClick = false;
+    return;
+  }
+  if (isElfBusy()) {
     return;
   }
   toggleElfMenu();
@@ -177,11 +204,12 @@ window.addEventListener("pointerdown", (event) => {
   if (!(event.target instanceof Node)) {
     return;
   }
+  if (choicePanel?.contains(event.target)) {
+    return;
+  }
   if (!elfMenu?.contains(event.target) && !elf?.contains(event.target) && !chatPanel?.contains(event.target)) {
-    if (choicePanel?.contains(event.target)) {
-      return;
-    }
     hideElfMenu();
+    hideChatPanel();
   }
 });
 
@@ -201,6 +229,7 @@ async function bootstrapElfDesktop() {
   });
   startElfEventPolling();
   startElfVoiceModePolling();
+  startElfChatStatusPolling();
 }
 
 async function waitForElfEnabled(): Promise<boolean> {
@@ -253,10 +282,17 @@ async function openAiMemo() {
 }
 
 function setBubble(message: string) {
-  if (bubble) {
-    bubble.textContent = message;
-    bubble.classList.add("visible");
-  }
+  bubbleText = message;
+  isBubbleVisible = true;
+  isMenuOpen = false;
+  isChatPanelOpen = false;
+  void syncOverlayMode();
+}
+
+function resetElfBackendStatus() {
+  isElfBackendBusy = false;
+  elfBackendStatus = "idle";
+  elfBackendMessage = "";
 }
 
 class ElfClientError extends Error {
@@ -337,14 +373,16 @@ function compactErrorMessage(message: string) {
   return normalized.length > 96 ? `${normalized.slice(0, 96)}...` : normalized;
 }
 
-function showChatBubble(part: ChatBubblePart, ttlMs = 5200) {
+function showChatBubble(part: ChatBubblePart, ttlMs = 5200, options: { autoHide?: boolean } = {}) {
   setBubble(part.text);
   if (elf) {
     elf.dataset.mood = moodFromEmoji(part.emoji);
     elf.dataset.motion = motionFromEmoji(part.emoji);
   }
   setElfExpression(expressionFromEmoji(part.emoji));
-  clearBubbleAfter(ttlMs, { resetExpression: true });
+  if (options.autoHide !== false) {
+    clearBubbleAfter(ttlMs, { resetExpression: true });
+  }
 }
 
 function showVoiceBubble(part: ChatBubblePart) {
@@ -365,7 +403,8 @@ function clearBubbleAfter(ttlMs = 4000, options: { resetExpression?: boolean } =
     window.clearTimeout(bubbleHideTimer);
   }
   bubbleHideTimer = window.setTimeout(() => {
-    bubble?.classList.remove("visible");
+    isBubbleVisible = false;
+    void syncOverlayMode();
     if (options.resetExpression && !isElfChatRunning && bubbleSequenceTimer === null) {
       resetElfExpression();
     }
@@ -374,91 +413,224 @@ function clearBubbleAfter(ttlMs = 4000, options: { resetExpression?: boolean } =
 }
 
 function toggleElfMenu() {
-  if (!elfMenu) {
-    return;
-  }
-  const isOpen = elfMenu.classList.toggle("open");
-  elfMenu.setAttribute("aria-hidden", String(!isOpen));
+  hideBubbleImmediately();
+  isMenuOpen = !isMenuOpen;
+  isChatPanelOpen = false;
+  void syncOverlayMode();
 }
 
-function hideElfMenu() {
-  if (!elfMenu) {
-    return;
+function hideElfMenu(options: { sync?: boolean } = {}) {
+  isMenuOpen = false;
+  if (options.sync !== false) {
+    void syncOverlayMode();
   }
-  elfMenu.classList.remove("open");
-  elfMenu.setAttribute("aria-hidden", "true");
 }
 
 function toggleChatPanel() {
-  if (!chatPanel) {
-    return;
-  }
-  const isOpen = chatPanel.classList.toggle("open");
-  chatPanel.setAttribute("aria-hidden", String(!isOpen));
-  if (isOpen) {
-    window.setTimeout(() => {
-      chatInput?.focus();
-      autoResizeChatInput();
-    }, 0);
-  }
+  hideBubbleImmediately();
+  isChatPanelOpen = !isChatPanelOpen;
+  isMenuOpen = false;
+  void syncOverlayMode();
 }
 
-function hideChatPanel() {
-  if (!chatPanel) {
-    return;
+function hideChatPanel(options: { sync?: boolean } = {}) {
+  isChatPanelOpen = false;
+  if (options.sync !== false) {
+    void syncOverlayMode();
   }
-  chatPanel.classList.remove("open");
-  chatPanel.setAttribute("aria-hidden", "true");
 }
 
 function hideChoicePanel() {
-  if (!choicePanel) {
-    return;
-  }
   if (choiceCloseTimer !== null) {
     window.clearTimeout(choiceCloseTimer);
     choiceCloseTimer = null;
   }
-  choicePanel.classList.remove("open");
-  choicePanel.classList.remove("closing");
-  choicePanel.setAttribute("aria-hidden", "true");
-  choicePanel.onsubmit = null;
-  choicePanel.replaceChildren();
-  void setElfWindowMode("compact");
+  isChoicePanelOpen = false;
+  activeChoiceRequest = null;
+  void syncOverlayMode();
 }
 
 function closeChoicePanelWithAnimation(onClosed: () => void) {
-  if (!choicePanel) {
-    void setElfWindowMode("compact");
-    onClosed();
-    return;
-  }
   if (choiceCloseTimer !== null) {
     window.clearTimeout(choiceCloseTimer);
   }
-  choicePanel.classList.remove("open");
-  choicePanel.classList.add("closing");
-  choicePanel.setAttribute("aria-hidden", "true");
-  choicePanel.onsubmit = null;
   choiceCloseTimer = window.setTimeout(() => {
-    choicePanel.classList.remove("closing");
-    choicePanel.replaceChildren();
     choiceCloseTimer = null;
-    void setElfWindowMode("compact");
+    isChoicePanelOpen = false;
+    activeChoiceRequest = null;
+    void syncOverlayMode();
     onClosed();
   }, 190);
 }
 
-async function setElfWindowMode(mode: "compact" | "choice") {
-  if (isLinuxElfWindow || elfWindowMode === mode) {
+async function syncOverlayMode() {
+  if (isLinuxElfWindow) {
     return;
   }
-  elfWindowMode = mode;
-  const width = mode === "choice" ? ELF_CHOICE_WINDOW_WIDTH : ELF_COMPACT_WINDOW_WIDTH;
-  try {
-    await currentWindow.setSize(new LogicalSize(width, ELF_WINDOW_HEIGHT));
-  } catch {
-    // Older desktop permission/config states may reject resizing; the elf still remains usable.
+  const previousMode = overlayMode;
+  const nextMode = resolveOverlayMode();
+  overlayMode = nextMode;
+  const overlay = await ensureOverlayWindow();
+  if (!overlay) {
+    return;
+  }
+  if (nextMode === "hidden") {
+    await currentWindow.emitTo("elf_overlay", "elf-overlay-state", overlayStateForMode(nextMode)).catch(() => {});
+    await overlay.hide().catch(() => {});
+    return;
+  }
+  if (previousMode !== "hidden" && overlayGeometryGroup(previousMode) !== overlayGeometryGroup(nextMode)) {
+    await currentWindow.emitTo("elf_overlay", "elf-overlay-state", overlayStateForMode("hidden")).catch(() => {});
+    await overlay.hide().catch(() => {});
+  }
+  await positionOverlayWindow(overlay, nextMode);
+  await currentWindow.emitTo("elf_overlay", "elf-overlay-state", overlayStateForMode(nextMode)).catch(() => {});
+  await overlay.show().catch(() => {});
+  await currentWindow.emitTo("elf_overlay", "elf-overlay-state", overlayStateForMode(nextMode)).catch(() => {});
+  if (nextMode === "chat" || nextMode === "choice") {
+    await overlay.setFocus().catch(() => {});
+  }
+}
+
+async function setElfWindowMode(_mode: OverlayMode) {
+  await syncOverlayMode();
+}
+
+function resolveOverlayMode(): OverlayMode {
+  if (isChoicePanelOpen) {
+    return "choice";
+  }
+  if (isBubbleVisible || isElfChatRunning || isElfSpeaking) {
+    return "bubble";
+  }
+  if (isMenuOpen) {
+    return "menu";
+  }
+  if (isChatPanelOpen) {
+    return "chat";
+  }
+  return "hidden";
+}
+
+function overlayStateForMode(mode: OverlayMode): OverlayState {
+  return {
+    mode,
+    bubbleText,
+    chatDisabled: isElfBusy(),
+    choiceRequest: mode === "choice" ? activeChoiceRequest ?? undefined : undefined,
+  };
+}
+
+async function initializeOverlayWindow() {
+  const overlay = await ensureOverlayWindow();
+  await overlay?.hide().catch(() => {});
+  await currentWindow.setSize(new LogicalSize(ELF_SPRITE_WINDOW_WIDTH, ELF_SPRITE_WINDOW_HEIGHT)).catch(() => {});
+}
+
+async function ensureOverlayWindow() {
+  if (isLinuxElfWindow) {
+    return null;
+  }
+  if (!overlayWindow) {
+    overlayWindow = await WebviewWindow.getByLabel("elf_overlay");
+  }
+  return overlayWindow;
+}
+
+async function positionOverlayWindow(overlay: WebviewWindow, mode: OverlayMode) {
+  const position = await currentWindow.outerPosition();
+  const scaleFactor = await currentWindow.scaleFactor();
+  const geometry = overlayGeometryForMode(mode);
+  await overlay.setSize(new LogicalSize(geometry.width, geometry.height));
+  await overlay.setPosition(
+    new PhysicalPosition(
+      position.x + Math.round(geometry.x * scaleFactor),
+      position.y + Math.round(geometry.y * scaleFactor),
+    ),
+  );
+}
+
+function overlayGeometryForMode(mode: OverlayMode) {
+  if (mode === "choice") {
+    return { width: ELF_CHOICE_WINDOW_WIDTH, height: 360, x: -30, y: -30 };
+  }
+  if (mode === "bubble") {
+    return { width: ELF_COMPACT_WINDOW_WIDTH, height: 120, x: -30, y: -120 };
+  }
+  return { width: ELF_COMPACT_WINDOW_WIDTH, height: 130, x: -30, y: 170 };
+}
+
+function overlayGeometryGroup(mode: OverlayMode) {
+  if (mode === "choice") {
+    return "choice";
+  }
+  if (mode === "bubble") {
+    return "bubble";
+  }
+  if (mode === "menu" || mode === "chat") {
+    return "panel";
+  }
+  return "hidden";
+}
+
+function hideBubbleImmediately() {
+  if (bubbleHideTimer !== null) {
+    window.clearTimeout(bubbleHideTimer);
+    bubbleHideTimer = null;
+  }
+  if (bubbleSequenceTimer !== null) {
+    window.clearTimeout(bubbleSequenceTimer);
+    bubbleSequenceTimer = null;
+  }
+  isBubbleVisible = false;
+  bubbleText = "";
+}
+
+async function handleOverlayCommand(command: OverlayCommand) {
+  if (command.type === "open-app") {
+    hideElfMenu();
+    await openAiMemo().catch(() => setBubble("打开 AiMemo 失败。"));
+    return;
+  }
+  if (command.type === "show-chat") {
+    isMenuOpen = false;
+    isChatPanelOpen = true;
+    await syncOverlayMode();
+    return;
+  }
+  if (command.type === "chat-submit") {
+    const message = command.message.trim();
+    if (!message || isElfBusy()) {
+      return;
+    }
+    await streamElfChat(message, { voiceReply: isElfVoiceModeEnabled }).catch((error) => {
+      console.error("[memo-elf] chat stream failed", error);
+      setBubble(formatElfErrorBubble(error, "刚才没连上对话服务。"));
+      clearBubbleAfter(4500);
+    });
+    return;
+  }
+  if (command.type === "close-panels") {
+    hideElfMenu({ sync: false });
+    hideChatPanel({ sync: false });
+    await syncOverlayMode();
+    return;
+  }
+  if (command.type === "choice-submit") {
+    pendingChoiceResolver?.(command.answer);
+    pendingChoiceResolver = null;
+    return;
+  }
+  if (command.type === "voice-start") {
+    await startVoiceRecording().catch((error) => {
+      console.error("[memo-elf] microphone failed", error);
+      setBubble("麦克风暂时没连上，请检查浏览器/系统录音权限。");
+      clearBubbleAfter(4200);
+    });
+    return;
+  }
+  if (command.type === "voice-stop") {
+    stopVoiceRecording();
   }
 }
 
@@ -497,6 +669,61 @@ async function startElfVoiceModePolling() {
       // 模式轮询失败时保持上一次状态，不刷屏。
     });
   }, 2500);
+}
+
+async function startElfChatStatusPolling() {
+  await pollElfChatStatus().catch(() => {});
+  window.setInterval(() => {
+    pollElfChatStatus().catch(() => {
+      // 后端重启时保持当前 UI 状态，避免桌面精灵刷屏。
+    });
+  }, 2500);
+}
+
+async function pollElfChatStatus() {
+  if (isElfChatRunning || isElfSpeaking || isChoicePanelOpen) {
+    return;
+  }
+  const response = await fetch(ELF_RUNTIME_STATUS_URL, { cache: "no-store" });
+  if (!response.ok) {
+    return;
+  }
+  const status = (await response.json()) as {
+    busy?: boolean;
+    status?: string;
+    message?: string;
+    turn_id?: number | null;
+    pending_interrupt?: unknown;
+    last_error?: string;
+    last_message?: string;
+  };
+  const busy = status.busy === true;
+  const nextStatus = String(status.status || (busy ? "running" : "idle"));
+  const nextMessage = String(status.message || "");
+  if (busy === isElfBackendBusy && nextStatus === elfBackendStatus && nextMessage === elfBackendMessage) {
+    return;
+  }
+  isElfBackendBusy = busy;
+  elfBackendStatus = nextStatus;
+  elfBackendMessage = nextMessage;
+  if (busy) {
+    setBubble(nextMessage || "精灵上一轮回复仍在后台处理中。");
+    setElfExpression(expressionFromEmoji(nextStatus === "waiting_user_input" ? "curious" : "working_focus"));
+    if (
+      nextStatus === "waiting_user_input" &&
+      typeof status.turn_id === "number" &&
+      status.pending_interrupt &&
+      !isChoicePanelOpen
+    ) {
+      void recoverElfChoiceFromRuntime(status.turn_id, status.pending_interrupt);
+    }
+  } else {
+    isBubbleVisible = false;
+    bubbleText = "";
+    resetElfBackendStatus();
+    resetElfExpression();
+    void syncOverlayMode();
+  }
 }
 
 async function pollElfVoiceMode() {
@@ -638,16 +865,18 @@ function applyElfEvent(event: ElfEvent) {
 async function streamElfChat(message: string, options: { voiceReply: boolean } = { voiceReply: false }) {
   isElfChatRunning = true;
   isElfSpeaking = false;
+  resetElfBackendStatus();
   activeToolCallIds = new Set<string>();
   toolProgressCount = 0;
   streamingBubbleJsonBuffer = "";
   streamedBubbleCount = 0;
   queuedVoiceBubbleTextKeys = new Set<string>();
   setChatInputEnabled(false);
-  hideChatPanel();
+  hideElfMenu({ sync: false });
+  hideChatPanel({ sync: false });
   clearBubbleSequence();
   clearVoicePlayback();
-  showChatBubble({ text: "嗯，我听着。", emoji: "thinking" }, 2600);
+  showChatBubble({ text: "收到，我看看。", emoji: "working_focus" }, 2600);
 
   try {
     const response = await fetch(ELF_CHAT_STREAM_URL, {
@@ -786,7 +1015,7 @@ function applyElfToolProgress(data: Record<string, unknown>) {
   showChatBubble(
     {
       text: describeFinishedTool(toolName, data, ok),
-      emoji: ok ? "thinking" : "error_worried",
+      emoji: ok ? "success_smile" : "error_worried",
     },
     ok ? 3600 : 6200,
   );
@@ -849,6 +1078,34 @@ async function resumeElfChoice(event: ElfInterruptEvent): Promise<ElfChatStreamR
     throw new Error(`Elf chat resume failed with ${response.status}`);
   }
   return readElfChatStream(response, { voiceReply: isElfVoiceModeEnabled });
+}
+
+async function recoverElfChoiceFromRuntime(turnId: number, request: unknown) {
+  if (isElfChatRunning || isElfSpeaking || isChoicePanelOpen) {
+    return;
+  }
+  isElfChatRunning = true;
+  setChatInputEnabled(false);
+  hideElfMenu({ sync: false });
+  hideChatPanel({ sync: false });
+  clearBubbleSequence();
+  clearVoicePlayback();
+  showChatBubble(
+    { text: "刚才我停在一个选择上，继续选一下我就能接着做。", emoji: "curious" },
+    90000,
+    { autoHide: false },
+  );
+  try {
+    const result = await resumeElfChoice({ turn_id: turnId, request });
+    const finalParts = result.bubbles.length > 0 ? result.bubbles : splitAnswerIntoBubbleParts(result.answer);
+    void playBubbleSequence(finalParts, { voiceReply: isElfVoiceModeEnabled });
+  } catch (error) {
+    isElfChatRunning = false;
+    clearVoicePlayback();
+    setChatInputEnabled(true);
+    setBubble(formatElfErrorBubble(error, "刚才那轮恢复失败了，重新说一遍就好。"));
+    clearBubbleAfter(5200);
+  }
 }
 
 function choiceAckText(answer: UserInputAnswer) {
@@ -934,6 +1191,17 @@ function normalizeUserInputOptions(rawOptions: unknown, idPrefix: string): UserI
 }
 
 function showChoicePanel(request: UserInputRequest): Promise<UserInputAnswer> {
+  hideElfMenu({ sync: false });
+  hideChatPanel({ sync: false });
+  activeChoiceRequest = request;
+  isChoicePanelOpen = true;
+  void syncOverlayMode();
+  return new Promise((resolve) => {
+    pendingChoiceResolver = (answer) => {
+      closeChoicePanelWithAnimation(() => resolve(answer));
+    };
+  });
+
   return new Promise((resolve) => {
     if (!choicePanel) {
       resolve({
@@ -1192,7 +1460,8 @@ async function playBubbleSequence(parts: ChatBubblePart[], options: { voiceReply
   }
 
   if (!options.voiceReply) {
-    isElfSpeaking = false;
+    isElfSpeaking = true;
+    setChatInputEnabled(false);
     playTextBubbleSequence(parts);
     return;
   }
@@ -1217,13 +1486,14 @@ function playTextBubbleSequence(parts: ChatBubblePart[]) {
       return;
     }
     const ttlMs = bubbleDurationMs(part.text);
-    showChatBubble(part, ttlMs);
+    showChatBubble(part, ttlMs, { autoHide: false });
     index += 1;
     if (index < parts.length) {
       bubbleSequenceTimer = window.setTimeout(showNext, ttlMs + 420);
     } else {
       bubbleSequenceTimer = window.setTimeout(() => {
         bubbleSequenceTimer = null;
+        isBubbleVisible = false;
         resetElfExpression();
         finishElfTurn();
       }, ttlMs + 420);
@@ -1240,7 +1510,7 @@ function clearBubbleSequence() {
 }
 
 function isElfBusy() {
-  return isElfChatRunning || isElfSpeaking;
+  return isElfChatRunning || isElfSpeaking || isElfBackendBusy;
 }
 
 function enqueueVoiceBubbles(parts: ChatBubblePart[], options: { voiceReply: boolean } = { voiceReply: false }) {
@@ -1290,7 +1560,7 @@ async function drainVoiceQueue(generation: number) {
   const tailDelayMs = lastPart ? Math.min(3200, Math.max(900, bubbleDurationMs(lastPart.text) * 0.35)) : 420;
   bubbleSequenceTimer = window.setTimeout(() => {
     bubbleSequenceTimer = null;
-    bubble?.classList.remove("visible");
+    isBubbleVisible = false;
     resetElfExpression();
     finishElfTurn();
   }, tailDelayMs);
@@ -1478,6 +1748,7 @@ function stopCurrentVoicePlayback() {
 function finishElfTurn() {
   isElfChatRunning = false;
   isElfSpeaking = false;
+  resetElfBackendStatus();
   setChatInputEnabled(true);
   hideChoicePanel();
 }
@@ -1912,6 +2183,22 @@ interface UserInputAnswer {
     is_other?: boolean;
   }>;
 }
+
+interface OverlayState {
+  mode: OverlayMode;
+  bubbleText?: string;
+  chatDisabled?: boolean;
+  choiceRequest?: UserInputRequest;
+}
+
+type OverlayCommand =
+  | { type: "open-app" }
+  | { type: "show-chat" }
+  | { type: "chat-submit"; message: string }
+  | { type: "close-panels" }
+  | { type: "choice-submit"; answer: UserInputAnswer }
+  | { type: "voice-start" }
+  | { type: "voice-stop" };
 
 type ElfBubbleEmoji =
   | "idle_soft"
