@@ -3,6 +3,7 @@ set -euo pipefail
 
 SKIP_INSTALL=0
 NO_DESKTOP=0
+SKIP_DOCTOR=0
 DESKTOP_SKIP_REASON=""
 for arg in "$@"; do
   case "$arg" in
@@ -12,9 +13,12 @@ for arg in "$@"; do
     --no-desktop)
       NO_DESKTOP=1
       ;;
+    --skip-doctor)
+      SKIP_DOCTOR=1
+      ;;
     *)
       echo "Unknown argument: $arg" >&2
-      echo "Usage: ./scripts/start-dev.sh [--skip-install] [--no-desktop]" >&2
+      echo "Usage: ./scripts/start-dev.sh [--skip-install] [--no-desktop] [--skip-doctor]" >&2
       exit 1
       ;;
   esac
@@ -189,6 +193,24 @@ ensure_frontend_dist_for_backend_app() {
   )
 }
 
+run_quick_doctor() {
+  if [[ "$SKIP_DOCTOR" -eq 1 || ! -f "$SCRIPT_DIR/doctor.sh" ]]; then
+    return 0
+  fi
+
+  echo "Running AiMemo doctor quick check..."
+  local doctor_args=(--non-interactive)
+  if [[ "$NO_DESKTOP" -eq 1 ]]; then
+    doctor_args+=(--no-desktop)
+  fi
+
+  if ! "$SCRIPT_DIR/doctor.sh" "${doctor_args[@]}"; then
+    echo "Warning: AiMemo doctor reported issues. start-dev will continue with the current compatibility startup path." >&2
+    echo "For a focused report, run: ./scripts/doctor.sh" >&2
+  fi
+}
+
+run_quick_doctor
 assert_node_version
 "$SCRIPT_DIR/stop-dev.sh"
 warn_linux_file_watch_limit

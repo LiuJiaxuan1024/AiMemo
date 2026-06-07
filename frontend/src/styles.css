@@ -2167,7 +2167,7 @@ textarea {
 .chat-sidebar button,
 .chat-main-header span,
 .chat-debug-panel button,
-.chat-message-bubble button:not(.chat-interrupt-option):not(.segment-followup-mark),
+.chat-message-bubble button:not(.chat-interrupt-option):not(.segment-followup-mark):not(.markdown-code-copy),
 .chat-input-bar button {
   border-radius: 6px;
   font-weight: 650;
@@ -2175,7 +2175,7 @@ textarea {
 
 .chat-sidebar header button,
 .chat-debug-panel button,
-.chat-message-bubble button:not(.chat-interrupt-option):not(.segment-followup-mark) {
+.chat-message-bubble button:not(.chat-interrupt-option):not(.segment-followup-mark):not(.markdown-code-copy) {
   background: var(--color-bg-surface);
   border: 1px solid var(--color-border-subtle);
   color: var(--color-text-body);
@@ -2580,7 +2580,11 @@ textarea {
 }
 
 .chat-message {
+  align-items: flex-start;
   display: flex;
+  gap: var(--space-2);
+  min-width: 0;
+  width: 100%;
 }
 
 .chat-message.user {
@@ -2594,8 +2598,8 @@ textarea {
 .chat-message-bubble {
   align-items: flex-start;
   border-radius: var(--radius-md);
-  display: flex;
-  gap: var(--space-2);
+  display: block;
+  flex: 0 1 auto;
   max-width: min(760px, 82%);
   min-width: 0;
   padding: var(--space-3) var(--space-4);
@@ -2608,6 +2612,7 @@ textarea {
   display: grid;
   flex: 0 0 auto;
   gap: 6px;
+  margin-top: 0;
 }
 
 .chat-message-actions .ui-button.is-active {
@@ -2641,6 +2646,7 @@ textarea {
   gap: 8px;
   max-width: 100%;
   min-width: 0;
+  overflow: hidden;
 }
 
 .chat-message.user .chat-message-bubble {
@@ -2656,6 +2662,7 @@ textarea {
   color: var(--color-text-body);
   border-bottom-left-radius: var(--radius-xs);
   box-shadow: var(--shadow-sm);
+  max-width: min(760px, calc(100% - 46px));
 }
 
 .chat-message.assistant .chat-message-bubble:hover {
@@ -3559,10 +3566,12 @@ textarea {
 }
 
 .markdown-message {
+  box-sizing: border-box;
   line-height: 1.7;
   max-width: 100%;
   min-width: 0;
   overflow-wrap: anywhere;
+  width: 100%;
 }
 
 .markdown-message > :first-child {
@@ -3637,6 +3646,85 @@ textarea {
   max-width: 100%;
   overflow: auto;
   padding: 12px;
+}
+
+.markdown-code-block {
+  background: #0f172a;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 8px;
+  box-sizing: border-box;
+  margin: 10px 0 12px;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  width: 100%;
+}
+
+.markdown-code-block__toolbar {
+  align-items: center;
+  background: #111827;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  min-height: 34px;
+  padding: 4px 8px 4px 12px;
+}
+
+.markdown-code-block__language {
+  color: #94a3b8;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.markdown-code-copy {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: #94a3b8;
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  height: 28px;
+  justify-content: center;
+  line-height: 1;
+  padding: 0;
+  width: 28px;
+}
+
+.markdown-code-copy:hover:not(:disabled) {
+  background: rgba(148, 163, 184, 0.14);
+  border-color: rgba(148, 163, 184, 0.18);
+  color: #e5e7eb;
+}
+
+.markdown-code-copy:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.markdown-code-copy.is-copied {
+  background: rgba(34, 197, 94, 0.1);
+  border-color: rgba(74, 222, 128, 0.18);
+  color: #86efac;
+}
+
+.markdown-code-copy svg {
+  height: 15px;
+  width: 15px;
+}
+
+.markdown-message .markdown-code-block pre {
+  border-radius: 0;
+  margin: 0;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .markdown-message pre code {
@@ -4249,7 +4337,7 @@ textarea {
   }
 }
 
-.chat-message-bubble button:not(.chat-interrupt-option):not(.segment-followup-mark) {
+.chat-message-bubble button:not(.chat-interrupt-option):not(.segment-followup-mark):not(.markdown-code-copy) {
   align-items: center;
   display: inline-flex;
   flex: 0 0 auto;

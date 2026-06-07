@@ -1,6 +1,7 @@
 param(
   [switch]$SkipInstall,
-  [switch]$NoDesktop
+  [switch]$NoDesktop,
+  [switch]$SkipDoctor
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,6 +9,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $backendScript = Join-Path $PSScriptRoot "start-backend.ps1"
 $frontendScript = Join-Path $PSScriptRoot "start-frontend.ps1"
+$doctorScript = Join-Path $PSScriptRoot "doctor.ps1"
 $desktopDir = Join-Path $repoRoot "desktop"
 $stopScript = Join-Path $PSScriptRoot "stop-dev.ps1"
 $frontendDir = Join-Path $repoRoot "frontend"
@@ -269,6 +271,30 @@ function Ensure-FrontendDistForBackendApp {
   }
 }
 
+function Invoke-QuickDoctor {
+  if ($SkipDoctor -or -not (Test-Path $doctorScript)) {
+    return
+  }
+
+  Write-Host "Running AiMemo doctor quick check..."
+  $doctorArgs = @("-NonInteractive")
+  if ($NoDesktop) {
+    $doctorArgs += "-NoDesktop"
+  }
+
+  try {
+    & $doctorScript @doctorArgs
+    if ($LASTEXITCODE -ne 0) {
+      Write-Warning "AiMemo doctor reported issues. start-dev will continue with the current compatibility startup path."
+      Write-Warning "For a focused report, run: .\scripts\doctor.ps1"
+    }
+  }
+  catch {
+    Write-Warning "AiMemo doctor failed to run: $($_.Exception.Message)"
+  }
+}
+
+Invoke-QuickDoctor
 Assert-NodeVersion
 & $stopScript
 Ensure-FrontendDependencies

@@ -238,33 +238,33 @@ export function MessageList({
                   />
                 ) : null}
               </div>
-              {isAssistant && message.turn_id ? (
-                <div className="chat-message-actions">
-                  <Button
-                    aria-label="查看片段追问"
-                    className={`chat-message-action--followups ${activeFollowupSourceId === message.id ? "is-active" : ""}`}
-                    onClick={() => onOpenFollowups(message)}
-                    size="icon"
-                    title="查看片段追问"
-                  >
-                    <MessageCircleQuestion aria-hidden="true" size={16} />
-                    {hasMessageFollowups(message) ? (
-                      <span className="chat-message-action-dot" aria-hidden="true">
-                        <MoreHorizontal size={12} />
-                      </span>
-                    ) : null}
-                  </Button>
-                  <Button
-                    aria-label="查看本轮 graph"
-                    onClick={() => onOpenGraph(message)}
-                    size="icon"
-                    title="查看本轮 graph"
-                  >
-                    <GitBranch aria-hidden="true" size={16} />
-                  </Button>
-                </div>
-              ) : null}
             </div>
+            {isAssistant && message.turn_id ? (
+              <div className="chat-message-actions">
+                <Button
+                  aria-label="查看片段追问"
+                  className={`chat-message-action--followups ${activeFollowupSourceId === message.id ? "is-active" : ""}`}
+                  onClick={() => onOpenFollowups(message)}
+                  size="icon"
+                  title="查看片段追问"
+                >
+                  <MessageCircleQuestion aria-hidden="true" size={16} />
+                  {hasMessageFollowups(message) ? (
+                    <span className="chat-message-action-dot" aria-hidden="true">
+                      <MoreHorizontal size={12} />
+                    </span>
+                  ) : null}
+                </Button>
+                <Button
+                  aria-label="查看本轮 graph"
+                  onClick={() => onOpenGraph(message)}
+                  size="icon"
+                  title="查看本轮 graph"
+                >
+                  <GitBranch aria-hidden="true" size={16} />
+                </Button>
+              </div>
+            ) : null}
           </article>
         );
       })}

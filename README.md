@@ -204,7 +204,44 @@ DASHSCOPE_API_KEY=你的百炼 API Key
 
 ### 3. 一键开发启动
 
-开发时推荐一键启动前后端。脚本会分别启动：
+开发时推荐使用统一命令入口启动。第一次 clone 后，可以先注册全局
+`aimemo` 命令：
+
+Windows PowerShell：
+
+```powershell
+.\scripts\register-aimemo.ps1
+```
+
+Linux / macOS：
+
+```bash
+chmod +x scripts/*.sh
+./scripts/register-aimemo.sh
+```
+
+注册后，当前终端或新打开的终端可以直接运行：
+
+```powershell
+aimemo doctor
+aimemo start
+aimemo stop
+```
+
+如果暂时不想注册，也可以用仓库内路由脚本：
+
+```powershell
+.\scripts\aimemo.ps1 doctor
+.\scripts\aimemo.ps1 start
+```
+
+```bash
+chmod +x scripts/*.sh
+./scripts/aimemo.sh doctor
+./scripts/aimemo.sh start
+```
+
+`aimemo start` 会分别启动：
 
 ```text
 后端 FastAPI: http://127.0.0.1:8000
@@ -217,27 +254,14 @@ DASHSCOPE_API_KEY=你的百炼 API Key
 `npm run build`。Windows 后端开发启动默认启用 uvicorn reload，因此 Python
 源码修改后会自动重载进程。
 
-Windows PowerShell：
+依赖已经安装好时，可以跳过安装检查：
 
 ```powershell
-.\scripts\start-dev.ps1
-```
-
-Linux / macOS：
-
-```bash
-chmod +x scripts/start-dev.sh scripts/start-backend.sh scripts/start-frontend.sh
-./scripts/start-dev.sh
-```
-
-依赖已经安装好时：
-
-```powershell
-.\scripts\start-dev.ps1 -SkipInstall
+aimemo start -SkipInstall
 ```
 
 ```bash
-./scripts/start-dev.sh --skip-install
+aimemo start --skip-install
 ```
 
 后端脚本会确保 `backend/.venv` 使用 Python 3.12。如果已有虚拟环境不是 Python 3.12，会自动重建；Windows 在找不到 Python 3.12 时会尝试通过 `winget` 安装。也可以用 `AIMEMO_PYTHON` 指向指定的 Python 3.12 解释器。
@@ -249,21 +273,21 @@ chmod +x scripts/start-dev.sh scripts/start-backend.sh scripts/start-frontend.sh
 如果只想调试 Web，不启动桌面精灵：
 
 ```powershell
-.\scripts\start-dev.ps1 -NoDesktop
+aimemo start -NoDesktop
 ```
 
 ```bash
-./scripts/start-dev.sh --no-desktop
+aimemo start --no-desktop
 ```
 
 停止所有开发进程：
 
 ```powershell
-.\scripts\stop-dev.ps1
+aimemo stop
 ```
 
 ```bash
-./scripts/stop-dev.sh
+aimemo stop
 ```
 
 `stop-dev` 会停止后端、Vite 前端、Tauri desktop webview 和残留的 Memo Elf 桌面进程，避免重复启动后出现多个精灵。

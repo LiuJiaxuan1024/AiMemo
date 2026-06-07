@@ -73,17 +73,62 @@ LOCAL_OPERATOR_WORKSPACE_ROOTS=E:\Ai记;D:\资料;~/Documents
 
 开发时推荐用一键脚本同时启动后端、Vite 前端和桌面外置精灵。
 
-Windows PowerShell：
+Windows 可以先注册全局 `aimemo` 命令。当前注册脚本只写入用户级 wrapper 和 PATH，不安装 Python / Node / Rust：
 
 ```powershell
-.\scripts\start-dev.ps1
+.\scripts\register-aimemo.ps1
+```
+
+也可以通过统一入口调用同一套注册逻辑：
+
+```powershell
+.\scripts\aimemo.ps1 register
 ```
 
 Linux / macOS：
 
 ```bash
-chmod +x scripts/start-dev.sh scripts/start-backend.sh scripts/start-frontend.sh
-./scripts/start-dev.sh
+chmod +x scripts/*.sh
+./scripts/register-aimemo.sh
+```
+
+也可以通过统一入口调用同一套注册逻辑：
+
+```bash
+./scripts/aimemo.sh register
+```
+
+注册后，当前终端或新打开的终端可以直接运行：
+
+```powershell
+aimemo doctor
+aimemo start
+aimemo stop
+```
+
+如果只想查看会执行哪些动作：
+
+```powershell
+.\scripts\register-aimemo.ps1 -DryRun
+```
+
+Linux / macOS：
+
+```bash
+./scripts/register-aimemo.sh --dry-run
+```
+
+Windows PowerShell：
+
+```powershell
+.\scripts\aimemo.ps1 start
+```
+
+Linux / macOS：
+
+```bash
+chmod +x scripts/*.sh
+./scripts/aimemo.sh start
 ```
 
 启动后访问：
@@ -128,13 +173,13 @@ Rust/Cargo 不存在
 Windows PowerShell：
 
 ```powershell
-.\scripts\start-dev.ps1 -SkipInstall
+.\scripts\aimemo.ps1 start -SkipInstall
 ```
 
 Linux / macOS：
 
 ```bash
-./scripts/start-dev.sh --skip-install
+./scripts/aimemo.sh start --skip-install
 ```
 
 如果只想调试 Web，不启动桌面精灵：
@@ -142,13 +187,42 @@ Linux / macOS：
 Windows PowerShell：
 
 ```powershell
-.\scripts\start-dev.ps1 -NoDesktop
+.\scripts\aimemo.ps1 start -NoDesktop
 ```
 
 Linux / macOS：
 
 ```bash
-./scripts/start-dev.sh --no-desktop
+./scripts/aimemo.sh start --no-desktop
+```
+
+启动前也可以先运行环境诊断。第一版 doctor 只检查状态，不会安装或修改依赖：
+
+Windows PowerShell：
+
+```powershell
+.\scripts\aimemo.ps1 doctor
+```
+
+Linux / macOS：
+
+```bash
+chmod +x scripts/*.sh
+./scripts/aimemo.sh doctor
+```
+
+`start-dev` 默认会先跑一次非阻塞快速诊断；即使诊断发现问题，仍会继续沿用当前兼容启动逻辑。若想跳过：
+
+Windows PowerShell：
+
+```powershell
+.\scripts\aimemo.ps1 start -SkipDoctor
+```
+
+Linux / macOS：
+
+```bash
+./scripts/aimemo.sh start --skip-doctor
 ```
 
 停止所有开发进程：
@@ -156,13 +230,13 @@ Linux / macOS：
 Windows PowerShell：
 
 ```powershell
-.\scripts\stop-dev.ps1
+.\scripts\aimemo.ps1 stop
 ```
 
 Linux / macOS：
 
 ```bash
-./scripts/stop-dev.sh
+./scripts/aimemo.sh stop
 ```
 
 `stop-dev` 会停止后端、Vite 前端、Tauri desktop webview 和残留的 Memo Elf 桌面进程，避免重复启动后出现多个精灵。
