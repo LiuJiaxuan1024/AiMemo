@@ -189,11 +189,17 @@ export function MarkdownEditor({
     <BlockNoteView
       className={classes}
       editor={editor}
+      formattingToolbar
+      linkToolbar
       onChange={(nextEditor) => {
         const nextValue = serializeEditor(nextEditor);
         lastSourceRef.current = nextValue.blocksJson;
         onChange(nextValue);
       }}
+      portalElements={{ default: null }}
+      sideMenu
+      slashMenu
+      tableHandles
       theme="light"
     />
   );

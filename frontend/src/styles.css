@@ -819,9 +819,11 @@ textarea {
 
 .composer-fields {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: max-content minmax(0, 1fr);
   gap: 10px;
   min-height: 0;
+  overflow: hidden;
+  padding-right: 2px;
 }
 
 .composer input,
@@ -848,32 +850,43 @@ textarea {
   --bn-font-family:
     system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif;
-  border: 1px solid #cbd2e1;
+  border: 1px solid transparent;
   border-radius: 8px;
+  background: #ffffff;
   display: block;
   font-family:
     system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif;
   min-height: 0;
-  overflow: hidden;
+  overflow: visible;
+  overscroll-behavior: contain;
 }
 
 .note-block-editor:focus-within {
-  border-color: var(--color-brand-500);
-  box-shadow: var(--shadow-focus);
+  border-color: transparent;
+  box-shadow: none;
 }
 
 .note-block-editor .bn-container,
-.note-block-editor .bn-root,
-.note-block-editor .bn-editor {
-  height: 100%;
+.note-block-editor .bn-root {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  height: auto;
   min-height: 0;
   width: 100%;
 }
 
 .note-block-editor .bn-editor {
+  background: transparent;
+  border: 0;
+  box-sizing: border-box;
   border-radius: 0;
+  box-shadow: none;
+  height: auto;
+  min-height: 0;
   padding: 18px 20px 32px;
+  width: 100%;
 }
 
 .note-block-editor .bn-block-content[data-content-type="codeBlock"] {
@@ -902,6 +915,9 @@ textarea {
 .composer-editor {
   height: 100%;
   min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .note-block-editor--loading {
