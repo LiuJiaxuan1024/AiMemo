@@ -95,9 +95,9 @@ def get_agent_chat_model_with_tools(tools: list[BaseTool]):
 def get_planner_chat_model() -> ChatOpenAI:
     """创建轻量规划模型。
 
-    planner 负责“是否检索 + query rewrite”这类会影响整轮回答质量的判断。
-    当前使用 qwen-turbo 降低 L3 worker 延迟；回答质量主要交给 generate_answer
-    使用的 qwen3.5-plus 和回答提示词控制。
+    planner 用于少量轻量 JSON 判断和可选 query rewrite。
+    个人笔记 L3 默认强制检索，不再用 planner 决定是否检索。
+    回答质量主要交给 qwen3.5-plus 和回答提示词控制。
     """
 
     global _planner_chat_model

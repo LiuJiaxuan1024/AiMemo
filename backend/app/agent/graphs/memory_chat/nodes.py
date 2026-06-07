@@ -352,15 +352,14 @@ def build_l3_retrieved_memory_node(
     retriever: NoteRetriever = search_notes,
     limit: int = 5,
 ):
-    """构建 L3 RAG 检索记忆层。
+    """构建 L3 个人笔记检索层。
 
-    L3 是唯一依赖检索规划的金字塔层。为了让主图变扁，plan/retrieve/grade
-    都下放到这个 worker 内部执行；L0/L1/L2/L4 不再等待检索链路。
+    个人笔记默认每轮检索，避免“看似常识的问题”遗漏用户笔记中的个人语境。
+    planner 只作为可选 query rewrite 辅助，不能再决定是否跳过检索。
     """
 
     def build_l3_retrieved_memory(state: MemoryChatGraphState) -> MemoryChatGraphState:
         user_message = _resolve_user_message(state)
-        recent_messages = state.get("recent_messages", [])
         total_started_at = now_counter()
         failed_stage = ""
         planner_elapsed_ms = 0
@@ -368,37 +367,49 @@ def build_l3_retrieved_memory_node(
         grade_elapsed_ms = 0
         layer_elapsed_ms = 0
         plan = RetrievalPlan(
-            intent="direct",
-            needs_retrieval=False,
+            intent="rag",
+            needs_retrieval=True,
             needs_query_rewrite=False,
-            retrieval_query="",
-            confidence=0.0,
-            reason="L3 检索未执行。",
-            source="fallback",
+            retrieval_query=user_message,
+            confidence=1.0,
+            reason="个人笔记默认强制检索，避免遗漏用户笔记中的深层语境。",
+            source="forced_note_rag",
         )
         retrieved_chunks: list[RetrievedChunkPayload] = []
         retrieval_grade: Literal["good", "weak", "poor", "none"] = "none"
-        retrieval_grade_reason = "本轮未查询个人知识库。"
+        retrieval_grade_reason = "尚未完成个人笔记检索。"
         retrieval_query = user_message
 
         try:
-            failed_stage = "planner"
-            planner_started_at = now_counter()
-            plan = (planner or default_retrieval_planner)(user_message, recent_messages)
-            planner_elapsed_ms = elapsed_ms(planner_started_at)
+            if planner is not None:
+                failed_stage = "planner"
+                planner_started_at = now_counter()
+                rewritten_plan = planner(user_message, state.get("recent_messages", []))
+                planner_elapsed_ms = elapsed_ms(planner_started_at)
+                plan = RetrievalPlan(
+                    intent="rag",
+                    needs_retrieval=True,
+                    needs_query_rewrite=rewritten_plan.needs_query_rewrite,
+                    retrieval_query=rewritten_plan.retrieval_query or user_message,
+                    confidence=rewritten_plan.confidence,
+                    reason=(
+                        f"{rewritten_plan.reason}；个人笔记默认强制检索，"
+                        "planner 仅用于 query rewrite。"
+                    ),
+                    source=rewritten_plan.source,
+                )
 
             retrieval_query = plan.retrieval_query or user_message
-            if plan.needs_retrieval:
-                failed_stage = "retriever"
-                with session_factory() as session:
-                    retriever_started_at = now_counter()
-                    results = retriever(session, query=retrieval_query, limit=limit)
-                    retriever_elapsed_ms = elapsed_ms(retriever_started_at)
-                retrieved_chunks = [_to_retrieved_chunk_payload(result) for result in results]
-                failed_stage = "grade"
-                grade_started_at = now_counter()
-                retrieval_grade, retrieval_grade_reason = _grade_retrieval_chunks(retrieved_chunks)
-                grade_elapsed_ms = elapsed_ms(grade_started_at)
+            failed_stage = "retriever"
+            with session_factory() as session:
+                retriever_started_at = now_counter()
+                results = retriever(session, query=retrieval_query, limit=limit)
+                retriever_elapsed_ms = elapsed_ms(retriever_started_at)
+            retrieved_chunks = [_to_retrieved_chunk_payload(result) for result in results]
+            failed_stage = "grade"
+            grade_started_at = now_counter()
+            retrieval_grade, retrieval_grade_reason = _grade_retrieval_chunks(retrieved_chunks)
+            grade_elapsed_ms = elapsed_ms(grade_started_at)
 
             failed_stage = "layer"
             layer_started_at = now_counter()
@@ -416,14 +427,14 @@ def build_l3_retrieved_memory_node(
                 "layer_ms": layer_elapsed_ms,
                 "total_ms": elapsed_ms(total_started_at),
                 "planner_source": plan.source,
-                "needs_retrieval": plan.needs_retrieval,
-                "retrieval_query": retrieval_query if plan.needs_retrieval else "",
+                "needs_retrieval": True,
+                "retrieval_query": retrieval_query,
                 "retrieved_count": len(retrieved_chunks),
             }
         except Exception as exc:
             # L3 是增强上下文，不应因为 embedding/API/检索链路波动阻断主对话。
             layer_started_at = now_counter()
-            layer = build_retrieved_memory_layer([], False, "none", _context_budget())
+            layer = build_retrieved_memory_layer([], True, "none", _context_budget())
             layer_elapsed_ms = elapsed_ms(layer_started_at)
             retrieval_debug = {
                 "planner_ms": planner_elapsed_ms,
@@ -432,8 +443,8 @@ def build_l3_retrieved_memory_node(
                 "layer_ms": layer_elapsed_ms,
                 "total_ms": elapsed_ms(total_started_at),
                 "planner_source": plan.source,
-                "needs_retrieval": False,
-                "retrieval_query": "",
+                "needs_retrieval": True,
+                "retrieval_query": retrieval_query,
                 "retrieved_count": 0,
                 "degraded": True,
                 "failed_stage": failed_stage or "unknown",
@@ -441,15 +452,14 @@ def build_l3_retrieved_memory_node(
                 "error": str(exc),
             }
             plan = RetrievalPlan(
-                intent="direct",
-                needs_retrieval=False,
+                intent="rag",
+                needs_retrieval=True,
                 needs_query_rewrite=False,
-                retrieval_query="",
+                retrieval_query=retrieval_query,
                 confidence=0.0,
                 reason="L3 检索失败，已降级为直接回答。",
                 source="fallback",
             )
-            retrieval_query = ""
             retrieved_chunks = []
             retrieval_grade = "none"
             retrieval_grade_reason = "L3 检索失败，已降级为直接回答。"
@@ -461,7 +471,7 @@ def build_l3_retrieved_memory_node(
             "intent": plan.intent,
             "needs_retrieval": plan.needs_retrieval,
             "needs_query_rewrite": plan.needs_query_rewrite,
-            "retrieval_query": retrieval_query if plan.needs_retrieval else "",
+            "retrieval_query": retrieval_query,
             "plan_confidence": plan.confidence,
             "retrieval_reason": plan.reason,
             "retrieved_chunks": retrieved_chunks,
@@ -479,7 +489,7 @@ def build_l3_knowledge_context_node(
     *,
     limit: int = 5,
 ):
-    """构建 L3 会话挂载知库层。
+    """构建 L3.5 会话挂载知库层。
 
     这层只读取当前 conversation 显式挂载的知识空间。没有挂载时不检索，
     避免 Agent 越过用户的二重防护边界去全局搜索知识库。
@@ -1776,7 +1786,7 @@ def _build_react_agent_system_prompt() -> str:
         "也不要绕过挂载边界做全局知库检索。"
         "只要当前对话已挂载知识空间，dispatch_context_workers 默认会先检索挂载资料；"
         "只有非常明确的闲聊或客观常识问题才会跳过首轮检索。"
-        "初始上下文中的 `L3 挂载知识库` 是首轮检索结果；"
+        "初始上下文中的 `L3.5 挂载知识空间检索` 是首轮检索结果；"
         "如果这些片段不足以回答，才调用 knowledge_search 做补充检索。"
         "同一问题补充检索时优先使用相同 query 加 retrieval_profile=\"expanded\"，"
         "让工具从本轮 recall_cache 扩充；只有问题角度变化、缓存不足或用户要求深查时，才改写 query 或使用 deep。"
@@ -2032,8 +2042,8 @@ def build_merge_prompt_context_node():
     def merge_prompt_context(state: MemoryChatGraphState) -> MemoryChatGraphState:
         payloads: list[ContextLayerPayload] = [
             _resolve_context_layer(state, "context_l4_layer"),
-            _resolve_context_layer(state, "context_l3_layer"),
             _resolve_context_layer(state, "context_l3_knowledge_layer"),
+            _resolve_context_layer(state, "context_l3_layer"),
             _resolve_context_layer(state, "context_l2_layer"),
             _resolve_context_layer(state, "context_l1_layer"),
             _resolve_context_layer(state, "context_lx_attachment_layer"),
@@ -3218,8 +3228,8 @@ def _build_knowledge_context_layer(
         note = "已挂载时默认检索；仅在明确闲聊或客观常识问题中跳过。"
 
     return ContextLayer(
-        level=3,
-        name="挂载知识库",
+        level=3.5,
+        name="挂载知识空间检索",
         content=content,
         budget_tokens=budget.retrieved_memory_tokens,
         used_tokens=count_tokens(content),

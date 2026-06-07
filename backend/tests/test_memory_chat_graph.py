@@ -56,7 +56,7 @@ def test_memory_chat_graph_direct_answer_persists_messages(
         assert user_message == "1+1 等于几？"
         assert recent_messages == []
         assert retrieved_chunks == []
-        assert needs_retrieval is False
+        assert needs_retrieval is True
         assert retrieval_grade == "none"
         return "1+1 等于 2。"
 
@@ -69,9 +69,12 @@ def test_memory_chat_graph_direct_answer_persists_messages(
     )
 
     messages = session.exec(select(ChatMessage).order_by(ChatMessage.id)).all()
-    assert result["needs_retrieval"] is False
+    assert result["needs_retrieval"] is True
     assert result["context_l4_layer"]["level"] == 4
+    assert result["context_l3_knowledge_layer"]["level"] == 3.5
+    assert result["context_l3_knowledge_layer"]["name"] == "挂载知识空间检索"
     assert result["context_l3_layer"]["level"] == 3
+    assert result["context_l3_layer"]["name"] == "个人笔记检索"
     assert result["context_l2_layer"]["level"] == 2
     assert result["context_l1_layer"]["level"] == 1
     assert result["context_l0_layer"]["level"] == 0
@@ -79,7 +82,8 @@ def test_memory_chat_graph_direct_answer_persists_messages(
     assert "L1 近期对话窗口" in result["prompt_context"]
     assert "L0 当前用户输入" in result["prompt_context"]
     assert "1+1 等于几？" in result["prompt_context"]
-    assert "本轮未查询个人知识库" in result["prompt_context"]
+    assert "L3 个人笔记检索" in result["prompt_context"]
+    assert "没有检索到足够可靠的笔记" in result["prompt_context"]
     assert [message.role for message in messages] == ["user", "assistant"]
     assert messages[0].content == "1+1 等于几？"
     assert messages[1].content == "1+1 等于 2。"
@@ -379,6 +383,8 @@ def test_l3_knowledge_context_requires_conversation_mount(session, session_facto
     assert update["mounted_knowledge_spaces"] == []
     assert update["needs_knowledge_retrieval"] is False
     assert update["knowledge_retrieved_chunks"] == []
+    assert update["context_l3_knowledge_layer"]["level"] == 3.5
+    assert update["context_l3_knowledge_layer"]["name"] == "挂载知识空间检索"
     assert "未挂载知识空间" in update["context_l3_knowledge_layer"]["content"]
     assert "不能搜索或引用全局知识库" in update["context_l3_knowledge_layer"]["content"]
 
@@ -1080,9 +1086,56 @@ def test_memory_chat_graph_retrieves_notes_when_needed(
     assert result["needs_retrieval"] is True
     assert result["retrieval_query"] == "我之前说过想吃什么？"
     assert result["retrieval_grade"] == "good"
-    assert "L3 RAG 检索记忆" in result["prompt_context"]
+    assert "L3 个人笔记检索" in result["prompt_context"]
     assert "今天中午我想点炸鸡吃" in result["prompt_context"]
     assert result["retrieved_chunks"][0]["content"] == "今天中午我想点炸鸡吃"
+
+
+def test_memory_chat_graph_forces_note_retrieval_for_common_fact_question(
+    session,
+    session_factory,
+    tmp_path: Path,
+):
+    conversation = create_conversation(session, ConversationCreate(title="常识题里的个人语境"))
+    retriever_calls: list[str] = []
+
+    def fake_retriever(current_session, *, query: str, limit: int):
+        assert current_session is not None
+        retriever_calls.append(query)
+        return [
+            NoteSearchResult(
+                note_id=8,
+                note_title="热力学复习",
+                chunk_id=18,
+                chunk_index=0,
+                content="我在热力学笔记里记录过：水结冰时关注相变、潜热和分子排列变化。",
+                content_hash="hash",
+                token_count=28,
+                distance=0.08,
+                score=0.93,
+            )
+        ]
+
+    def fake_answer(user_message, recent_messages, retrieved_chunks, needs_retrieval, retrieval_grade):
+        assert user_message == "水为什么会结冰？"
+        assert needs_retrieval is True
+        assert retrieval_grade == "good"
+        assert retrieved_chunks[0]["note_title"] == "热力学复习"
+        return "你笔记里把它放在相变角度理解。"
+
+    result = run_memory_chat_graph(
+        conversation_id=conversation.id,
+        user_message="水为什么会结冰？",
+        session_factory=session_factory,
+        checkpoint_path=str(tmp_path / "checkpoints.db"),
+        retriever=fake_retriever,
+        answer_generator=fake_answer,
+    )
+
+    assert retriever_calls == ["水为什么会结冰？"]
+    assert result["needs_retrieval"] is True
+    assert result["retrieval_debug"]["planner_source"] == "forced_note_rag"
+    assert "水结冰时关注相变" in result["prompt_context"]
 
 
 def test_memory_chat_graph_degrades_when_l3_retriever_fails(
@@ -1110,7 +1163,7 @@ def test_memory_chat_graph_degrades_when_l3_retriever_fails(
 
     def fake_answer(user_message, recent_messages, retrieved_chunks, needs_retrieval, retrieval_grade):
         assert retrieved_chunks == []
-        assert needs_retrieval is False
+        assert needs_retrieval is True
         assert retrieval_grade == "none"
         return "检索暂时不可用，但我还能继续回答。"
 
@@ -1124,7 +1177,7 @@ def test_memory_chat_graph_degrades_when_l3_retriever_fails(
         answer_generator=fake_answer,
     )
 
-    assert result["needs_retrieval"] is False
+    assert result["needs_retrieval"] is True
     assert result["retrieval_grade"] == "none"
     assert result["retrieval_debug"]["degraded"] is True
     assert result["retrieval_debug"]["failed_stage"] == "retriever"

@@ -287,7 +287,11 @@ if ($venvReady) {
 if ($venvReady) {
   Push-Location $backendDir
   try {
-    & $venvPython -c "import fastapi, sqlmodel, langgraph; import app.main" 2>$null
+    $previousErrorActionPreference = $ErrorActionPreference
+    $previousPythonWarnings = $env:PYTHONWARNINGS
+    $ErrorActionPreference = "Continue"
+    $env:PYTHONWARNINGS = "ignore"
+    & $venvPython -W ignore -c "import fastapi, sqlmodel, langgraph; import app.main" *> $null
     if ($LASTEXITCODE -eq 0) {
       Add-Check -Id "backend.imports" -Status "ok" -Message "Backend core imports are available."
     } else {
@@ -295,6 +299,12 @@ if ($venvReady) {
     }
   }
   finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+    if ($null -eq $previousPythonWarnings) {
+      Remove-Item Env:\PYTHONWARNINGS -ErrorAction SilentlyContinue
+    } else {
+      $env:PYTHONWARNINGS = $previousPythonWarnings
+    }
     Pop-Location
   }
 } else {

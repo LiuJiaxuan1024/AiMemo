@@ -7,7 +7,7 @@
 ```text
 backend/app/agent/context/pyramid.py
   定义 ContextBudget、ContextLayer、PyramidPromptContext。
-  负责把 L4/L3/L2/L1 history/L0.5 adjacent/L0 current 组装成 prompt_context。
+  负责把 L4/L3.5/L3/L2/L1 history/L0.5 adjacent/L0 current 组装成 prompt_context。
 
 backend/app/agent/graphs/memory_chat/nodes.py
   dispatch_context_workers 使用 LangGraph Send 分发上下文 worker。
@@ -27,7 +27,8 @@ backend/tests/test_context_pyramid.py
 ```mermaid
 flowchart TB
     L4[L4 核心长期记忆<br/>稳定偏好、身份、长期目标] --> Prompt[prompt_context]
-    L3[L3 RAG 检索记忆<br/>笔记 chunk / 未来长期记忆检索] --> Prompt
+    L35[L3.5 挂载知识空间检索<br/>当前对话显式挂载资料] --> Prompt
+    L3[L3 个人笔记检索<br/>每轮默认检索 note chunk] --> Prompt
     L2[L2 对话摘要<br/>conversation.summary] --> Prompt
     L1[L1 history<br/>近期历史消息] --> Prompt
     LX[Lx 附件派生上下文<br/>图片/OCR/文件摘要 + attachment 引用] --> Prompt
@@ -42,8 +43,15 @@ flowchart TB
 L4 核心长期记忆
   读取 longtermmemory 表中的 active level=4 记忆。
 
-L3 RAG 检索记忆
-  在 L3 worker 内部完成检索规划、向量检索、检索评分和 layer 构建。
+L3.5 挂载知识空间检索
+  只读取当前 conversation 显式挂载的知识空间。
+  未挂载时只输出 no-scope 说明，不做全局知识库检索。
+  已挂载时默认先检索挂载资料；仅非常明确的闲聊或客观常识问题才跳过首轮检索。
+
+L3 个人笔记检索
+  在 L3 worker 内部每轮默认执行向量检索、检索评分和 layer 构建。
+  planner 不再决定是否检索；它只作为可选 query rewrite 辅助。
+  这样可以避免“看似普通常识题、实际关联用户笔记”的问题丢失个人语境。
   根据 retrieval_grade 决定是否进入 prompt。
   good: 纳入检索 chunk。
   weak: 只纳入少量候选，并提示只能谨慎参考。
@@ -106,7 +114,7 @@ weak_retrieval_max_chunks = 3
 }
 ```
 
-`retrieved_memory_tokens` 会同时用于个人笔记 RAG 和挂载知识库这两类 L3 层；如果两者同轮出现，会分别占用这一预算。`adjacent_message_tokens` 必须保持较小，目标是“近而准”，不是替代 L1。L0 当前用户输入没有单独 token 上限，会原样保留。
+`retrieved_memory_tokens` 会同时用于 L3 个人笔记检索和 L3.5 挂载知识空间检索；如果两者同轮出现，会分别占用这一预算。`adjacent_message_tokens` 必须保持较小，目标是“近而准”，不是替代 L1。L0 当前用户输入没有单独 token 上限，会原样保留。
 
 历史上曾把 `summary_tokens`、`recent_message_tokens`、`conversation_window_tokens` 放到数万甚至十万级，这会让旧题目、旧代码和旧摘要在模型注意力里获得过高权重，出现“用户追问本轮题目，模型回答上一道题”的串题现象。默认预算现在收敛到 4k/8k/10k，并增加 L0.5 邻接层作为省略指代的硬锚点。
 
@@ -118,7 +126,8 @@ weak_retrieval_max_chunks = 3
 flowchart TD
     Start([START]) --> Dispatch[dispatch_context_workers]
     Dispatch --> L4Worker[build_l4_core_memory]
-    Dispatch --> L3Worker[build_l3_retrieved_memory<br/>plan/retrieve/grade/build]
+    Dispatch --> K3Worker[build_l3_knowledge_context<br/>mounted knowledge search]
+    Dispatch --> L3Worker[build_l3_retrieved_memory<br/>retrieve/grade/build]
     Dispatch --> L2Worker[build_l2_summary]
     Dispatch --> L1Worker[build_l1_recent_messages]
     Dispatch --> LXWorker[build_lx_attachment_context]
@@ -127,6 +136,7 @@ flowchart TD
     Dispatch --> WindowWorker[build_current_conversation_window]
 
     L4Worker --> Merge[merge_prompt_context]
+    K3Worker --> Merge
     L3Worker --> Merge
     L2Worker --> Merge
     L1Worker --> Merge
@@ -141,6 +151,7 @@ flowchart TD
 
 ```text
 context_l4_layer
+context_l3_knowledge_layer
 context_l3_layer
 context_l2_layer
 context_conversation_window_layer
@@ -150,7 +161,7 @@ context_l0_adjacent_layer
 context_l0_layer
 ```
 
-`merge_prompt_context` 按 L4 -> L3 -> L2 -> L1 history -> Lx attachments -> L0.5 adjacent -> L0 current
+`merge_prompt_context` 按 L4 -> L3.5 mounted knowledge -> L3 personal notes -> L2 -> L1 history -> Lx attachments -> L0.5 adjacent -> L0 current
 顺序还原为 `PyramidPromptContext`，并渲染为最终 `prompt_context`。L1+L0 当前对话窗口只用于
 调试和后续状态树，不再默认进入最终 prompt，避免跨任务 continuation 过触发。
 
@@ -166,16 +177,15 @@ context_l0_layer
 
 `conversation_summary_graph` 的摘要 prompt 同步收紧：旧任务不得被写成当前任务；如果新增消息切换主题，旧主题必须降级为历史背景或已解决事项；摘要正文控制在 1200 字以内，避免把大量原始历史重新塞回 L2。
 
-L3 worker 是一个局部 RAG worker：
+L3 worker 是一个强制个人笔记 RAG worker：
 
 ```text
-plan_l3_retrieval
-  -> retrieve_notes
+retrieve_notes
   -> grade_retrieval
   -> build_l3_context_layer
 ```
 
-主图不再把检索规划放在所有上下文 worker 前面，因此 L0/L1/L2/L4 可以和 L3 检索链路并行执行。
+主图不再把检索规划放在所有上下文 worker 前面；生产默认路径也不再调用检索规划 LLM。L0/L1/L2/L4 可以和 L3 检索链路并行执行。
 
 ## 图片与附件上下文策略
 

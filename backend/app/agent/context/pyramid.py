@@ -13,7 +13,7 @@ class ContextBudget:
 
     参数：
       core_memory_tokens: L4 核心长期记忆预算，数量少但优先级最高。
-      retrieved_memory_tokens: L3 RAG 检索记忆预算，通常最占空间。
+      retrieved_memory_tokens: L3 个人笔记检索预算，通常最占空间。
       summary_tokens: L2 对话摘要预算，用于承接较早上下文。
       conversation_window_tokens: L1+L0 调试窗口预算。该窗口不再直接注入主 prompt。
       recent_message_tokens: L1 历史消息预算。
@@ -117,8 +117,8 @@ def build_memory_chat_prompt_context(
       user_message: 当前用户输入，会作为 L0 单独注入，避免和 L1 历史消息混淆。
       recent_messages: 近期对话消息，通常来自 chatmessage 表。
       conversation_summary: L2 对话摘要；当前只读取已有摘要，不负责生成摘要。
-      retrieved_chunks: L3 向量检索命中的 note chunk。
-      needs_retrieval: 本轮是否计划查询个人知识库。
+      retrieved_chunks: L3 强制检索命中的 note chunk。
+      needs_retrieval: 本轮是否执行个人笔记检索。
       retrieval_grade: 检索质量评级，决定 L3 是否可信。
       core_memories: L4 核心长期记忆；当前还没有表结构，先保留扩展入口。
       budget: 每层 token 预算；测试和后续配置可以显式传入。
@@ -174,7 +174,7 @@ def build_retrieved_memory_layer(
     retrieval_grade: RetrievalGrade,
     budget: ContextBudget,
 ) -> ContextLayer:
-    """构建 L3 RAG 检索记忆层。
+    """构建 L3 个人笔记检索层。
 
     good 可以作为主要依据；weak 只放少量候选并提醒谨慎；
     poor/none 不把 chunk 暴露给模型，避免弱相关内容诱导编造。
@@ -197,14 +197,14 @@ def build_retrieved_memory_layer(
         note += "可能相关但不确定，只能谨慎参考，不能当作确定事实。"
     elif needs_retrieval:
         content = "没有检索到足够可靠的笔记。"
-        note += "用户问题需要记忆，但当前没有可靠依据；回答时应诚实说明不确定。"
+        note += "已执行默认个人笔记检索，但当前没有可靠依据；回答时不要假装看过用户笔记。"
     else:
-        content = "本轮未查询个人知识库。"
-        note += "这是普通问答或闲聊，不要声称使用了用户笔记。"
+        content = "个人笔记检索未执行。"
+        note += "不要声称使用了用户笔记。"
 
     return ContextLayer(
         level=3,
-        name="RAG 检索记忆",
+        name="个人笔记检索",
         content=content,
         budget_tokens=budget.retrieved_memory_tokens,
         used_tokens=count_tokens(content),

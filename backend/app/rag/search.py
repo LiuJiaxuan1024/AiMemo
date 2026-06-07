@@ -44,6 +44,8 @@ def search_notes(
     normalized_query = query.strip()
     if not normalized_query:
         return []
+    if session.exec(select(NoteChunk.id).limit(1)).first() is None:
+        return []
 
     total_started_at = now_counter()
     # 查询文本先向量化，再交给 sqlite-vec 做近邻检索。
