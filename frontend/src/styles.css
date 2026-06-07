@@ -5372,6 +5372,7 @@ textarea {
 .chat-debug-context-level-1 { background: #fef3c7; color: #78350f; }
 .chat-debug-context-level-2 { background: #ede9fe; color: #4c1d95; }
 .chat-debug-context-level-3 { background: #d1fae5; color: #065f46; }
+.chat-debug-context-level-3-5 { background: #e0f2fe; color: #075985; }
 .chat-debug-context-level-4 { background: #fce7f3; color: #831843; }
 .chat-debug-context-level-fused {
   background: linear-gradient(135deg, var(--color-brand-100), #fef3c7);

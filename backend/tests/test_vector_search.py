@@ -3,7 +3,7 @@ from pathlib import Path
 from app.core.config import settings
 from app.models.note import Note
 from app.models.note_chunk import NoteChunk
-from app.rag.search import search_notes
+from app.rag.search import search_notes, search_notes_keyword
 from app.rag.vector_store import ensure_vector_store, upsert_chunk_embedding
 
 
@@ -121,3 +121,45 @@ def test_search_notes_ignores_blank_query(session):
 
     assert search_notes(session, query="  ", embedding_generator=fake_embeddings) == []
     assert calls == 0
+
+
+def test_search_notes_keyword_returns_lightweight_note_candidates(session):
+    active_note = Note(
+        title="热力学复习",
+        content="水结冰时关注相变、潜热和分子排列变化。",
+        summary="相变复习",
+        tags="physics",
+        status="active",
+    )
+    deleted_note = Note(
+        title="删除的热力学笔记",
+        content="删除内容不应该进入召回。",
+        status="deleted",
+    )
+    session.add(active_note)
+    session.add(deleted_note)
+    session.flush()
+    active_chunk = NoteChunk(
+        note_id=active_note.id or 0,
+        chunk_index=0,
+        content="水结冰时关注相变、潜热和分子排列变化。",
+        content_hash="active-keyword",
+        token_count=14,
+        embedding_status="pending",
+    )
+    deleted_chunk = NoteChunk(
+        note_id=deleted_note.id or 0,
+        chunk_index=0,
+        content="水结冰也可能出现在删除笔记里。",
+        content_hash="deleted-keyword",
+        token_count=12,
+    )
+    session.add(active_chunk)
+    session.add(deleted_chunk)
+    session.commit()
+
+    results = search_notes_keyword(session, query="水为什么会结冰？", limit=3)
+
+    assert [result.note_title for result in results] == ["热力学复习"]
+    assert results[0].score >= 0.42
+    assert results[0].content == "水结冰时关注相变、潜热和分子排列变化。"

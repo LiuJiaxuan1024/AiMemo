@@ -1,6 +1,7 @@
 from dataclasses import dataclass
+import re
 
-from sqlmodel import Session, col, select
+from sqlmodel import Session, col, or_, select
 
 from app.agent.embeddings import embed_texts
 from app.core.timing import elapsed_ms, emit_timing, now_counter
@@ -133,3 +134,152 @@ def search_notes(
         result_count=len(results),
     )
     return results
+
+
+def search_notes_keyword(
+    session: Session,
+    *,
+    query: str,
+    limit: int = 5,
+    candidate_limit: int = 80,
+) -> list[NoteSearchResult]:
+    """轻量关键词召回个人笔记。
+
+    这是 Memory Chat 每轮可运行的 cheap recall：不请求 embedding，不依赖 sqlite-vec。
+    目标不是替代向量检索，而是在绝大多数明显有关键词重叠的个人语境里提供低延迟候选。
+    """
+
+    normalized_query = query.strip()
+    if not normalized_query:
+        return []
+    terms = _build_keyword_terms(normalized_query)
+    if not terms:
+        return []
+
+    predicates = []
+    for term in terms[:12]:
+        pattern = f"%{term}%"
+        predicates.extend(
+            [
+                col(NoteChunk.content).like(pattern),
+                col(Note.title).like(pattern),
+                col(Note.summary).like(pattern),
+                col(Note.tags).like(pattern),
+            ]
+        )
+    if not predicates:
+        return []
+
+    rows = session.exec(
+        select(NoteChunk, Note)
+        .join(Note, Note.id == NoteChunk.note_id)
+        .where(Note.status == "active")
+        .where(or_(*predicates))
+        .order_by(col(Note.updated_at).desc(), col(NoteChunk.chunk_index).asc())
+        .limit(candidate_limit)
+    ).all()
+
+    scored: list[tuple[float, NoteChunk, Note]] = []
+    seen_chunks: set[int] = set()
+    for chunk, note in rows:
+        if chunk.id is None or chunk.id in seen_chunks:
+            continue
+        seen_chunks.add(chunk.id)
+        score = _keyword_recall_score(normalized_query, terms, chunk, note)
+        if score <= 0:
+            continue
+        score = max(score, 0.45)
+        scored.append((score, chunk, note))
+
+    scored.sort(key=lambda item: (item[0], item[2].updated_at, -(item[1].chunk_index)), reverse=True)
+    return [
+        NoteSearchResult(
+            note_id=note.id or 0,
+            note_title=note.title,
+            chunk_id=chunk.id or 0,
+            chunk_index=chunk.chunk_index,
+            content=chunk.content,
+            content_hash=chunk.content_hash,
+            token_count=chunk.token_count,
+            distance=max(0.0, 1.0 - score),
+            score=score,
+        )
+        for score, chunk, note in scored[:limit]
+    ]
+
+
+def _build_keyword_terms(query: str) -> list[str]:
+    normalized = query.lower()
+    terms: list[str] = []
+    terms.extend(re.findall(r"[a-zA-Z0-9_+\-#.]{2,}", normalized))
+    cjk_text = "".join(re.findall(r"[\u4e00-\u9fff]+", normalized))
+    if len(cjk_text) >= 2:
+        terms.extend(_cjk_terms(cjk_text))
+
+    stop_terms = {
+        "什么",
+        "为什么",
+        "怎么",
+        "如何",
+        "一下",
+        "这个",
+        "那个",
+        "的话",
+        "是不是",
+        "可以",
+        "需要",
+    }
+    result: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        cleaned = term.strip().lower()
+        if len(cleaned) < 2 or cleaned in stop_terms or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        result.append(cleaned)
+    return result
+
+
+def _cjk_terms(text: str) -> list[str]:
+    terms: list[str] = []
+    if len(text) >= 3:
+        terms.extend(text[index : index + 3] for index in range(0, len(text) - 2))
+    terms.extend(text[index : index + 2] for index in range(0, len(text) - 1))
+    return terms
+
+
+def _keyword_recall_score(
+    query: str,
+    terms: list[str],
+    chunk: NoteChunk,
+    note: Note,
+) -> float:
+    title = note.title.lower()
+    summary = note.summary.lower()
+    tags = note.tags.lower()
+    content = chunk.content.lower()
+    haystacks = {
+        "title": title,
+        "tags": tags,
+        "summary": summary,
+        "content": content,
+    }
+    score = 0.0
+    normalized_query = query.lower()
+    if normalized_query and normalized_query in content:
+        score += 0.35
+    if normalized_query and normalized_query in title:
+        score += 0.45
+
+    for term in terms:
+        if term in haystacks["title"]:
+            score += 0.16
+        if term in haystacks["tags"]:
+            score += 0.14
+        if term in haystacks["summary"]:
+            score += 0.1
+        if term in haystacks["content"]:
+            score += 0.07
+
+    # 关键词召回没有向量相似度那么可靠，压在 0.66 以内，交给 L3 grade 以 weak/good 方式约束使用。
+    return min(score, 0.66)

@@ -36,7 +36,7 @@ thinking: disabled by default
 Qwen3.5 系列默认可能开启 thinking mode。Ai 记当前的 planner、摘要、长期记忆抽取和普通
 RAG 回答都属于低延迟交互路径，所以默认通过 `extra_body={"enable_thinking": false}`
 关闭 thinking。后续如果需要深度推理，应单独增加 reasoning model，而不是改变默认模型。
-planner 当前使用 `qwen-turbo` 处理少量轻量 JSON 判断和可选 query rewrite；L3 个人笔记检索默认不依赖 planner 判断是否检索。回答质量主要由 `qwen3.5-plus`
+planner 当前使用 `qwen-turbo` 处理少量轻量 JSON 判断和可选 query rewrite；L3 个人笔记检索默认先走 cheap recall，不依赖 planner 判断是否执行轻量召回。回答质量主要由 `qwen3.5-plus`
 回答模型和回答提示词控制。两类模型都通过启动预热和关闭 thinking 控制冷启动与推理延迟。
 
 模型实例会在服务启动时预热并缓存：
@@ -104,11 +104,11 @@ L0.5 最近邻接上下文
 L1 近期消息
 L2 对话滚动摘要
 L3.5 当前对话挂载知识空间检索
-L3 每轮默认检索到的个人笔记记忆
+L3 cheap recall / 必要时向量检索到的个人笔记记忆
 L4 长期核心记忆
 ```
 
-其中 L0.5 最近邻接上下文用于绑定“继续/完整代码/这个”等省略指代，优先级高于旧摘要里的历史任务。L3 个人笔记 worker 默认每轮 retrieve / grade；可选 planner 只用于 query rewrite，不再决定是否检索。
+其中 L0.5 最近邻接上下文用于绑定“继续/完整代码/这个”等省略指代，优先级高于旧摘要里的历史任务。L3 个人笔记 worker 默认每轮 cheap recall / gate / grade；只有明确个人记忆意图或可选 planner 要求时才升级向量检索。
 Local Operator 不再作为上下文 worker 运行；read/write/exec/background 工具已经迁入主对话
 ReAct 工具循环。模型发出 tool call，工具结果作为 `ToolMessage` 回灌给 agent，再由 agent 决定继续调用工具、请求用户选择，或生成最终回答。
 桌面精灵同样必须先经过这条 ReAct 工具循环；`generate_elf_bubble_answer` 只负责把 agent 已完成的最终结果改写为气泡，不负责决定或执行本地工具。

@@ -117,7 +117,7 @@ def build_memory_chat_prompt_context(
       user_message: 当前用户输入，会作为 L0 单独注入，避免和 L1 历史消息混淆。
       recent_messages: 近期对话消息，通常来自 chatmessage 表。
       conversation_summary: L2 对话摘要；当前只读取已有摘要，不负责生成摘要。
-      retrieved_chunks: L3 强制检索命中的 note chunk。
+      retrieved_chunks: L3 个人笔记召回/检索命中的 note chunk。
       needs_retrieval: 本轮是否执行个人笔记检索。
       retrieval_grade: 检索质量评级，决定 L3 是否可信。
       core_memories: L4 核心长期记忆；当前还没有表结构，先保留扩展入口。

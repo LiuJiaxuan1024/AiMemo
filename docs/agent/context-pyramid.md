@@ -28,7 +28,7 @@ backend/tests/test_context_pyramid.py
 flowchart TB
     L4[L4 核心长期记忆<br/>稳定偏好、身份、长期目标] --> Prompt[prompt_context]
     L35[L3.5 挂载知识空间检索<br/>当前对话显式挂载资料] --> Prompt
-    L3[L3 个人笔记检索<br/>每轮默认检索 note chunk] --> Prompt
+    L3[L3 个人笔记检索<br/>cheap recall / 必要时向量检索] --> Prompt
     L2[L2 对话摘要<br/>conversation.summary] --> Prompt
     L1[L1 history<br/>近期历史消息] --> Prompt
     LX[Lx 附件派生上下文<br/>图片/OCR/文件摘要 + attachment 引用] --> Prompt
@@ -49,8 +49,10 @@ L3.5 挂载知识空间检索
   已挂载时默认先检索挂载资料；仅非常明确的闲聊或客观常识问题才跳过首轮检索。
 
 L3 个人笔记检索
-  在 L3 worker 内部每轮默认执行向量检索、检索评分和 layer 构建。
-  planner 不再决定是否检索；它只作为可选 query rewrite 辅助。
+  在 L3 worker 内部每轮默认执行 cheap recall、检索门控、检索评分和 layer 构建。
+  cheap recall 使用关键词/标题/标签/摘要匹配，不请求 embedding。
+  只有明确个人记忆意图、个人画像问题，或可选 planner 明确要求时，才升级向量检索。
+  planner 不再决定是否执行 cheap recall；它只作为可选 query rewrite 或显式升级向量检索的辅助。
   这样可以避免“看似普通常识题、实际关联用户笔记”的问题丢失个人语境。
   根据 retrieval_grade 决定是否进入 prompt。
   good: 纳入检索 chunk。

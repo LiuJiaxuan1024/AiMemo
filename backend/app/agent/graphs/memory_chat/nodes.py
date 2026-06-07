@@ -74,7 +74,7 @@ from app.models.chat_attachment import ChatAttachment, ChatAttachmentDerivative
 from app.models.conversation import Conversation
 from app.models.knowledge import KnowledgeChunk, KnowledgeDocument, KnowledgeSpace
 from app.models.note import utc_now
-from app.rag.search import NoteSearchResult, search_notes
+from app.rag.search import NoteSearchResult, search_notes, search_notes_keyword
 from app.rag.chunking.tokenizer import count_tokens
 from app.services.knowledge_mount_service import list_conversation_knowledge_mounts
 from app.services.knowledge_search_service import (
@@ -147,6 +147,17 @@ class RetrievalPlan:
     confidence: float
     reason: str
     source: str = "unknown"
+
+
+@dataclass(frozen=True)
+class NoteRetrievalDecision:
+    """个人笔记 L3 的轻量检索决策。"""
+
+    action: Literal["skip", "light", "vector"]
+    query: str
+    confidence: float
+    reason: str
+    source: str = "rule"
 
 
 AnswerGenerator = Callable[
@@ -354,8 +365,8 @@ def build_l3_retrieved_memory_node(
 ):
     """构建 L3 个人笔记检索层。
 
-    个人笔记默认每轮检索，避免“看似常识的问题”遗漏用户笔记中的个人语境。
-    planner 只作为可选 query rewrite 辅助，不能再决定是否跳过检索。
+    默认每轮执行 cheap recall；只有明确个人记忆意图或可选 planner 要求时才升级向量检索。
+    这样保留个人 Agent 的高召回倾向，同时避免每轮 embedding/vector 检索拖慢对话。
     """
 
     def build_l3_retrieved_memory(state: MemoryChatGraphState) -> MemoryChatGraphState:
@@ -363,17 +374,24 @@ def build_l3_retrieved_memory_node(
         total_started_at = now_counter()
         failed_stage = ""
         planner_elapsed_ms = 0
+        cheap_recall_elapsed_ms = 0
         retriever_elapsed_ms = 0
         grade_elapsed_ms = 0
         layer_elapsed_ms = 0
         plan = RetrievalPlan(
             intent="rag",
-            needs_retrieval=True,
+            needs_retrieval=False,
             needs_query_rewrite=False,
             retrieval_query=user_message,
             confidence=1.0,
-            reason="个人笔记默认强制检索，避免遗漏用户笔记中的深层语境。",
-            source="forced_note_rag",
+            reason="个人笔记默认执行轻量关键词召回，必要时升级向量检索。",
+            source="cheap_note_recall",
+        )
+        decision = NoteRetrievalDecision(
+            action="light",
+            query=user_message,
+            confidence=0.6,
+            reason="默认执行轻量关键词召回。",
         )
         retrieved_chunks: list[RetrievedChunkPayload] = []
         retrieval_grade: Literal["good", "weak", "poor", "none"] = "none"
@@ -388,62 +406,90 @@ def build_l3_retrieved_memory_node(
                 planner_elapsed_ms = elapsed_ms(planner_started_at)
                 plan = RetrievalPlan(
                     intent="rag",
-                    needs_retrieval=True,
+                    needs_retrieval=rewritten_plan.needs_retrieval,
                     needs_query_rewrite=rewritten_plan.needs_query_rewrite,
                     retrieval_query=rewritten_plan.retrieval_query or user_message,
                     confidence=rewritten_plan.confidence,
                     reason=(
-                        f"{rewritten_plan.reason}；个人笔记默认强制检索，"
-                        "planner 仅用于 query rewrite。"
+                        f"{rewritten_plan.reason}；个人笔记默认先执行 cheap recall，"
+                        "planner 只用于 query rewrite 或显式升级向量检索。"
                     ),
                     source=rewritten_plan.source,
                 )
 
             retrieval_query = plan.retrieval_query or user_message
-            failed_stage = "retriever"
             with session_factory() as session:
-                retriever_started_at = now_counter()
-                results = retriever(session, query=retrieval_query, limit=limit)
-                retriever_elapsed_ms = elapsed_ms(retriever_started_at)
+                failed_stage = "cheap_recall"
+                cheap_recall_started_at = now_counter()
+                cheap_results = search_notes_keyword(session, query=retrieval_query, limit=limit)
+                cheap_recall_elapsed_ms = elapsed_ms(cheap_recall_started_at)
+                decision = _decide_note_retrieval(
+                    user_message=user_message,
+                    retrieval_query=retrieval_query,
+                    cheap_results=cheap_results,
+                    plan=plan if planner is not None else None,
+                )
+                if decision.action == "vector":
+                    failed_stage = "retriever"
+                    retriever_started_at = now_counter()
+                    results = retriever(session, query=decision.query, limit=limit)
+                    retriever_elapsed_ms = elapsed_ms(retriever_started_at)
+                elif decision.action == "light":
+                    results = cheap_results
+                else:
+                    results = []
+
+            retrieval_query = decision.query
             retrieved_chunks = [_to_retrieved_chunk_payload(result) for result in results]
             failed_stage = "grade"
             grade_started_at = now_counter()
             retrieval_grade, retrieval_grade_reason = _grade_retrieval_chunks(retrieved_chunks)
             grade_elapsed_ms = elapsed_ms(grade_started_at)
+            needs_retrieval = decision.action != "skip"
 
             failed_stage = "layer"
             layer_started_at = now_counter()
             layer = build_retrieved_memory_layer(
                 retrieved_chunks,
-                plan.needs_retrieval,
+                needs_retrieval,
                 retrieval_grade,
                 _context_budget(),
             )
             layer_elapsed_ms = elapsed_ms(layer_started_at)
             retrieval_debug = {
                 "planner_ms": planner_elapsed_ms,
+                "cheap_recall_ms": cheap_recall_elapsed_ms,
                 "retriever_ms": retriever_elapsed_ms,
                 "grade_ms": grade_elapsed_ms,
                 "layer_ms": layer_elapsed_ms,
                 "total_ms": elapsed_ms(total_started_at),
                 "planner_source": plan.source,
-                "needs_retrieval": True,
+                "retrieval_action": decision.action,
+                "decision_source": decision.source,
+                "decision_confidence": decision.confidence,
+                "decision_reason": decision.reason,
+                "needs_retrieval": needs_retrieval,
                 "retrieval_query": retrieval_query,
                 "retrieved_count": len(retrieved_chunks),
             }
         except Exception as exc:
             # L3 是增强上下文，不应因为 embedding/API/检索链路波动阻断主对话。
             layer_started_at = now_counter()
-            layer = build_retrieved_memory_layer([], True, "none", _context_budget())
+            layer = build_retrieved_memory_layer([], decision.action != "skip", "none", _context_budget())
             layer_elapsed_ms = elapsed_ms(layer_started_at)
             retrieval_debug = {
                 "planner_ms": planner_elapsed_ms,
+                "cheap_recall_ms": cheap_recall_elapsed_ms,
                 "retriever_ms": retriever_elapsed_ms,
                 "grade_ms": grade_elapsed_ms,
                 "layer_ms": layer_elapsed_ms,
                 "total_ms": elapsed_ms(total_started_at),
                 "planner_source": plan.source,
-                "needs_retrieval": True,
+                "retrieval_action": decision.action,
+                "decision_source": decision.source,
+                "decision_confidence": decision.confidence,
+                "decision_reason": decision.reason,
+                "needs_retrieval": decision.action != "skip",
                 "retrieval_query": retrieval_query,
                 "retrieved_count": 0,
                 "degraded": True,
@@ -453,7 +499,7 @@ def build_l3_retrieved_memory_node(
             }
             plan = RetrievalPlan(
                 intent="rag",
-                needs_retrieval=True,
+                needs_retrieval=decision.action != "skip",
                 needs_query_rewrite=False,
                 retrieval_query=retrieval_query,
                 confidence=0.0,
@@ -469,7 +515,7 @@ def build_l3_retrieved_memory_node(
         logger.info("memory_chat.l3_timing %s", retrieval_debug)
         return {
             "intent": plan.intent,
-            "needs_retrieval": plan.needs_retrieval,
+            "needs_retrieval": bool(retrieval_debug.get("needs_retrieval", plan.needs_retrieval)),
             "needs_query_rewrite": plan.needs_query_rewrite,
             "retrieval_query": retrieval_query,
             "plan_confidence": plan.confidence,
@@ -2563,6 +2609,126 @@ def _direct_retrieval_plan(reason: str) -> RetrievalPlan:
         reason=reason,
         source="rule_direct",
     )
+
+
+def _decide_note_retrieval(
+    *,
+    user_message: str,
+    retrieval_query: str,
+    cheap_results: list[NoteSearchResult],
+    plan: RetrievalPlan | None,
+) -> NoteRetrievalDecision:
+    """个人笔记检索门控。
+
+    问题不是“需不需要检索”，而是“能不能安全跳过重检索”。
+    每轮 cheap recall 已经执行；这里只决定是否跳过、使用 cheap 结果，或升级向量检索。
+    """
+
+    normalized = user_message.strip().lower()
+    if _is_safe_skip_note_retrieval(normalized):
+        return NoteRetrievalDecision(
+            action="skip",
+            query="",
+            confidence=0.95,
+            reason="明确闲聊、纯算术或纯格式转换，可以安全跳过个人笔记检索。",
+            source="rule_safe_skip",
+        )
+
+    if plan is not None and plan.needs_retrieval:
+        return NoteRetrievalDecision(
+            action="vector",
+            query=plan.retrieval_query or retrieval_query,
+            confidence=max(plan.confidence, 0.75),
+            reason="注入 planner 明确要求个人笔记向量检索。",
+            source=plan.source,
+        )
+
+    if _has_explicit_personal_memory_intent(normalized):
+        return NoteRetrievalDecision(
+            action="vector",
+            query=retrieval_query,
+            confidence=0.9,
+            reason="用户明确询问个人记忆、笔记、历史记录或个人画像，需要向量检索。",
+            source="rule_explicit_memory",
+        )
+
+    if cheap_results:
+        return NoteRetrievalDecision(
+            action="light",
+            query=retrieval_query,
+            confidence=0.8,
+            reason="轻量关键词召回已有候选，先把候选交给 agent 判断。",
+            source="cheap_recall_hit",
+        )
+
+    return NoteRetrievalDecision(
+        action="light",
+        query=retrieval_query,
+        confidence=0.55,
+        reason="未发现明确个人记忆意图，且轻量召回无候选；不升级向量检索以避免每轮阻塞。",
+        source="cheap_recall_miss",
+    )
+
+
+def _is_safe_skip_note_retrieval(normalized_message: str) -> bool:
+    compact = re.sub(r"\s+", "", normalized_message)
+    if not compact:
+        return True
+    casual_messages = {
+        "你好",
+        "您好",
+        "hello",
+        "hi",
+        "hey",
+        "晚上好",
+        "早上好",
+        "下午好",
+        "在吗",
+        "谢谢",
+        "感谢",
+        "ok",
+        "好的",
+    }
+    if compact in casual_messages:
+        return True
+    if re.fullmatch(r"\d+([+\-*/x×÷]\d+)+([=＝]|等于)?(多少|几|是什么|呢|吗)?[\?？]?", compact):
+        return True
+    if re.fullmatch(r"(把|将).{1,60}(翻译成|译成|改成)(英文|中文|日文|韩文|英语|汉语)", compact):
+        return True
+    if re.fullmatch(r"(python|js|javascript|java|c\+\+)?怎么打印(hello|helloworld|hello world)", compact):
+        return True
+    return False
+
+
+def _has_explicit_personal_memory_intent(normalized_message: str) -> bool:
+    triggers = (
+        "我之前",
+        "我以前",
+        "我上次",
+        "我说过",
+        "我提到",
+        "我记录",
+        "我写过",
+        "我的笔记",
+        "笔记里",
+        "记录过",
+        "记得我",
+        "你记得",
+        "还记得",
+        "上次说",
+        "之前说",
+        "以前说",
+        "来着",
+        "我的项目",
+        "我的计划",
+        "我的偏好",
+        "我的性格",
+        "评价我",
+        "了解我",
+        "个人画像",
+        "长期记忆",
+    )
+    return any(trigger in normalized_message for trigger in triggers)
 
 
 

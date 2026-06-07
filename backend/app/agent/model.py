@@ -96,7 +96,7 @@ def get_planner_chat_model() -> ChatOpenAI:
     """创建轻量规划模型。
 
     planner 用于少量轻量 JSON 判断和可选 query rewrite。
-    个人笔记 L3 默认强制检索，不再用 planner 决定是否检索。
+    个人笔记 L3 默认先走 cheap recall，不再用 planner 决定是否执行轻量召回。
     回答质量主要交给 qwen3.5-plus 和回答提示词控制。
     """
 

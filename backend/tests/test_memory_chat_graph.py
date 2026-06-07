@@ -37,6 +37,8 @@ from app.models.chat_message import ChatMessage
 from app.models.knowledge import ConversationKnowledgeMount, KnowledgeChunk, KnowledgeDocument, KnowledgeSpace
 from app.models.long_term_memory import LongTermMemory
 from app.models.conversation import Conversation
+from app.models.note import Note
+from app.models.note_chunk import NoteChunk
 from app.rag.hashing import content_hash
 from app.rag.search import NoteSearchResult
 from app.schemas.conversation import ConversationCreate
@@ -56,7 +58,7 @@ def test_memory_chat_graph_direct_answer_persists_messages(
         assert user_message == "1+1 等于几？"
         assert recent_messages == []
         assert retrieved_chunks == []
-        assert needs_retrieval is True
+        assert needs_retrieval is False
         assert retrieval_grade == "none"
         return "1+1 等于 2。"
 
@@ -69,7 +71,7 @@ def test_memory_chat_graph_direct_answer_persists_messages(
     )
 
     messages = session.exec(select(ChatMessage).order_by(ChatMessage.id)).all()
-    assert result["needs_retrieval"] is True
+    assert result["needs_retrieval"] is False
     assert result["context_l4_layer"]["level"] == 4
     assert result["context_l3_knowledge_layer"]["level"] == 3.5
     assert result["context_l3_knowledge_layer"]["name"] == "挂载知识空间检索"
@@ -83,7 +85,7 @@ def test_memory_chat_graph_direct_answer_persists_messages(
     assert "L0 当前用户输入" in result["prompt_context"]
     assert "1+1 等于几？" in result["prompt_context"]
     assert "L3 个人笔记检索" in result["prompt_context"]
-    assert "没有检索到足够可靠的笔记" in result["prompt_context"]
+    assert "个人笔记检索未执行" in result["prompt_context"]
     assert [message.role for message in messages] == ["user", "assistant"]
     assert messages[0].content == "1+1 等于几？"
     assert messages[1].content == "1+1 等于 2。"
@@ -1097,29 +1099,31 @@ def test_memory_chat_graph_forces_note_retrieval_for_common_fact_question(
     tmp_path: Path,
 ):
     conversation = create_conversation(session, ConversationCreate(title="常识题里的个人语境"))
-    retriever_calls: list[str] = []
-
-    def fake_retriever(current_session, *, query: str, limit: int):
-        assert current_session is not None
-        retriever_calls.append(query)
-        return [
-            NoteSearchResult(
-                note_id=8,
-                note_title="热力学复习",
-                chunk_id=18,
-                chunk_index=0,
-                content="我在热力学笔记里记录过：水结冰时关注相变、潜热和分子排列变化。",
-                content_hash="hash",
-                token_count=28,
-                distance=0.08,
-                score=0.93,
-            )
-        ]
+    note = Note(
+        title="热力学复习",
+        content="水结冰时关注相变、潜热和分子排列变化。",
+        content_hash=content_hash("水结冰时关注相变、潜热和分子排列变化。"),
+        status="active",
+    )
+    session.add(note)
+    session.commit()
+    session.refresh(note)
+    session.add(
+        NoteChunk(
+            note_id=note.id or 0,
+            chunk_index=0,
+            content="我在热力学笔记里记录过：水结冰时关注相变、潜热和分子排列变化。",
+            content_hash=content_hash("我在热力学笔记里记录过：水结冰时关注相变、潜热和分子排列变化。"),
+            token_count=28,
+            embedding_status="pending",
+        )
+    )
+    session.commit()
 
     def fake_answer(user_message, recent_messages, retrieved_chunks, needs_retrieval, retrieval_grade):
         assert user_message == "水为什么会结冰？"
         assert needs_retrieval is True
-        assert retrieval_grade == "good"
+        assert retrieval_grade == "weak"
         assert retrieved_chunks[0]["note_title"] == "热力学复习"
         return "你笔记里把它放在相变角度理解。"
 
@@ -1128,13 +1132,12 @@ def test_memory_chat_graph_forces_note_retrieval_for_common_fact_question(
         user_message="水为什么会结冰？",
         session_factory=session_factory,
         checkpoint_path=str(tmp_path / "checkpoints.db"),
-        retriever=fake_retriever,
         answer_generator=fake_answer,
     )
 
-    assert retriever_calls == ["水为什么会结冰？"]
     assert result["needs_retrieval"] is True
-    assert result["retrieval_debug"]["planner_source"] == "forced_note_rag"
+    assert result["retrieval_debug"]["retrieval_action"] == "light"
+    assert result["retrieval_debug"]["decision_source"] == "cheap_recall_hit"
     assert "水结冰时关注相变" in result["prompt_context"]
 
 
