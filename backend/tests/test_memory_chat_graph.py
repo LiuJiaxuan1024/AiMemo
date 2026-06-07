@@ -134,6 +134,91 @@ def test_chat_turn_state_history_reads_langgraph_checkpoints(
     assert any("user_message" in snapshot.values for snapshot in history.states)
 
 
+def test_elf_react_agent_messages_require_request_user_input_for_choices():
+    messages = _build_react_agent_messages(
+        {
+            "conversation_id": 1,
+            "user_message": "帮我创建一个文件",
+            "prompt_context": "L0 当前用户输入\n帮我创建一个文件",
+            "turn_messages": [],
+            "answer_mode": "elf_bubble",
+        }
+    )
+
+    system_text = "\n".join(str(message.content) for message in messages if getattr(message, "type", "") == "system")
+
+    assert "桌面精灵" in system_text
+    assert "必须调用 request_user_input" in system_text
+    assert "选项卡" in system_text
+
+
+def test_elf_agent_coerces_text_choice_answer_to_request_user_input(session_factory, monkeypatch):
+    class FakeModel:
+        def invoke(self, messages):
+            return AIMessage(
+                content=(
+                    "这个文件要放在哪里呢？请选择一个位置：\n"
+                    "1. 放到桌面：方便你马上找到。\n"
+                    "2. 放到 AiMemo 项目目录：适合项目相关文件。"
+                )
+            )
+
+    monkeypatch.setattr(
+        "app.agent.graphs.memory_chat.nodes.get_agent_chat_model_with_tools",
+        lambda tools: FakeModel(),
+    )
+
+    agent = build_agent_node(session_factory)
+    result = agent(
+        {
+            "conversation_id": 7,
+            "user_message": "创建一个文件",
+            "prompt_context": "L0 当前用户输入\n创建一个文件",
+            "turn_messages": [],
+            "answer_mode": "elf_bubble",
+            "tool_observations": [],
+            "consecutive_failed_tools": 0,
+        }
+    )
+
+    decision = result["agent_decision"]
+    assert decision["type"] == "tool_call"
+    tool_call = decision["tool_calls"][0]
+    assert tool_call["name"] == "request_user_input"
+    assert tool_call["args"]["question"].startswith("这个文件要放在哪里")
+    assert [option["label"] for option in tool_call["args"]["options"]] == [
+        "放到桌面",
+        "放到 AiMemo 项目目录",
+    ]
+
+
+def test_page_agent_does_not_coerce_text_choice_answer(session_factory, monkeypatch):
+    class FakeModel:
+        def invoke(self, messages):
+            return AIMessage(content="请选择：\n1. A\n2. B")
+
+    monkeypatch.setattr(
+        "app.agent.graphs.memory_chat.nodes.get_agent_chat_model_with_tools",
+        lambda tools: FakeModel(),
+    )
+
+    agent = build_agent_node(session_factory)
+    result = agent(
+        {
+            "conversation_id": 7,
+            "user_message": "随便问",
+            "prompt_context": "L0 当前用户输入\n随便问",
+            "turn_messages": [],
+            "answer_mode": "text",
+            "tool_observations": [],
+            "consecutive_failed_tools": 0,
+        }
+    )
+
+    assert result["agent_decision"]["type"] == "final_answer"
+    assert result["assistant_answer"] == "请选择：\n1. A\n2. B"
+
+
 def test_chat_turn_state_history_serializes_langgraph_interrupts(
     session,
     tmp_path: Path,

@@ -948,6 +948,31 @@ def build_agent_node(
                 ],
             }
 
+        coerced_choice_tool_call = _coerce_elf_choice_final_answer_to_tool_call(state, assistant_text)
+        if coerced_choice_tool_call:
+            coerced_turn_message = _turn_message("assistant", assistant_text, name="agent")
+            coerced_turn_message["tool_calls"] = [coerced_choice_tool_call]
+            return {
+                "agent_step_index": step_index,
+                "turn_messages": [*state.get("turn_messages", []), coerced_turn_message],
+                "agent_decision": {
+                    "type": "tool_call",
+                    "reason": "精灵模式下检测到普通文本选择题，转换为 request_user_input 选项卡。",
+                    "tool_calls": [coerced_choice_tool_call],
+                },
+                "thought_events": [
+                    *state.get("thought_events", []),
+                    _thought(
+                        "agent-coerce-elf-choice",
+                        "转换为选项卡",
+                        "精灵最终回答里包含文本选项，已改走 request_user_input。",
+                        related_node="agent",
+                        related_tool_call_id=str(coerced_choice_tool_call.get("id") or "") or None,
+                        step_index=step_index,
+                    ),
+                ],
+            }
+
         return {
             "agent_step_index": step_index,
             "turn_messages": [*state.get("turn_messages", []), turn_message],
@@ -1560,6 +1585,8 @@ def _build_react_agent_messages(state: MemoryChatGraphState) -> list:
         SystemMessage(content=_build_react_agent_system_prompt()),
         HumanMessage(content=state.get("prompt_context", "")),
     ]
+    if state.get("answer_mode") == "elf_bubble":
+        messages.append(SystemMessage(content=_build_elf_react_agent_runtime_prompt()))
     task_context = _build_task_runtime_context(state)
     if task_context:
         messages.append(SystemMessage(content=task_context))
@@ -1615,6 +1642,15 @@ def _build_task_runtime_context(state: MemoryChatGraphState) -> str:
         "如果 replan_required=true，要根据失败原因调整方案，不要原样重试；"
         "如果验收条件尚未满足，继续调用工具；只有目标满足时才最终回答。\n"
         f"{json_dumps_compact(payload)}"
+    )
+
+
+def _build_elf_react_agent_runtime_prompt() -> str:
+    return (
+        "当前入口是桌面精灵。精灵最终回答会被改写成气泡，但结构化交互不会由气泡自动生成。\n"
+        "因此：只要你需要用户从多个方案、路径、范围、确认项或下一步动作里选择，"
+        "必须调用 request_user_input。不要在最终回答中用普通文本列出“1/2/3”“A/B/C”让用户口头选择。\n"
+        "如果你只是想自然闲聊或追问开放问题，可以直接回答；如果有 2-4 个明确可选项，必须走选项卡。"
     )
 
 
@@ -1801,6 +1837,132 @@ def _ai_message_to_turn_message(message, *, fallback_content: str) -> TurnMessag
         turn_message["tool_calls"] = tool_calls
         return turn_message
     return _turn_message("assistant", fallback_content, name="agent")
+
+
+def _coerce_elf_choice_final_answer_to_tool_call(
+    state: MemoryChatGraphState,
+    assistant_text: str,
+) -> dict | None:
+    """精灵模式下把明显的普通文本选择题改成 request_user_input。
+
+    这是精灵入口的防护网：模型偶尔会无视工具约束，直接用气泡问“请选择 1/2”。
+    那样前端无法渲染选项卡。这里只在外置精灵模式、且能稳定提取出至少两个选项时介入。
+    """
+
+    if state.get("answer_mode") != "elf_bubble":
+        return None
+    text = assistant_text.strip()
+    if not _looks_like_unstructured_choice_prompt(text):
+        return None
+
+    options = _extract_unstructured_choice_options(text)
+    if len(options) < 2:
+        return None
+
+    question = _extract_unstructured_choice_question(text)
+    if len(question) < 6:
+        question = "你希望我按哪个选项继续？"
+    tool_call_id = f"elf-choice-{int(state.get('conversation_id') or 0)}-{len(state.get('turn_messages', [])) + 1}"
+    return {
+        "id": tool_call_id,
+        "name": REQUEST_USER_INPUT_TOOL_NAME,
+        "args": {
+            "question": question,
+            "options": options[:4],
+            "selection_mode": "single",
+            "allow_other": True,
+        },
+    }
+
+
+def _looks_like_unstructured_choice_prompt(text: str) -> bool:
+    if not text:
+        return False
+    normalized = re.sub(r"\s+", " ", text)
+    choice_keywords = [
+        "请选择",
+        "选择一个",
+        "选一个",
+        "选哪",
+        "哪个选项",
+        "哪种方式",
+        "你希望",
+        "你想要",
+        "要不要",
+        "是否",
+        "确认",
+        "方案",
+        "选项",
+    ]
+    return any(keyword in normalized for keyword in choice_keywords)
+
+
+def _extract_unstructured_choice_options(text: str) -> list[dict]:
+    options: list[dict] = []
+    bullet_lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = _strip_markdown_choice_line(raw_line)
+        if not line:
+            continue
+        numbered = re.match(
+            r"^(?:选项\s*)?(?:[A-Da-d]|[1-4]|[一二三四])[\.\)、:：]\s*(?P<body>.+)$",
+            line,
+        )
+        if numbered:
+            options.append(_choice_option_from_text(numbered.group("body"), len(options)))
+            continue
+        bullet = re.match(r"^(?:[-*•]\s+)(?P<body>.+)$", raw_line.strip())
+        if bullet:
+            bullet_lines.append(bullet.group("body").strip())
+
+    if len(options) < 2 and len(bullet_lines) >= 2:
+        options = [_choice_option_from_text(line, index) for index, line in enumerate(bullet_lines[:4])]
+
+    deduped: list[dict] = []
+    seen_values: set[str] = set()
+    for option in options:
+        value = str(option.get("value") or "").strip()
+        if not value or value in seen_values:
+            continue
+        seen_values.add(value)
+        deduped.append(option)
+    return deduped[:4]
+
+
+def _choice_option_from_text(text: str, index: int) -> dict:
+    cleaned = re.sub(r"\s+", " ", text).strip(" -_*`：:")
+    label = cleaned
+    description = ""
+    split_match = re.match(r"^(?P<label>[^：:]{1,24})[：:]\s*(?P<description>.+)$", cleaned)
+    if split_match:
+        label = split_match.group("label").strip()
+        description = split_match.group("description").strip()
+    return {
+        "id": f"option-{index + 1}",
+        "label": label[:36] or f"选项 {index + 1}",
+        "value": cleaned,
+        "description": description[:96],
+    }
+
+
+def _extract_unstructured_choice_question(text: str) -> str:
+    question_lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = _strip_markdown_choice_line(raw_line)
+        if not line:
+            continue
+        if re.match(r"^(?:选项\s*)?(?:[A-Da-d]|[1-4]|[一二三四])[\.\)、:：]\s*.+$", line):
+            break
+        if re.match(r"^(?:[-*•]\s+).+$", raw_line.strip()):
+            break
+        question_lines.append(line)
+    question = " ".join(question_lines).strip()
+    question = re.sub(r"(?:可以|请)?(?:从)?(?:下面|以下)(?:几个)?(?:选项|方案)(?:里)?(?:选一个)?[：:]?$", "", question).strip()
+    return question[:160]
+
+
+def _strip_markdown_choice_line(line: str) -> str:
+    return line.strip().strip("`").strip()
 
 
 def _default_local_operator_workspace_roots() -> list[str]:
