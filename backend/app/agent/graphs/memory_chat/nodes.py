@@ -87,7 +87,7 @@ from app.services.attachment_service import (
     get_attachment_or_404,
     load_attachment_context_for_message,
 )
-from app.services.long_term_memory_service import list_core_memories
+from app.services.long_term_memory_service import format_core_memory_with_sources_for_prompt, list_core_memories
 
 
 SessionFactory = Callable[[], AbstractContextManager[Session]]
@@ -347,7 +347,7 @@ def build_l4_core_memory_node(session_factory: SessionFactory):
     def build_l4_core_memory(state: MemoryChatGraphState) -> MemoryChatGraphState:
         with session_factory() as session:
             core_memories = [
-                memory.content
+                format_core_memory_with_sources_for_prompt(session, memory)
                 for memory in list_core_memories(session)
             ]
         layer = build_core_memory_layer(core_memories, _context_budget())

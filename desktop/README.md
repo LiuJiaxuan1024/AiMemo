@@ -54,6 +54,8 @@ cd E:\Ai记
 .\scripts\start-dev.ps1
 ```
 
+Windows 默认隐藏后端、前端和 Tauri dev 的服务控制台，只显示当前启动终端和桌面精灵窗口；日志写入 `data/dev_logs/`。调试桌面启动时可以使用 `.\scripts\start-dev.ps1 -SeparateWindows` 恢复多窗口控制台。
+
 Linux / macOS：
 
 ```bash

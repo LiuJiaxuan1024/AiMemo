@@ -74,15 +74,25 @@ html.linux-elf-window #app {
   justify-self: center;
   margin-bottom: 8px;
   margin-right: 0;
+  max-height: 232px;
   max-width: 238px;
+  overflow-y: hidden;
+  overscroll-behavior: contain;
   padding: 9px 11px;
   position: relative;
   opacity: 0;
+  scrollbar-width: none;
   z-index: 5;
   transform: translateY(4px);
   transition:
     opacity 160ms ease,
     transform 160ms ease;
+}
+
+.bubble.scrollable {
+  overflow-y: auto;
+  scrollbar-color: rgba(91, 141, 204, 0.28) transparent;
+  scrollbar-width: thin;
 }
 
 .bubble.visible {
@@ -101,6 +111,24 @@ html.linux-elf-window #app {
   right: 42px;
   transform: rotate(45deg);
   width: 9px;
+}
+
+.bubble.scrollable::-webkit-scrollbar {
+  width: 5px;
+}
+
+.bubble::-webkit-scrollbar,
+.bubble::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.bubble.scrollable::-webkit-scrollbar-thumb {
+  background: rgba(91, 141, 204, 0.22);
+  border-radius: 999px;
+}
+
+.bubble.scrollable::-webkit-scrollbar-thumb:hover {
+  background: rgba(91, 141, 204, 0.36);
 }
 
 html.linux-elf-window .bubble {
@@ -407,13 +435,30 @@ html.linux-elf-window .chat-panel {
   display: grid;
   gap: 5px;
   max-height: 188px;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
   -ms-overflow-style: none;
-  scrollbar-width: none;
+  scrollbar-color: rgba(91, 141, 204, 0.28) transparent;
+  scrollbar-width: thin;
 }
 
 .choice-options::-webkit-scrollbar {
-  display: none;
+  width: 5px;
+}
+
+.choice-options::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.choice-options::-webkit-scrollbar-thumb {
+  background: rgba(91, 141, 204, 0.22);
+  border-radius: 999px;
+}
+
+.choice-options::-webkit-scrollbar-thumb:hover {
+  background: rgba(91, 141, 204, 0.36);
 }
 
 .choice-option {

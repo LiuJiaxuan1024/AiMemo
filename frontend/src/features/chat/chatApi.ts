@@ -1,6 +1,8 @@
 import type {
   ChatActiveTurnList,
   ChatAttachment,
+  CommandExecuteResponse,
+  CommandListResponse,
   ChatMessage,
   ChatStreamEvent,
   ChatTurnGraph,
@@ -67,6 +69,24 @@ export function listMessages(conversationId: number): Promise<ChatMessage[]> {
 
 export function listConversationKnowledgeMounts(conversationId: number): Promise<ConversationKnowledgeMount[]> {
   return request<ConversationKnowledgeMount[]>(`/api/conversations/${conversationId}/knowledge-mounts`);
+}
+
+export function listCommands(conversationId: number): Promise<CommandListResponse> {
+  return request<CommandListResponse>(`/api/conversations/${conversationId}/commands`);
+}
+
+export function executeCommand(
+  conversationId: number,
+  command: string,
+  parentMessageId: number | null = null,
+): Promise<CommandExecuteResponse> {
+  return request<CommandExecuteResponse>(`/api/conversations/${conversationId}/commands`, {
+    method: "POST",
+    body: JSON.stringify({
+      command,
+      parent_message_id: parentMessageId,
+    }),
+  });
 }
 
 export function replaceConversationKnowledgeMounts(

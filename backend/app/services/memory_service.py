@@ -1,4 +1,5 @@
 from fastapi import HTTPException, status
+import json
 from sqlmodel import Session, desc, select
 
 from app.models.chat_message import ChatMessage
@@ -72,7 +73,11 @@ def get_memory_detail(session: Session, memory_id: int) -> MemoryDetail:
     """
 
     memory = _get_memory_or_404(session, memory_id)
-    return _to_memory_detail(memory, _resolve_source_message(session, memory))
+    return _to_memory_detail(
+        memory,
+        _resolve_source_message(session, memory),
+        _resolve_evidence_messages(session, memory),
+    )
 
 
 def update_memory(
@@ -252,10 +257,15 @@ def _to_memory_read(memory: LongTermMemory) -> MemoryRead:
         summary=memory.summary,
         importance=memory.importance,
         confidence=memory.confidence,
+        reinforcement_count=memory.reinforcement_count,
+        evidence_count=memory.evidence_count,
+        evidence_source_ids=_parse_int_list(memory.evidence_source_ids),
+        metadata=_parse_json_object(memory.metadata_json),
         source_type=memory.source_type,
         source_id=memory.source_id,
         status=memory.status,
         content_hash=memory.content_hash,
+        last_reinforced_at=memory.last_reinforced_at,
         created_at=memory.created_at,
         updated_at=memory.updated_at,
     )
@@ -264,11 +274,16 @@ def _to_memory_read(memory: LongTermMemory) -> MemoryRead:
 def _to_memory_detail(
     memory: LongTermMemory,
     source_message: MemorySourceMessage | None,
+    evidence_messages: list[MemorySourceMessage],
 ) -> MemoryDetail:
     """把 ORM 对象转换为详情响应，避免 API 层直接接触数据库模型。"""
 
     base = _to_memory_read(memory)
-    return MemoryDetail(**base.model_dump(), source_message=source_message)
+    return MemoryDetail(
+        **base.model_dump(),
+        source_message=source_message,
+        evidence_messages=evidence_messages,
+    )
 
 
 def _resolve_source_message(
@@ -298,3 +313,59 @@ def _resolve_source_message(
         content=message.content,
         created_at=message.created_at,
     )
+
+
+def _resolve_evidence_messages(
+    session: Session,
+    memory: LongTermMemory,
+) -> list[MemorySourceMessage]:
+    if memory.source_type != "chat_message":
+        return []
+    source_ids = _parse_int_list(memory.evidence_source_ids)
+    if memory.source_id is not None and memory.source_id not in source_ids:
+        source_ids.insert(0, memory.source_id)
+    messages: list[MemorySourceMessage] = []
+    seen: set[int] = set()
+    for source_id in source_ids:
+        if source_id in seen:
+            continue
+        seen.add(source_id)
+        message = session.get(ChatMessage, source_id)
+        if message is None:
+            continue
+        conversation = session.get(Conversation, message.conversation_id)
+        messages.append(
+            MemorySourceMessage(
+                id=message.id or 0,
+                conversation_id=message.conversation_id,
+                conversation_title=conversation.title if conversation else "未知对话",
+                role=message.role,
+                content=message.content,
+                created_at=message.created_at,
+            )
+        )
+    return messages
+
+
+def _parse_int_list(value: str) -> list[int]:
+    try:
+        payload = json.loads(value or "[]")
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+    result: list[int] = []
+    for item in payload:
+        try:
+            result.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _parse_json_object(value: str) -> dict:
+    try:
+        payload = json.loads(value or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}

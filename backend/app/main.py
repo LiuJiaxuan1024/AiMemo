@@ -7,6 +7,7 @@ from app.api.app_config import router as app_config_router
 from app.api.attachments import router as attachments_router
 from app.api.background_tasks import router as background_tasks_router
 from app.api.chat import router as chat_router
+from app.api.commands import router as commands_router
 from app.api.conversations import router as conversations_router
 from app.api.elf import router as elf_router
 from app.api.elf_voice import router as elf_voice_router
@@ -44,6 +45,7 @@ def create_app() -> FastAPI:
     app.include_router(attachments_router, prefix="/api")
     app.include_router(conversations_router, prefix="/api")
     app.include_router(chat_router, prefix="/api")
+    app.include_router(commands_router, prefix="/api")
     app.include_router(elf_router, prefix="/api")
     app.include_router(elf_voice_router, prefix="/api")
     app.include_router(notes_router, prefix="/api")

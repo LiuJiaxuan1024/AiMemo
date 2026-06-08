@@ -140,6 +140,18 @@ API 文档:     http://127.0.0.1:8000/docs
 桌面精灵:     Memo Elf Tauri 透明窗口
 ```
 
+Windows 默认只保留当前启动终端和桌面精灵窗口，不再额外弹出后端、前端、桌面三个 PowerShell 服务窗口。服务 stdout/stderr 会写入：
+
+```text
+data/dev_logs/
+```
+
+如果需要调试启动过程，可以恢复旧的多窗口模式：
+
+```powershell
+.\scripts\aimemo.ps1 start -SeparateWindows
+```
+
 语音工坊入口：
 
 ```text

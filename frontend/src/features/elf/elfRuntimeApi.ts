@@ -1,4 +1,5 @@
 import type { ElfRuntimeStatusRead } from "./types";
+import type { ChatTurnGraph } from "../chat/types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -19,4 +20,8 @@ async function request<T>(path: string): Promise<T> {
 
 export function getElfRuntimeStatus(): Promise<ElfRuntimeStatusRead> {
   return request<ElfRuntimeStatusRead>("/api/elf/runtime/status");
+}
+
+export function getElfTurnGraph(turnId: number): Promise<ChatTurnGraph> {
+  return request<ChatTurnGraph>(`/api/elf/chat/turns/${turnId}/graph`);
 }

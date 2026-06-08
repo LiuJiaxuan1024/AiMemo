@@ -45,6 +45,7 @@ from app.schemas.conversation import ConversationCreate
 from app.services.conversation_service import create_conversation
 from app.services.chat_turn_service import initial_node_statuses
 from app.services.chat_turn_service import get_chat_turn_state_history
+from app.services.memory_service import build_memory_content_hash
 
 
 def test_memory_chat_graph_direct_answer_persists_messages(
@@ -92,6 +93,63 @@ def test_memory_chat_graph_direct_answer_persists_messages(
     assert messages[1].parent_id == messages[0].id
     assert messages[0].checkpoint_id
     assert messages[0].checkpoint_id == messages[1].checkpoint_id
+
+
+def test_memory_chat_graph_l4_memory_includes_compact_source_trace(
+    session,
+    session_factory,
+    tmp_path: Path,
+):
+    source_conversation = create_conversation(session, ConversationCreate(title="精灵声线设计"))
+    source_user = ChatMessage(
+        conversation_id=source_conversation.id or 0,
+        role="user",
+        content="我希望精灵的声线像小鸟游星野，慵懒、温柔、轻松，但是不要幼稚。",
+    )
+    session.add(source_user)
+    session.commit()
+    session.refresh(source_user)
+    source_assistant = ChatMessage(
+        conversation_id=source_conversation.id or 0,
+        role="assistant",
+        content="我会把它理解成松弛、陪伴感强、轻柔但不过分卖萌的方向。",
+        parent_id=source_user.id,
+    )
+    session.add(source_assistant)
+    session.commit()
+    session.refresh(source_assistant)
+
+    memory_content = "用户希望精灵声线接近小鸟游星野：慵懒、温柔、轻松，但不要幼稚化。"
+    memory = LongTermMemory(
+        level=4,
+        category="preference",
+        memory_key="elf.voice_style",
+        content=memory_content,
+        summary="精灵声线偏好",
+        importance=0.93,
+        confidence=0.9,
+        source_type="chat_message",
+        source_id=source_assistant.id,
+        evidence_source_ids=f"[{source_assistant.id}]",
+        content_hash=build_memory_content_hash("preference", memory_content),
+    )
+    session.add(memory)
+    session.commit()
+
+    conversation = create_conversation(session, ConversationCreate(title="精灵会话"))
+
+    result = run_memory_chat_graph(
+        conversation_id=conversation.id,
+        user_message="精灵声音应该怎么设计？",
+        session_factory=session_factory,
+        checkpoint_path=str(tmp_path / "checkpoints.db"),
+        answer_generator=lambda *args, **kwargs: "按你的偏好设计。",
+    )
+
+    assert "用户希望精灵声线接近小鸟游星野" in result["prompt_context"]
+    assert "来源线索" in result["prompt_context"]
+    assert "精灵声线设计" in result["prompt_context"]
+    assert "用户说：我希望精灵的声线像小鸟游星野" in result["prompt_context"]
 
 
 def test_chat_turn_state_history_reads_langgraph_checkpoints(

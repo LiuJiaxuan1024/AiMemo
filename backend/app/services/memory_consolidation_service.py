@@ -7,6 +7,7 @@ conversation_memory_graph 抽取出的记忆只是“候选”。本服务负责
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
+import json
 from typing import Any
 import re
 
@@ -26,6 +27,11 @@ ConsolidationJudge = Callable[
 
 HIGH_SIMILARITY_SKIP_THRESHOLD = 0.88
 MAX_CANDIDATE_MEMORIES = 8
+MEMORY_KEY_TAXONOMY = (
+    "user.preferred_name, user.identity, user.communication_style, "
+    "user.preference.*, user.goal.*, agent.behavior.*, elf.voice_style, "
+    "elf.persona_style, project.*.goal, project.*.preference"
+)
 
 
 @dataclass(frozen=True)
@@ -36,6 +42,7 @@ class NormalizedMemoryCandidate:
     memory_key: str
     content: str
     summary: str
+    metadata_json: str
     importance: float
     confidence: float
 
@@ -47,7 +54,10 @@ class ConsolidationDecision:
     action:
       - skip: 不写入。
       - create: 创建新长期记忆。
-      - update: 更新 existing_memory_id 指向的已有记忆。
+      - replace: 新信息明确否定或替换旧记忆。
+      - merge: 新信息是已有记忆的补充条件，更新为综合后的自包含记忆。
+      - reinforce: 新信息重复确认已有记忆，只巩固置信度和更新时间。
+      - update: 兼容旧测试和旧 checkpoint，语义等同于 merge。
     """
 
     action: str
@@ -55,6 +65,7 @@ class ConsolidationDecision:
     memory_key: str
     content: str
     summary: str
+    metadata_json: str
     importance: float
     confidence: float
     reason: str
@@ -78,9 +89,9 @@ def consolidate_memory_candidates(
         exact_duplicate = _find_exact_duplicate(session, candidate)
         if exact_duplicate is not None:
             decisions.append(
-                _skip_decision(
+                _reinforce_decision(
                     candidate,
-                    reason="content_hash 已存在，跳过精确重复记忆。",
+                    reason="content_hash 已存在，巩固已有记忆而非重复写入。",
                     existing_memory_id=exact_duplicate.id,
                 )
             )
@@ -90,9 +101,9 @@ def consolidate_memory_candidates(
         obvious_duplicate = _find_obvious_duplicate(candidate, similar_memories)
         if obvious_duplicate is not None:
             decisions.append(
-                _skip_decision(
+                _reinforce_decision(
                     candidate,
-                    reason="与已有长期记忆高度相似，判定为重复记忆。",
+                    reason="与已有长期记忆高度相似，巩固已有记忆而非重复写入。",
                     existing_memory_id=obvious_duplicate.id,
                 )
             )
@@ -116,6 +127,7 @@ def consolidate_memory_candidates(
                 memory_key=candidate.memory_key,
                 content=candidate.content,
                 summary=candidate.summary,
+                metadata_json=candidate.metadata_json,
                 importance=candidate.importance,
                 confidence=candidate.confidence,
                 reason="未发现相似 active L4 记忆，创建新记忆。",
@@ -134,20 +146,25 @@ def _coerce_decision(
     if isinstance(value, ConsolidationDecision):
         return value
     action = str(value.get("action") or "create").strip().lower()
-    if action not in {"skip", "create", "update"}:
+    if action not in {"skip", "create", "update", "replace", "merge", "reinforce"}:
         action = "create"
     existing_memory_id = value.get("existing_memory_id")
     try:
         existing_memory_id = int(existing_memory_id) if existing_memory_id is not None else None
     except (TypeError, ValueError):
         existing_memory_id = None
+    content = _coerce_self_contained_content(
+        str(value.get("content") or candidate.content).strip(),
+        candidate.content,
+    )
     return ConsolidationDecision(
         action=action,
         existing_memory_id=existing_memory_id,
         category=str(value.get("category") or candidate.category),
         memory_key=str(value.get("memory_key") or candidate.memory_key).strip().lower()[:120],
-        content=str(value.get("content") or candidate.content).strip()[:1000],
+        content=content[:1000],
         summary=str(value.get("summary") or candidate.summary).strip()[:300],
+        metadata_json=_normalize_metadata_json(value.get("metadata"), candidate.metadata_json),
         importance=_clamp_float(value.get("importance", candidate.importance)),
         confidence=_clamp_float(value.get("confidence", candidate.confidence)),
         reason=str(value.get("reason") or "外部 judge 归并判断。").strip()[:500],
@@ -220,6 +237,7 @@ def judge_memory_consolidation(
             f"   memory_key: {memory.memory_key}\n"
             f"   content: {memory.content}\n"
             f"   summary: {memory.summary}\n"
+            f"   metadata: {memory.metadata_json}\n"
             f"   importance: {memory.importance}\n"
             f"   confidence: {memory.confidence}"
         )
@@ -228,20 +246,29 @@ def judge_memory_consolidation(
     prompt = (
         "你是 Ai 记的长期记忆归并器。判断新候选记忆是否和已有长期记忆重复，"
         "或是否应该更新已有记忆。只返回严格 JSON，不要输出 markdown。\n\n"
-        "可选 action：skip, create, update。\n"
+        "可选 action：skip, create, replace, merge, reinforce。\n"
         "判断原则：\n"
-        "- 同一主体、同一目标、同一事实，只是措辞不同 -> skip。\n"
-        "- 新内容更准确、更完整，且仍是同一事实 -> update。\n"
-        "- memory_key 相同表示同一个稳定记忆槽位，若内容冲突，优先 update 为最新明确表达。\n"
+        "- 低价值、无法自包含、明显不该长期记住 -> skip。\n"
+        "- 完全独立的新事实或新偏好 -> create。\n"
+        "- 同一主体、同一目标、同一事实，只是重复确认或措辞不同 -> reinforce。\n"
+        "- 新内容是已有记忆的附加条件、细化偏好、补充特征或新增约束 -> merge。\n"
+        "- 新内容明确否定、废弃或替换旧记忆 -> replace。\n"
+        "- memory_key 相同表示同一个稳定记忆槽位，若内容冲突，优先 replace 为最新明确表达。\n"
+        f"- memory_key 优先沿用已有记忆；新建时优先使用稳定槽位：{MEMORY_KEY_TAXONOMY}。\n"
         "- 表达不同事实 -> create。\n"
         "- 不要因为中文近义词差异创建新记忆。\n\n"
+        "merge 输出要求：content 必须是已有记忆和新候选的综合版，保留仍然有效的旧信息，吸收新增条件，"
+        "并且跨会话单独读取也能理解。\n"
+        "replace 输出要求：content 只保留最新明确表达，必要时说明被替换的旧条件不再适用。\n"
+        "reinforce 输出要求：content 可保持已有记忆原文，不要为了重复确认改写语义。\n\n"
         "输出 JSON 格式：\n"
         "{"
-        "\"action\":\"skip|create|update\","
+        "\"action\":\"skip|create|replace|merge|reinforce\","
         "\"existing_memory_id\":18,"
         "\"memory_key\":\"user.preferred_name\","
         "\"content\":\"归并后的中文长期记忆\","
         "\"summary\":\"短摘要\","
+        "\"metadata\":{\"slot\":\"可选结构化信息\"},"
         "\"importance\":0.9,"
         "\"confidence\":1.0,"
         "\"reason\":\"简短原因\""
@@ -251,6 +278,7 @@ def judge_memory_consolidation(
         f"memory_key: {candidate.memory_key}\n"
         f"content: {candidate.content}\n"
         f"summary: {candidate.summary}\n"
+        f"metadata: {candidate.metadata_json}\n"
         f"importance: {candidate.importance}\n"
         f"confidence: {candidate.confidence}\n\n"
         f"已有记忆候选：\n{existing_text}"
@@ -279,13 +307,14 @@ def _parse_judge_response(
             memory_key=candidate.memory_key,
             content=candidate.content,
             summary=candidate.summary,
+            metadata_json=candidate.metadata_json,
             importance=candidate.importance,
             confidence=candidate.confidence,
             reason="归并判断 JSON 解析失败，降级为创建新记忆。",
         )
 
     action = str(payload.get("action") or "create").strip().lower()
-    if action not in {"skip", "create", "update"}:
+    if action not in {"skip", "create", "update", "replace", "merge", "reinforce"}:
         action = "create"
 
     existing_ids = {memory.id for memory in existing_memories if memory.id is not None}
@@ -296,16 +325,25 @@ def _parse_judge_response(
         existing_memory_id = None
     if existing_memory_id not in existing_ids:
         existing_memory_id = None
-    if action in {"skip", "update"} and existing_memory_id is None:
+    if action in {"skip", "update", "replace", "merge", "reinforce"} and existing_memory_id is None:
         action = "create"
 
+    category = str(payload.get("category") or candidate.category).strip().lower()
+    if category not in {"preference", "identity", "goal", "instruction", "event", "fact"}:
+        category = candidate.category
+
+    content = _coerce_self_contained_content(
+        str(payload.get("content") or candidate.content).strip(),
+        candidate.content,
+    )
     return ConsolidationDecision(
         action=action,
         existing_memory_id=existing_memory_id,
-        category=candidate.category,
+        category=category,
         memory_key=str(payload.get("memory_key") or candidate.memory_key).strip().lower()[:120],
-        content=str(payload.get("content") or candidate.content).strip()[:1000],
+        content=content[:1000],
         summary=str(payload.get("summary") or candidate.summary).strip()[:300],
+        metadata_json=_normalize_metadata_json(payload.get("metadata"), candidate.metadata_json),
         importance=_clamp_float(payload.get("importance", candidate.importance)),
         confidence=_clamp_float(payload.get("confidence", candidate.confidence)),
         reason=str(payload.get("reason") or "LLM 归并判断。").strip()[:500],
@@ -347,6 +385,27 @@ def _skip_decision(
         memory_key=candidate.memory_key,
         content=candidate.content,
         summary=candidate.summary,
+        metadata_json=candidate.metadata_json,
+        importance=candidate.importance,
+        confidence=candidate.confidence,
+        reason=reason,
+    )
+
+
+def _reinforce_decision(
+    candidate: NormalizedMemoryCandidate,
+    *,
+    reason: str,
+    existing_memory_id: int | None,
+) -> ConsolidationDecision:
+    return ConsolidationDecision(
+        action="reinforce",
+        existing_memory_id=existing_memory_id,
+        category=candidate.category,
+        memory_key=candidate.memory_key,
+        content=candidate.content,
+        summary=candidate.summary,
+        metadata_json=candidate.metadata_json,
         importance=candidate.importance,
         confidence=candidate.confidence,
         reason=reason,
@@ -368,6 +427,44 @@ def _normalize_similarity_text(value: str) -> str:
     for token in ("正在", "打算", "计划中", "目前", "现在"):
         normalized = normalized.replace(token, "")
     return normalized
+
+
+def _normalize_metadata_json(value: Any, fallback_json: str = "{}") -> str:
+    if isinstance(value, dict):
+        metadata = value
+    else:
+        try:
+            parsed = json.loads(fallback_json or "{}")
+        except json.JSONDecodeError:
+            parsed = {}
+        metadata = parsed if isinstance(parsed, dict) else {}
+    return json.dumps(metadata, ensure_ascii=False, sort_keys=True)[:1000]
+
+
+def _coerce_self_contained_content(content: str, fallback: str) -> str:
+    if not _looks_context_dependent(content):
+        return content
+    return fallback if fallback and not _looks_context_dependent(fallback) else content
+
+
+def _looks_context_dependent(content: str) -> bool:
+    normalized = content.strip()
+    if not normalized:
+        return True
+    context_markers = (
+        "这个人",
+        "这个角色",
+        "这种风格",
+        "这个风格",
+        "刚才",
+        "上面",
+        "前面",
+        "上述",
+        "前述",
+        "按之前",
+        "按上次",
+    )
+    return any(marker in normalized for marker in context_markers)
 
 
 def _needs_cross_category_slot_recall(candidate: NormalizedMemoryCandidate) -> bool:

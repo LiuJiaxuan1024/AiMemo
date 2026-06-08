@@ -1,10 +1,19 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
+from sqlmodel import Session
 
+from app.core.database import get_session
 from app.schemas.chat import ChatRequest
 from app.schemas.chat import ChatResumeRequest
+from app.schemas.chat import ChatTurnGraphRead, ChatTurnStateHistoryRead
 from app.schemas.elf import ElfEventCreate, ElfEventListRead, ElfEventRead, ElfRuntimeStateRead
-from app.services.elf_chat_service import get_elf_chat_status, stream_elf_chat_events, stream_elf_chat_resume_events
+from app.services.chat_turn_service import get_chat_turn_graph_by_turn, get_chat_turn_state_history
+from app.services.elf_chat_service import (
+    get_elf_chat_status,
+    get_or_create_elf_conversation_in_session,
+    stream_elf_chat_events,
+    stream_elf_chat_resume_events,
+)
 from app.services.elf_event_service import elf_event_service
 from app.services.elf_runtime_state_service import get_elf_runtime_state
 
@@ -58,6 +67,40 @@ def get_elf_chat_status_api() -> dict:
 @router.get("/runtime/status", response_model=ElfRuntimeStateRead)
 def get_elf_runtime_status_api() -> ElfRuntimeStateRead:
     return get_elf_runtime_state()
+
+
+@router.get("/chat/turns/{turn_id}/graph", response_model=ChatTurnGraphRead)
+def get_elf_turn_graph_api(
+    turn_id: int,
+    session: Session = Depends(get_session),
+) -> ChatTurnGraphRead:
+    """读取精灵专用会话里某一轮的 Graph 调试视图。"""
+
+    conversation = get_or_create_elf_conversation_in_session(session)
+    if conversation.id is None:
+        raise RuntimeError("Elf conversation id is required.")
+    return get_chat_turn_graph_by_turn(
+        session,
+        conversation_id=conversation.id,
+        turn_id=turn_id,
+    )
+
+
+@router.get("/chat/turns/{turn_id}/state-history", response_model=ChatTurnStateHistoryRead)
+def get_elf_turn_state_history_api(
+    turn_id: int,
+    session: Session = Depends(get_session),
+) -> ChatTurnStateHistoryRead:
+    """读取精灵专用会话里某一轮的 LangGraph checkpoint 历史。"""
+
+    conversation = get_or_create_elf_conversation_in_session(session)
+    if conversation.id is None:
+        raise RuntimeError("Elf conversation id is required.")
+    return get_chat_turn_state_history(
+        session,
+        conversation_id=conversation.id,
+        turn_id=turn_id,
+    )
 
 
 @router.post("/chat/turns/{turn_id}/resume/stream")

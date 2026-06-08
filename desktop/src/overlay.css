@@ -40,15 +40,43 @@ body {
   font-size: 13px;
   left: 31px;
   line-height: 1.45;
+  max-height: 232px;
   max-width: 238px;
   opacity: 0;
+  overflow-y: hidden;
+  overscroll-behavior: contain;
   padding: 9px 11px;
   position: absolute;
+  scrollbar-width: none;
   transform: translateY(4px);
   transition:
     opacity 160ms ease,
     transform 160ms ease;
   z-index: 5;
+}
+
+.bubble.scrollable {
+  overflow-y: auto;
+  scrollbar-color: rgba(91, 141, 204, 0.28) transparent;
+  scrollbar-width: thin;
+}
+
+.bubble.scrollable::-webkit-scrollbar {
+  width: 5px;
+}
+
+.bubble::-webkit-scrollbar,
+.bubble::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.bubble.scrollable::-webkit-scrollbar-thumb {
+  background: rgba(91, 141, 204, 0.22);
+  border-radius: 999px;
+}
+
+.bubble.scrollable::-webkit-scrollbar-thumb:hover {
+  background: rgba(91, 141, 204, 0.36);
 }
 
 .bubble.visible {
@@ -194,7 +222,7 @@ body {
   box-sizing: border-box;
   display: grid;
   gap: 5px;
-  left: 260px;
+  left: 0;
   opacity: 0;
   padding: 6px;
   pointer-events: none;
@@ -246,12 +274,29 @@ body {
   display: grid;
   gap: 5px;
   max-height: 188px;
-  overflow: hidden;
-  scrollbar-width: none;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+  scrollbar-color: rgba(91, 141, 204, 0.28) transparent;
+  scrollbar-width: thin;
 }
 
 .choice-options::-webkit-scrollbar {
-  display: none;
+  width: 5px;
+}
+
+.choice-options::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.choice-options::-webkit-scrollbar-thumb {
+  background: rgba(91, 141, 204, 0.22);
+  border-radius: 999px;
+}
+
+.choice-options::-webkit-scrollbar-thumb:hover {
+  background: rgba(91, 141, 204, 0.36);
 }
 
 .choice-option {

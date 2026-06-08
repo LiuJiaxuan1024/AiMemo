@@ -654,6 +654,12 @@ fn show_native_choice_panel(
         selected_ids.borrow_mut().push(first_option.id.clone());
     }
     let buttons = Rc::new(RefCell::new(Vec::<gtk::CheckButton>::new()));
+    let options_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let options_scroller = gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+    options_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    options_scroller.set_size_request(CHOICE_WIDTH - WINDOW_PADDING * 4, 220);
+    options_scroller.add(&options_box);
+    panel.pack_start(&options_scroller, true, true, 0);
 
     for option in &request.options {
         let option_title = if option.recommended {
@@ -687,7 +693,7 @@ fn show_native_choice_panel(
             );
         });
         buttons.borrow_mut().push(button.clone());
-        panel.pack_start(&button, false, false, 0);
+        options_box.pack_start(&button, false, false, 0);
     }
 
     let footer = gtk::Box::new(gtk::Orientation::Vertical, 6);

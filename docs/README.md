@@ -53,6 +53,7 @@
 - [Note Embedding Graph](./agent/note-embedding-graph.md)
 - [Memory Chat Graph](./agent/memory-chat-graph.md)
 - [Context Pyramid](./agent/context-pyramid.md)
+- [Agent 指令配置设计](./agent/command-configuration.md)
 - [聊天模型 Provider 适配设计](./agent/model-provider-adapter.md)
 - [远程服务器操作失败复盘与改进说明](./agent/remote-server-operation-failure-analysis.md)
 - [Conversation Summary Graph](./agent/conversation-summary-graph.md)

@@ -28,6 +28,7 @@ from app.models import (
     LongTermMemory,
     Note,
     NoteChunk,
+    RuntimeConfig,
     VoiceProfile,
 )
 from app.rag.hashing import content_hash
@@ -55,6 +56,7 @@ _AUTOINCREMENT_MODELS = (
     AgentOperation,
     BackgroundTask,
     VoiceProfile,
+    RuntimeConfig,
 )
 _AUTOINCREMENT_TABLES = tuple(model.__tablename__ for model in _AUTOINCREMENT_MODELS)
 
@@ -161,6 +163,11 @@ def migrate_existing_sqlite_schema() -> None:
                 "category": "VARCHAR(40) DEFAULT 'fact'",
                 "memory_key": "VARCHAR(120) DEFAULT ''",
                 "summary": "TEXT DEFAULT ''",
+                "reinforcement_count": "INTEGER DEFAULT 1",
+                "evidence_count": "INTEGER DEFAULT 1",
+                "evidence_source_ids": "TEXT DEFAULT '[]'",
+                "metadata_json": "TEXT DEFAULT '{}'",
+                "last_reinforced_at": "DATETIME",
             },
         )
 

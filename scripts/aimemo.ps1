@@ -10,6 +10,7 @@ param(
   [switch]$SkipInstall,
   [switch]$SkipDoctor,
   [switch]$KeepWindows,
+  [switch]$SeparateWindows,
   [switch]$DryRun,
   [switch]$NoPathUpdate,
 
@@ -82,7 +83,7 @@ function Show-CommandHelp {
       Show-CommandHelp "register"
     }
     "start" {
-      Write-Host "Usage: aimemo start [-SkipInstall] [-SkipDoctor] [-NoDesktop]"
+      Write-Host "Usage: aimemo start [-SkipInstall] [-SkipDoctor] [-NoDesktop] [-SeparateWindows]"
       Write-Host ""
       Write-Host "Starts AiMemo development services. If this checkout is already running,"
       Write-Host "start exits with a reminder to use aimemo restart."
@@ -91,12 +92,13 @@ function Show-CommandHelp {
       Write-Host "  -SkipInstall  Skip dependency installation checks."
       Write-Host "  -SkipDoctor   Skip the doctor preflight."
       Write-Host "  -NoDesktop    Start backend/frontend only."
+      Write-Host "  -SeparateWindows  Show backend/frontend/desktop service consoles for debugging."
     }
     "dev" {
       Show-CommandHelp "start"
     }
     "restart" {
-      Write-Host "Usage: aimemo restart [-KeepWindows] [-SkipInstall] [-SkipDoctor] [-NoDesktop]"
+      Write-Host "Usage: aimemo restart [-KeepWindows] [-SkipInstall] [-SkipDoctor] [-NoDesktop] [-SeparateWindows]"
       Write-Host ""
       Write-Host "Stops AiMemo development services for this checkout, then starts them again."
       Write-Host ""
@@ -105,6 +107,7 @@ function Show-CommandHelp {
       Write-Host "  -SkipInstall  Skip dependency installation checks during start."
       Write-Host "  -SkipDoctor   Skip the doctor preflight during start."
       Write-Host "  -NoDesktop    Start backend/frontend only."
+      Write-Host "  -SeparateWindows  Show backend/frontend/desktop service consoles for debugging."
     }
     "stop" {
       Write-Host "Usage: aimemo stop [-KeepWindows]"
@@ -156,6 +159,7 @@ switch ($normalizedCommand) {
     if ($SkipInstall) { $forwardParams.SkipInstall = $true }
     if ($NoDesktop) { $forwardParams.NoDesktop = $true }
     if ($SkipDoctor) { $forwardParams.SkipDoctor = $true }
+    if ($SeparateWindows) { $forwardParams.SeparateWindows = $true }
     & (Resolve-Script "start-dev.ps1") @forwardParams @RemainingArgs
     exit $LASTEXITCODE
   }
@@ -168,6 +172,7 @@ switch ($normalizedCommand) {
     if ($SkipInstall) { $forwardParams.SkipInstall = $true }
     if ($NoDesktop) { $forwardParams.NoDesktop = $true }
     if ($SkipDoctor) { $forwardParams.SkipDoctor = $true }
+    if ($SeparateWindows) { $forwardParams.SeparateWindows = $true }
     & (Resolve-Script "start-dev.ps1") @forwardParams @RemainingArgs
     exit $LASTEXITCODE
   }
@@ -185,6 +190,7 @@ switch ($normalizedCommand) {
     if ($SkipInstall) { $forwardParams.SkipInstall = $true }
     if ($NoDesktop) { $forwardParams.NoDesktop = $true }
     if ($SkipDoctor) { $forwardParams.SkipDoctor = $true }
+    if ($SeparateWindows) { $forwardParams.SeparateWindows = $true }
     & (Resolve-Script "start-dev.ps1") @forwardParams @RemainingArgs
     exit $LASTEXITCODE
   }

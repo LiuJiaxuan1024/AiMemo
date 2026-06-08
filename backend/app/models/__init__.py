@@ -15,6 +15,7 @@ from app.models.knowledge import (
 from app.models.long_term_memory import LongTermMemory
 from app.models.note import Note
 from app.models.note_chunk import NoteChunk
+from app.models.runtime_config import RuntimeConfig
 from app.models.voice_profile import VoiceProfile
 
 __all__ = [
@@ -34,5 +35,6 @@ __all__ = [
     "LongTermMemory",
     "Note",
     "NoteChunk",
+    "RuntimeConfig",
     "VoiceProfile",
 ]

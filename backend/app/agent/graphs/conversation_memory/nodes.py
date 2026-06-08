@@ -1,6 +1,7 @@
 import logging
 from collections.abc import Callable
 from contextlib import AbstractContextManager
+import json
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -27,6 +28,11 @@ MemoryExtractor = Callable[[list[ChatMessagePayload]], dict[str, Any]]
 
 MIN_IMPORTANCE = 0.7
 MIN_CONFIDENCE = 0.6
+MEMORY_KEY_TAXONOMY = (
+    "user.preferred_name, user.identity, user.communication_style, "
+    "user.preference.*, user.goal.*, agent.behavior.*, elf.voice_style, "
+    "elf.persona_style, project.*.goal, project.*.preference"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +87,7 @@ def build_write_memories_node(session_factory: SessionFactory):
     """执行归并决策，把长期记忆写入或更新到 longtermmemory。
 
     复杂的重复判断已经由 consolidate_memories 完成。本节点只负责执行
-    skip/create/update，并在 create/update 前再次做幂等保护。
+    skip/create/replace/merge/reinforce，并在写入前再次做幂等保护。
     """
 
     def write_memories(
@@ -99,8 +105,9 @@ def build_write_memories_node(session_factory: SessionFactory):
                 decision = _normalize_decision(raw_decision)
                 if decision is None or decision["action"] == "skip":
                     continue
+                decision["source_id"] = source_id
 
-                if decision["action"] == "update":
+                if decision["action"] in {"update", "replace", "merge", "reinforce"}:
                     memory = _apply_update_decision(session, decision)
                 else:
                     memory = _apply_create_decision(session, decision, source_id)
@@ -146,10 +153,29 @@ def build_consolidate_memories_node(
 def extract_long_term_memories(messages: list[ChatMessagePayload]) -> dict[str, Any]:
     """使用 qwen3.5-plus 抽取长期核心记忆候选。"""
 
+    prompt = build_memory_extraction_prompt(messages)
+    # DashScope OpenAI-compatible 接口支持 JSON mode。长期记忆抽取对格式稳定性要求高，
+    # 这里用 response_format 从源头降低未转义引号、markdown 包裹等非严格 JSON 输出概率。
+    json_model = get_agent_chat_model().bind(response_format={"type": "json_object"})
+    response = json_model.invoke(
+        [
+            SystemMessage(content="你负责为个人知识库抽取高价值、可跨会话复用的长期记忆。"),
+            HumanMessage(content=prompt),
+        ]
+    )
+    return parse_memory_extraction_response(str(response.content))
+
+
+def build_memory_extraction_prompt(messages: list[ChatMessagePayload]) -> str:
+    """构建长期记忆抽取 prompt。
+
+    单独拆出 helper，便于测试 prompt 约束，防止以后改动时退化为“空壳记忆”。
+    """
+
     messages_text = "\n".join(
         f"{message['role']}: {message['content']}" for message in messages
     )
-    prompt = (
+    return (
         "你是 Ai 记的长期记忆抽取器。判断以下一轮对话中是否有值得长期记住的信息。\n"
         "只返回严格合法 JSON，不要输出 markdown，不要输出解释文本。JSON 格式：\n"
         "{"
@@ -160,6 +186,7 @@ def extract_long_term_memories(messages: list[ChatMessagePayload]) -> dict[str, 
         "\"memory_key\":\"稳定槽位键，可为空，例如 user.preferred_name\","
         "\"content\":\"用一句中文写成稳定长期记忆\","
         "\"summary\":\"更短的摘要\","
+        "\"metadata\":{\"slot\":\"可选结构化信息\"},"
         "\"importance\":0.0,"
         "\"confidence\":0.0,"
         "\"reason\":\"简短原因\""
@@ -170,22 +197,20 @@ def extract_long_term_memories(messages: list[ChatMessagePayload]) -> dict[str, 
         "- 只保留未来多次对话仍有帮助的信息，例如稳定偏好、身份、长期目标、长期指令。\n"
         "- 能归入稳定槽位时填写 memory_key，例如用户希望被如何称呼用 user.preferred_name。\n"
         "- 同一个 memory_key 代表同一条可更新记忆，即使 category 表达不同也应归并。\n"
+        f"- memory_key 优先使用这些稳定槽位命名：{MEMORY_KEY_TAXONOMY}；不确定时可以留空，不要编造过细槽位。\n"
+        "- 记忆 content 必须自包含：跨会话单独读取时也能理解，不依赖“这个人”“这种风格”“刚才的设定”等上下文代词。\n"
+        "- 如果用户要求模仿某个人、角色、产品、项目或风格，不能只记录“需要模仿 X”；必须同时写清 X 的关键特征、约束、使用场景和禁止事项。\n"
+        "- 如果用户给前面记忆追加条件，应抽取成更完整的候选记忆，而不是只写“新增一个条件”。\n"
+        "- 避免版权或人格混淆表达：可以记录用户偏好的抽象风格特征，不要记录为直接复刻某个在世人物或受保护角色。\n"
         "- 临时闲聊、一次性问题、模型自己的回答、不确定猜测不要写入。\n"
         "- 如果没有值得记住的信息，返回 {\"memories\":[]}。\n\n"
+        "正例：用户说“以后精灵语音做成小鸟游星野那种感觉，慵懒、慢一点、软软的”。\n"
+        "应写：\"用户希望精灵语音采用温柔、慵懒、慢节奏、轻微撒娇感的角色化声线；只保留抽象风格特征，不直接复刻具体角色台词或身份。\"\n"
+        "反例：\"用户希望模仿小鸟游星野的特征。\"\n\n"
         "格式要求：所有 key 和字符串必须使用英文双引号；字段之间必须有英文逗号；"
         "不要出现尾随逗号。\n\n"
         f"对话：\n{messages_text}"
     )
-    # DashScope OpenAI-compatible 接口支持 JSON mode。长期记忆抽取对格式稳定性要求高，
-    # 这里用 response_format 从源头降低未转义引号、markdown 包裹等非严格 JSON 输出概率。
-    json_model = get_agent_chat_model().bind(response_format={"type": "json_object"})
-    response = json_model.invoke(
-        [
-            SystemMessage(content="你负责为个人知识库抽取高价值长期记忆。"),
-            HumanMessage(content=prompt),
-        ]
-    )
-    return parse_memory_extraction_response(str(response.content))
 
 
 def parse_memory_extraction_response(text: str) -> dict[str, Any]:
@@ -240,6 +265,7 @@ def _normalize_memory(raw_memory: Any) -> dict[str, Any] | None:
         "memory_key": memory_key,
         "content": content[:1000],
         "summary": summary[:300],
+        "metadata_json": _normalize_metadata_json(raw_memory.get("metadata")),
         "importance": importance,
         "confidence": confidence,
     }
@@ -249,7 +275,7 @@ def _normalize_decision(raw_decision: Any) -> dict[str, Any] | None:
     if not isinstance(raw_decision, dict):
         return None
     action = str(raw_decision.get("action") or "create").strip().lower()
-    if action not in {"skip", "create", "update"}:
+    if action not in {"skip", "create", "update", "replace", "merge", "reinforce"}:
         action = "create"
 
     content = str(raw_decision.get("content") or "").strip()
@@ -271,6 +297,7 @@ def _normalize_decision(raw_decision: Any) -> dict[str, Any] | None:
         "memory_key": memory_key,
         "content": content[:1000],
         "summary": str(raw_decision.get("summary") or content).strip()[:300],
+        "metadata_json": _normalize_metadata_json(raw_decision.get("metadata"), str(raw_decision.get("metadata_json") or "{}")),
         "importance": _clamp_float(raw_decision.get("importance", 0.0)),
         "confidence": _clamp_float(raw_decision.get("confidence", 0.0)),
     }
@@ -294,8 +321,12 @@ def _apply_create_decision(
         memory_key=decision["memory_key"],
         content=decision["content"],
         summary=decision["summary"],
+        metadata_json=decision["metadata_json"],
         importance=decision["importance"],
         confidence=decision["confidence"],
+        reinforcement_count=1,
+        evidence_count=1,
+        evidence_source_ids=_encode_evidence_source_ids([source_id]),
         source_type="chat_message",
         source_id=source_id,
         status="active",
@@ -319,13 +350,30 @@ def _apply_update_decision(
     if memory is None or memory.status != "active":
         return None
 
+    _append_memory_evidence(memory, decision.get("source_id"))
+
+    if decision["action"] == "reinforce":
+        if decision["memory_key"] and not memory.memory_key:
+            memory.memory_key = decision["memory_key"]
+        memory.importance = max(memory.importance, decision["importance"])
+        memory.confidence = max(memory.confidence, decision["confidence"])
+        memory.reinforcement_count = max(1, memory.reinforcement_count) + 1
+        memory.last_reinforced_at = utc_now()
+        memory.updated_at = utc_now()
+        session.add(memory)
+        session.flush()
+        return memory
+
     memory.category = decision["category"]
     if decision["memory_key"]:
         memory.memory_key = decision["memory_key"]
     memory.content = decision["content"]
     memory.summary = decision["summary"]
+    memory.metadata_json = decision["metadata_json"]
     memory.importance = max(memory.importance, decision["importance"])
     memory.confidence = max(memory.confidence, decision["confidence"])
+    memory.reinforcement_count = max(1, memory.reinforcement_count) + 1
+    memory.last_reinforced_at = utc_now()
     memory.content_hash = build_memory_content_hash(memory.category, memory.content)
     memory.updated_at = utc_now()
     session.add(memory)
@@ -339,6 +387,57 @@ def _clamp_float(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
     return max(0.0, min(1.0, number))
+
+
+def _normalize_metadata_json(value: Any, fallback_json: str = "{}") -> str:
+    if isinstance(value, dict):
+        metadata = value
+    else:
+        try:
+            parsed = json.loads(fallback_json or "{}")
+        except json.JSONDecodeError:
+            parsed = {}
+        metadata = parsed if isinstance(parsed, dict) else {}
+    return json.dumps(metadata, ensure_ascii=False, sort_keys=True)[:1000]
+
+
+def _append_memory_evidence(memory: LongTermMemory, source_id: Any) -> None:
+    try:
+        next_source_id = int(source_id)
+    except (TypeError, ValueError):
+        return
+    source_ids = _decode_evidence_source_ids(memory.evidence_source_ids)
+    if memory.source_id is not None:
+        try:
+            original_source_id = int(memory.source_id)
+        except (TypeError, ValueError):
+            original_source_id = None
+        if original_source_id is not None and original_source_id not in source_ids:
+            source_ids.insert(0, original_source_id)
+    if next_source_id not in source_ids:
+        source_ids.append(next_source_id)
+    memory.evidence_source_ids = _encode_evidence_source_ids(source_ids)
+    memory.evidence_count = len(source_ids)
+
+
+def _decode_evidence_source_ids(value: str) -> list[int]:
+    try:
+        payload = json.loads(value or "[]")
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+    source_ids: list[int] = []
+    for item in payload:
+        try:
+            source_ids.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return source_ids
+
+
+def _encode_evidence_source_ids(source_ids: list[int]) -> str:
+    return json.dumps(sorted(set(source_ids)))
 
 
 def _normalize_memory_key(memory_key: str) -> str:

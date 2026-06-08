@@ -32,7 +32,8 @@ const ELF_WINDOW_HEIGHT = 420;
 const ELF_SPRITE_WINDOW_WIDTH = 240;
 const ELF_SPRITE_WINDOW_HEIGHT = 300;
 const ELF_COMPACT_WINDOW_WIDTH = 300;
-const ELF_CHOICE_WINDOW_WIDTH = 560;
+const ELF_BUBBLE_WINDOW_HEIGHT = 300;
+const ELF_CHOICE_WINDOW_WIDTH = 300;
 const ELF_VOICE_REQUEST_TIMEOUT_MS = 45_000;
 const ELF_CONFIG_RETRY_MS = 1500;
 type OverlayMode = "hidden" | "bubble" | "menu" | "chat" | "choice";
@@ -552,10 +553,10 @@ async function positionOverlayWindow(overlay: WebviewWindow, mode: OverlayMode) 
 
 function overlayGeometryForMode(mode: OverlayMode) {
   if (mode === "choice") {
-    return { width: ELF_CHOICE_WINDOW_WIDTH, height: 360, x: -30, y: -30 };
+    return { width: ELF_CHOICE_WINDOW_WIDTH, height: 360, x: ELF_SPRITE_WINDOW_WIDTH + 4, y: -30 };
   }
   if (mode === "bubble") {
-    return { width: ELF_COMPACT_WINDOW_WIDTH, height: 120, x: -30, y: -120 };
+    return { width: ELF_COMPACT_WINDOW_WIDTH, height: ELF_BUBBLE_WINDOW_HEIGHT, x: -30, y: -ELF_BUBBLE_WINDOW_HEIGHT };
   }
   return { width: ELF_COMPACT_WINDOW_WIDTH, height: 130, x: -30, y: 170 };
 }

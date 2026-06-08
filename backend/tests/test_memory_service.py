@@ -1,8 +1,12 @@
 import pytest
 from fastapi import HTTPException
 
+from app.models.chat_message import ChatMessage
+from app.models.conversation import Conversation
 from app.models.long_term_memory import LongTermMemory
 from app.services.long_term_memory_service import list_core_memories
+from app.services.long_term_memory_service import format_core_memory_for_prompt
+from app.services.long_term_memory_service import format_core_memory_with_sources_for_prompt
 from app.services.memory_service import (
     archive_memory,
     build_memory_content_hash,
@@ -78,6 +82,69 @@ def test_archive_memory_disables_and_memory_can_be_reactivated(session):
 
     assert active.status == "active"
     assert [memory.content for memory in list_core_memories(session)] == ["用户不吃香菜。"]
+
+
+def test_format_core_memory_for_prompt_includes_stability_signals(session):
+    memory = _add_memory(session, "用户希望精灵语音偏温柔治愈。")
+    memory.memory_key = "elf.voice_style"
+    memory.reinforcement_count = 3
+    memory.evidence_count = 2
+    session.add(memory)
+    session.commit()
+    session.refresh(memory)
+
+    line = format_core_memory_for_prompt(memory)
+
+    assert "key=elf.voice_style" in line
+    assert "reinforced=3" in line
+    assert "evidence=2" in line
+    assert "用户希望精灵语音偏温柔治愈。" in line
+
+
+def test_format_core_memory_with_sources_adds_compact_trace(session):
+    conversation = Conversation(title="精灵声线设计", status="active")
+    session.add(conversation)
+    session.commit()
+    session.refresh(conversation)
+
+    user_message = ChatMessage(
+        conversation_id=conversation.id or 0,
+        role="user",
+        content="我希望做出小鸟游星野那种声线，要慵懒、温柔、轻松，但是不要幼稚。",
+    )
+    session.add(user_message)
+    session.commit()
+    session.refresh(user_message)
+
+    assistant_message = ChatMessage(
+        conversation_id=conversation.id or 0,
+        role="assistant",
+        content="我会把声线设计成松弛、陪伴感强、轻柔但不过分卖萌的方向。",
+        parent_id=user_message.id,
+    )
+    session.add(assistant_message)
+    session.commit()
+    session.refresh(assistant_message)
+
+    memory = _add_memory(
+        session,
+        "用户希望精灵声线接近小鸟游星野：慵懒、温柔、轻松，但不要幼稚化。",
+        importance=0.92,
+    )
+    memory.memory_key = "elf.voice_style"
+    memory.source_id = assistant_message.id
+    memory.evidence_source_ids = f"[{assistant_message.id}]"
+    session.add(memory)
+    session.commit()
+    session.refresh(memory)
+
+    line = format_core_memory_with_sources_for_prompt(session, memory)
+
+    assert "用户希望精灵声线接近小鸟游星野" in line
+    assert "来源线索" in line
+    assert "精灵声线设计" in line
+    assert "用户说：我希望做出小鸟游星野那种声线" in line
+    assert "助手回应：我会把声线设计成松弛" in line
 
 
 def _add_memory(

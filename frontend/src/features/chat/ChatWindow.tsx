@@ -5,8 +5,10 @@ import {
   createConversation,
   deleteConversation,
   deleteMessageBranch,
+  executeCommand,
   getTurnGraph,
   listActiveTurns,
+  listCommands,
   listConversationKnowledgeMounts,
   listConversations,
   listMessages,
@@ -33,6 +35,7 @@ import type {
   ChatStreamEvent,
   ChatAttachment,
   ChatTurnGraph,
+  CommandSchema,
   ConversationKnowledgeMount,
   Conversation,
   DraftAssistantMessage,
@@ -50,6 +53,7 @@ export function ChatWindow() {
   const [activeConversation, setActiveConversation] = useState<Conversation | null>(null);
   const [input, setInput] = useState("");
   const [composerAttachments, setComposerAttachments] = useState<PendingChatAttachment[]>([]);
+  const [commands, setCommands] = useState<CommandSchema[]>([]);
   const [isUploadingAttachments, setIsUploadingAttachments] = useState(false);
   const [selectedGraph, setSelectedGraph] = useState<ChatTurnGraph | null>(null);
   const [knowledgeMountsByConversation, setKnowledgeMountsByConversation] = useState<Record<number, ConversationKnowledgeMount[]>>({});
@@ -145,6 +149,16 @@ export function ChatWindow() {
       );
     });
   }, [activeConversationId, setError]);
+
+  useEffect(() => {
+    if (!activeConversationId) {
+      setCommands([]);
+      return;
+    }
+    listCommands(activeConversationId)
+      .then((response) => setCommands(response.items))
+      .catch(() => setCommands([]));
+  }, [activeConversationId]);
 
   const updateAutoScrollIntent = useCallback(() => {
     const list = messageListRef.current;
@@ -402,10 +416,48 @@ export function ChatWindow() {
     if (!trimmedInput && composerAttachments.length === 0) {
       return;
     }
+    if (trimmedInput.startsWith("/")) {
+      if (composerAttachments.length > 0) {
+        setError(activeConversationId, "斜杠指令暂不支持附件，请先移除附件。");
+        return;
+      }
+      await submitSlashCommand(activeConversationId, trimmedInput);
+      return;
+    }
 
     await submitChatMessage(activeConversationId, trimmedInput, {
       pendingAttachments: composerAttachments,
     });
+  }
+
+  async function submitSlashCommand(conversationId: number, command: string): Promise<void> {
+    setInput("");
+    setShouldAutoScroll(true);
+    streamingStore.patch(conversationId, { error: "" });
+    const parentMessageId = messages.length > 0 ? messages[messages.length - 1].id : null;
+    try {
+      const response = await executeCommand(conversationId, command, parentMessageId);
+      streamingStore.update(conversationId, (current) => ({
+        ...current,
+        messages: hydrateSegmentFollowups([
+          ...current.messages,
+          response.user_message,
+          response.assistant_message,
+        ] as DraftAssistantMessage[]),
+        error: "",
+      }));
+      await refreshConversations();
+      await refreshKnowledgeMounts(conversationId);
+    } catch (currentError) {
+      setError(conversationId, currentError instanceof Error ? currentError.message : "执行指令失败");
+    }
+  }
+
+  async function handleExecuteCommandSuggestion(command: string): Promise<void> {
+    if (!activeConversationId || isStreaming) {
+      return;
+    }
+    await submitSlashCommand(activeConversationId, command);
   }
 
   async function handleStopGeneration() {
@@ -868,6 +920,7 @@ export function ChatWindow() {
             endRef={messagesEndRef}
             listRef={messageListRef}
             messages={messages}
+            onExecuteCommandSuggestion={handleExecuteCommandSuggestion}
             onOpenFollowups={handleOpenFollowups}
             onOpenGraph={handleOpenGraph}
             onDeleteMessage={handleDeleteMessage}
@@ -901,6 +954,7 @@ export function ChatWindow() {
 
         <ChatComposer
           attachments={composerAttachments}
+          commands={commands}
           input={input}
           isSending={isStreaming}
           isUploading={isUploadingAttachments}

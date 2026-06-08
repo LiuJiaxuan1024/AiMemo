@@ -4,10 +4,12 @@ from pathlib import Path
 
 from app.models.chat_turn import ChatTurn
 from app.models.note import utc_now
+from app.api.elf import get_elf_turn_graph_api
 from app.services import chat_turn_buffer
 from app.services.elf_chat_service import (
     _elf_chat_run_lock,
     get_elf_chat_status,
+    get_or_create_elf_conversation_in_session,
     get_or_create_elf_conversation,
     stream_elf_chat_events,
 )
@@ -179,3 +181,43 @@ def test_elf_chat_status_recovers_stale_interrupted_turn_without_runtime_owner(s
         recovered_turn = session.get(ChatTurn, turn_id)
         assert recovered_turn is not None
         assert recovered_turn.status == "failed"
+
+
+def test_elf_turn_graph_api_exposes_saved_context(session) -> None:
+    conversation = get_or_create_elf_conversation_in_session(session)
+    assert conversation.id is not None
+    context_layers = [
+        {
+            "level": 0,
+            "name": "Current input",
+            "content": "用户刚才问精灵的问题",
+            "budget_tokens": 800,
+            "used_tokens": 12,
+            "note": "",
+            "kind": "layer",
+        }
+    ]
+    turn = ChatTurn(
+        conversation_id=conversation.id,
+        thread_id=conversation.langgraph_thread_id,
+        status="completed",
+        node_statuses=json.dumps(
+            {
+                "load_turn_state": "succeeded",
+                "generate_elf_bubble_answer": "succeeded",
+                "persist_messages": "succeeded",
+            },
+            ensure_ascii=False,
+        ),
+        context_layers=json.dumps(context_layers, ensure_ascii=False),
+        debug_payload=json.dumps({"summary": {"answer_chars": 8}, "nodes": {}}, ensure_ascii=False),
+    )
+    session.add(turn)
+    session.commit()
+    session.refresh(turn)
+
+    graph = get_elf_turn_graph_api(turn.id or 0, session=session)
+
+    assert graph.context_layers == context_layers
+    assert "generate_elf_bubble_answer" in graph.node_statuses
+    assert "generate_elf_bubble_answer" in graph.mermaid

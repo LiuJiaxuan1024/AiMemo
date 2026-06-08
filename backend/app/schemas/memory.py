@@ -14,10 +14,15 @@ class MemoryRead(BaseModel):
     summary: str
     importance: float
     confidence: float
+    reinforcement_count: int
+    evidence_count: int
+    evidence_source_ids: list[int]
+    metadata: dict
     source_type: str
     source_id: int | None
     status: str
     content_hash: str
+    last_reinforced_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
@@ -44,6 +49,7 @@ class MemoryDetail(MemoryRead):
     """
 
     source_message: MemorySourceMessage | None = None
+    evidence_messages: list[MemorySourceMessage] = Field(default_factory=list)
 
 
 class MemoryUpdate(BaseModel):

@@ -86,10 +86,6 @@ function Stop-NodeProcessesInRepo {
 }
 
 function Stop-PowerShellDevWindows {
-  if ($KeepWindows) {
-    return
-  }
-
   $escapedRoot = [regex]::Escape($repoRoot.Path)
   $processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
   foreach ($process in $processes) {
@@ -97,6 +93,9 @@ function Stop-PowerShellDevWindows {
       continue
     }
     if ($process.CommandLine -notmatch $escapedRoot) {
+      continue
+    }
+    if ($KeepWindows -and $process.CommandLine -notmatch "-NonInteractive") {
       continue
     }
 

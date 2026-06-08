@@ -32,19 +32,23 @@ def get_or_create_elf_conversation(
     """
 
     with session_factory() as session:
-        conversation = session.exec(
-            select(Conversation)
-            .where(Conversation.title == ELF_CONVERSATION_TITLE, Conversation.status == "active")
-            .order_by(desc(Conversation.updated_at), desc(Conversation.id))
-        ).first()
-        if conversation is not None:
-            return conversation
+        return get_or_create_elf_conversation_in_session(session)
 
-        created = create_conversation(session, ConversationCreate(title=ELF_CONVERSATION_TITLE))
-        conversation = session.get(Conversation, created.id)
-        if conversation is None:
-            raise RuntimeError("Elf conversation was not created.")
+
+def get_or_create_elf_conversation_in_session(session: Session) -> Conversation:
+    conversation = session.exec(
+        select(Conversation)
+        .where(Conversation.title == ELF_CONVERSATION_TITLE, Conversation.status == "active")
+        .order_by(desc(Conversation.updated_at), desc(Conversation.id))
+    ).first()
+    if conversation is not None:
         return conversation
+
+    created = create_conversation(session, ConversationCreate(title=ELF_CONVERSATION_TITLE))
+    conversation = session.get(Conversation, created.id)
+    if conversation is None:
+        raise RuntimeError("Elf conversation was not created.")
+    return conversation
 
 
 def stream_elf_chat_events(

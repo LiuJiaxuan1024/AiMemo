@@ -12,6 +12,7 @@ import { VerbRotator } from "./VerbRotator";
 import type {
   ChatThought,
   ChatAttachment,
+  CommandResult,
   DraftAssistantMessage,
   MessageSegment,
   SegmentFollowupRequest,
@@ -33,6 +34,7 @@ interface MessageListProps {
   onDeleteMessage: (message: DraftAssistantMessage) => void;
   onOpenGraph: (message: DraftAssistantMessage) => void;
   onOpenFollowups: (message: DraftAssistantMessage, segmentId?: string | null) => void;
+  onExecuteCommandSuggestion?: (command: string) => Promise<void> | void;
   onSegmentFollowup: (request: SegmentFollowupRequest) => void;
   onStopGeneration: () => void;
   onSubmitUserInput: (message: DraftAssistantMessage, answer: UserInputAnswer) => void;
@@ -50,6 +52,7 @@ export function MessageList({
   onDeleteMessage,
   onOpenGraph,
   onOpenFollowups,
+  onExecuteCommandSuggestion,
   onSegmentFollowup,
   onStopGeneration,
   onSubmitUserInput,
@@ -219,7 +222,9 @@ export function MessageList({
                   <AssistantMessageBody
                     activeSegmentId={activeFollowupSourceId === message.id ? activeFollowupSegmentId : null}
                     message={message}
+                    onExecuteCommandSuggestion={onExecuteCommandSuggestion}
                     onOpenSegment={(segmentId) => onOpenFollowups(message, segmentId)}
+                    commandActionsDisabled={isStreaming}
                     thoughts={isStreaming ? thoughts : message.thoughts}
                     isWarmingUp={isAssistantWarmingUp}
                   />
@@ -576,21 +581,35 @@ export function SegmentFollowupPanel({
 
 function AssistantMessageBody({
   activeSegmentId,
+  commandActionsDisabled = false,
   message,
+  onExecuteCommandSuggestion,
   onOpenSegment,
   thoughts,
   isWarmingUp = false,
 }: {
   activeSegmentId?: string | null;
+  commandActionsDisabled?: boolean;
   message: DraftAssistantMessage;
+  onExecuteCommandSuggestion?: (command: string) => Promise<void> | void;
   onOpenSegment?: (segmentId: string) => void;
   thoughts?: ChatThought[];
   isWarmingUp?: boolean;
 }) {
   const isStreaming = message.isStreaming === true;
+  const commandResult = parseCommandResult(message.content);
   const segments = message.segments ?? [];
   const hasSegments = segments.length > 0;
   const stepThoughts = groupThoughtsByStep(isStreaming ? thoughts ?? [] : message.thoughts);
+  if (commandResult && !isStreaming) {
+    return (
+      <CommandResultCard
+        disabled={commandActionsDisabled}
+        onExecuteCommandSuggestion={onExecuteCommandSuggestion}
+        result={commandResult}
+      />
+    );
+  }
   return (
     <>
       {hasSegments ? (
@@ -617,6 +636,259 @@ function AssistantMessageBody({
       ) : null}
     </>
   );
+}
+
+function CommandResultCard({
+  disabled = false,
+  onExecuteCommandSuggestion,
+  result,
+}: {
+  disabled?: boolean;
+  onExecuteCommandSuggestion?: (command: string) => Promise<void> | void;
+  result: CommandResult;
+}) {
+  const statusLabel =
+    result.status === "success"
+      ? "已完成"
+      : result.status === "noop"
+        ? "无变更"
+        : result.status === "failed"
+          ? "失败"
+          : "待处理";
+  const [executingSuggestion, setExecutingSuggestion] = useState<string | null>(null);
+  const [selectedSpaceIds, setSelectedSpaceIds] = useState<number[]>([]);
+  const details = Array.isArray(result.details) ? result.details : [];
+  const suggestions = result.status === "needs_input" && Array.isArray(result.suggestions) ? result.suggestions : [];
+  const multiSelectPrefix = resolveKnowledgeMountMultiSelectPrefix(result);
+  const multiSelectDetails = multiSelectPrefix
+    ? details
+        .map((detail) => ({ ...detail, space_id: detailSpaceId(detail) }))
+        .filter((detail): detail is typeof detail & { space_id: number } => detail.space_id != null)
+    : [];
+  const commandSuggestions = multiSelectDetails.length > 0
+    ? []
+    : suggestions.filter((suggestion) => suggestion.trim().startsWith("/"));
+  const textSuggestions = suggestions.filter((suggestion) => !suggestion.trim().startsWith("/"));
+
+  useEffect(() => {
+    setSelectedSpaceIds([]);
+  }, [result.command, result.command_id]);
+
+  const multiSelectSubmitCommand =
+    multiSelectPrefix && selectedSpaceIds.length > 0
+      ? `${multiSelectPrefix} ${selectedSpaceIds.join(",")}`
+      : "";
+
+  function toggleSelectedSpace(spaceId: number) {
+    setSelectedSpaceIds((current) =>
+      current.includes(spaceId)
+        ? current.filter((item) => item !== spaceId)
+        : [...current, spaceId],
+    );
+  }
+
+  return (
+    <section className={`chat-command-result is-${result.status}`}>
+      <header>
+        <span className="chat-command-result__status">
+          {result.status === "failed" ? (
+            <X aria-hidden="true" size={14} />
+          ) : result.status === "needs_input" ? (
+            <Send aria-hidden="true" size={14} />
+          ) : (
+            <Check aria-hidden="true" size={14} />
+          )}
+          {statusLabel}
+        </span>
+        <code>{result.command}</code>
+      </header>
+      <p>{result.message}</p>
+      {multiSelectDetails.length > 0 ? (
+        <div className="chat-interrupt-options chat-command-result__multi-select" aria-label="知识空间多选">
+          {multiSelectDetails.map((detail) => {
+            const checked = selectedSpaceIds.includes(detail.space_id);
+            return (
+              <button
+                aria-pressed={checked}
+                className={`chat-interrupt-option chat-command-result__multi-option ${checked ? "selected" : ""}`}
+                disabled={disabled || executingSuggestion !== null}
+                key={`${detail.label}-${detail.space_id}`}
+                onClick={() => toggleSelectedSpace(detail.space_id)}
+                type="button"
+              >
+                <input
+                  aria-hidden="true"
+                  checked={checked}
+                  disabled={disabled || executingSuggestion !== null}
+                  tabIndex={-1}
+                  type="checkbox"
+                  onChange={() => undefined}
+                />
+                <span className="chat-interrupt-option__mark" aria-hidden="true" />
+                <span className="chat-interrupt-option__body">
+                  <span>{detail.label}</span>
+                  <small>{String(detail.value ?? `ID ${detail.space_id}`)}</small>
+                </span>
+              </button>
+            );
+          })}
+          <div className="chat-interrupt-card__submit chat-command-result__multi-actions">
+            <button
+              disabled={
+                disabled ||
+                !onExecuteCommandSuggestion ||
+                executingSuggestion !== null ||
+                !multiSelectSubmitCommand
+              }
+              onClick={async () => {
+                if (!onExecuteCommandSuggestion || !multiSelectSubmitCommand || executingSuggestion !== null) {
+                  return;
+                }
+                setExecutingSuggestion(multiSelectSubmitCommand);
+                try {
+                  await onExecuteCommandSuggestion(multiSelectSubmitCommand);
+                } finally {
+                  setExecutingSuggestion(null);
+                }
+              }}
+              type="button"
+            >
+              {executingSuggestion === multiSelectSubmitCommand
+                ? "执行中..."
+                : `${knowledgeMountActionVerb(result)}所选 ${selectedSpaceIds.length || ""}`.trim()}
+            </button>
+          </div>
+        </div>
+      ) : details.length > 0 ? (
+        <dl>
+          {details.map((detail, index) => (
+            <div key={`${detail.label}-${index}`}>
+              <dt>{detail.label}</dt>
+              <dd>{String(detail.value ?? "")}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
+      {commandSuggestions.length > 0 ? (
+        <div className="chat-interrupt-options chat-command-result__choice-select" aria-label="可执行建议">
+          {commandSuggestions.map((suggestion, index) => (
+            <button
+              className="chat-interrupt-option chat-command-result__choice-option"
+              disabled={disabled || !onExecuteCommandSuggestion || executingSuggestion !== null}
+              key={suggestion}
+              onClick={async () => {
+                if (!onExecuteCommandSuggestion || executingSuggestion !== null) {
+                  return;
+                }
+                setExecutingSuggestion(suggestion);
+                try {
+                  await onExecuteCommandSuggestion(suggestion);
+                } finally {
+                  setExecutingSuggestion(null);
+                }
+              }}
+              type="button"
+            >
+              <input aria-hidden="true" checked={false} tabIndex={-1} type="radio" onChange={() => undefined} />
+              <span className="chat-interrupt-option__mark" aria-hidden="true" />
+              <span className="chat-interrupt-option__body">
+                <span>
+                  {executingSuggestion === suggestion
+                    ? "执行中..."
+                    : formatCommandChoiceLabel(result, suggestion, details[index])}
+                </span>
+                <small>{suggestion}</small>
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {textSuggestions.length > 0 ? (
+        <ul>
+          {textSuggestions.map((suggestion) => (
+            <li key={suggestion}>{suggestion}</li>
+          ))}
+        </ul>
+      ) : null}
+      <footer>
+        <span>{result.scope}</span>
+        {result.target ? <span>{result.target}</span> : null}
+        {result.rollback_command ? <code>{result.rollback_command}</code> : null}
+      </footer>
+    </section>
+  );
+}
+
+function formatCommandSuggestionLabel(result: CommandResult, suggestion: string): string {
+  const normalized = suggestion.trim().replace(/\s+/g, " ");
+  const spaceName = extractKnowledgeSpaceNameFromCommand(normalized);
+  if (result.command_id === "mount.knowledge" && spaceName) {
+    return `挂载 ${spaceName}`;
+  }
+  if (result.command_id === "unmount.knowledge" && spaceName) {
+    return `卸载 ${spaceName}`;
+  }
+  return normalized;
+}
+
+function formatCommandChoiceLabel(
+  result: CommandResult,
+  suggestion: string,
+  detail?: { label: string; value: string; [key: string]: unknown },
+): string {
+  if (detail?.label) {
+    return detail.label;
+  }
+  return formatCommandSuggestionLabel(result, suggestion);
+}
+
+function resolveKnowledgeMountMultiSelectPrefix(result: CommandResult): string {
+  if (result.status !== "needs_input") {
+    return "";
+  }
+  if (result.command_id === "mount.knowledge") {
+    return "/mount knowledge";
+  }
+  if (result.command_id === "unmount.knowledge") {
+    return "/unmount knowledge";
+  }
+  return "";
+}
+
+function knowledgeMountActionVerb(result: CommandResult): string {
+  return result.command_id === "unmount.knowledge" ? "卸载" : "挂载";
+}
+
+function detailSpaceId(detail: { [key: string]: unknown }): number | null {
+  const raw = detail.space_id;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    return raw;
+  }
+  if (typeof raw === "string" && /^\d+$/.test(raw)) {
+    return Number(raw);
+  }
+  return null;
+}
+
+function extractKnowledgeSpaceNameFromCommand(command: string): string {
+  const match = command.match(/^\/(?:unmount|umount|mount)\s+knowledge\s+(.+)$/i);
+  if (!match) {
+    return "";
+  }
+  return match[1].trim().replace(/^["'“‘`](.*)["'”’`]$/u, "$1");
+}
+
+function parseCommandResult(content: string): CommandResult | null {
+  const match = content.match(/```aimemo-command-result\s*([\s\S]*?)```/);
+  if (!match) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(match[1]) as CommandResult;
+    return parsed?.type === "command_result" && parsed.source === "command_router" ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 interface FollowupPanelTurn {

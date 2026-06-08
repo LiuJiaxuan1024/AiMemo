@@ -108,7 +108,7 @@ function applyOverlayState(state: OverlayState) {
 }
 
 function hideAll() {
-  bubble?.classList.remove("visible");
+  bubble?.classList.remove("visible", "scrollable");
   elfMenu?.classList.remove("open");
   elfMenu?.setAttribute("aria-hidden", "true");
   chatPanel?.classList.remove("open");
@@ -125,7 +125,20 @@ function showBubble(message: string) {
     return;
   }
   bubble.textContent = message;
+  bubble.classList.remove("scrollable");
   bubble.classList.add("visible");
+  window.requestAnimationFrame(() => {
+    if (!bubble.classList.contains("visible")) {
+      return;
+    }
+    bubble.classList.toggle("scrollable", shouldBubbleScroll(bubble));
+  });
+}
+
+function shouldBubbleScroll(element: HTMLElement) {
+  const maxHeight = Number.parseFloat(window.getComputedStyle(element).maxHeight);
+  const isHeightCapped = Number.isFinite(maxHeight) && element.clientHeight >= maxHeight - 2;
+  return isHeightCapped && element.scrollHeight > element.clientHeight + 12;
 }
 
 function showChoicePanel(request: UserInputRequest) {

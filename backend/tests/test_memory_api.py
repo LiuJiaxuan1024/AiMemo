@@ -107,10 +107,21 @@ def test_memories_api_returns_memory_detail_with_source_message(session):
     session.commit()
     session.refresh(message)
 
+    evidence_message = ChatMessage(
+        conversation_id=conversation.id or 0,
+        role="assistant",
+        content="用户再次确认喜欢安静环境。",
+        status="completed",
+    )
+    session.add(evidence_message)
+    session.commit()
+    session.refresh(evidence_message)
+
     memory = _add_memory(
         session,
         "用户喜欢安静的工作环境。",
         source_id=message.id,
+        evidence_source_ids=[message.id or 0, evidence_message.id or 0],
     )
     app = create_app()
 
@@ -129,9 +140,19 @@ def test_memories_api_returns_memory_detail_with_source_message(session):
     assert payload["source_message"]["conversation_id"] == conversation.id
     assert payload["source_message"]["conversation_title"] == "测试对话"
     assert payload["source_message"]["content"] == "用户说自己喜欢安静的工作环境。"
+    assert [item["id"] for item in payload["evidence_messages"]] == [
+        message.id,
+        evidence_message.id,
+    ]
 
 
-def _add_memory(session, content: str, *, source_id: int | None = None) -> LongTermMemory:
+def _add_memory(
+    session,
+    content: str,
+    *,
+    source_id: int | None = None,
+    evidence_source_ids: list[int] | None = None,
+) -> LongTermMemory:
     memory = LongTermMemory(
         level=4,
         category="preference",
@@ -142,6 +163,8 @@ def _add_memory(session, content: str, *, source_id: int | None = None) -> LongT
         status="active",
         source_type="chat_message",
         source_id=source_id,
+        evidence_count=len(evidence_source_ids or []),
+        evidence_source_ids=str(evidence_source_ids or []).replace(" ", ""),
         content_hash=build_memory_content_hash("preference", content),
     )
     session.add(memory)

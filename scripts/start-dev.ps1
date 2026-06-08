@@ -1,7 +1,8 @@
 param(
   [switch]$SkipInstall,
   [switch]$NoDesktop,
-  [switch]$SkipDoctor
+  [switch]$SkipDoctor,
+  [switch]$SeparateWindows
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,6 +15,7 @@ $desktopDir = Join-Path $repoRoot "desktop"
 $stopScript = Join-Path $PSScriptRoot "stop-dev.ps1"
 $frontendDir = Join-Path $repoRoot "frontend"
 $desktopSkipReason = ""
+$devLogDir = Join-Path $repoRoot "data\dev_logs"
 
 function Assert-CommandAvailable {
   param(
@@ -343,6 +345,48 @@ function Invoke-QuickDoctor {
   }
 }
 
+function New-DevLogPath {
+  param(
+    [string]$Name,
+    [string]$Stream
+  )
+
+  if (-not (Test-Path $devLogDir)) {
+    New-Item -ItemType Directory -Force -Path $devLogDir | Out-Null
+  }
+  $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+  return Join-Path $devLogDir "$timestamp-$Name.$Stream.log"
+}
+
+function Start-AiMemoDevProcess {
+  param(
+    [string]$Name,
+    [string[]]$ArgumentList,
+    [string]$WorkingDirectory
+  )
+
+  if ($SeparateWindows) {
+    $separateArgs = @("-NoExit") + $ArgumentList
+    Start-Process powershell -ArgumentList $separateArgs -WorkingDirectory $WorkingDirectory | Out-Null
+    return $null
+  }
+
+  $hiddenArgs = @("-NoProfile", "-NonInteractive") + $ArgumentList
+  $stdoutPath = New-DevLogPath -Name $Name -Stream "stdout"
+  $stderrPath = New-DevLogPath -Name $Name -Stream "stderr"
+  $process = Start-Process powershell `
+    -ArgumentList $hiddenArgs `
+    -WorkingDirectory $WorkingDirectory `
+    -WindowStyle Hidden `
+    -RedirectStandardOutput $stdoutPath `
+    -RedirectStandardError $stderrPath `
+    -PassThru
+  Write-Host "$Name started hidden. Logs:"
+  Write-Host "  stdout: $stdoutPath"
+  Write-Host "  stderr: $stderrPath"
+  return $process
+}
+
 Invoke-QuickDoctor
 Assert-NodeVersion
 Assert-AiMemoNotAlreadyRunning
@@ -380,20 +424,29 @@ if ($desktopEnabled) {
   Write-Host "Memo Elf: skipped ($desktopSkipReason)"
 }
 
-$backendArgs = @("-NoExit", "-ExecutionPolicy", "Bypass", "-File", $backendScript, "-HostName", $hostName, "-Port", $backendPort)
-$frontendArgs = @("-NoExit", "-ExecutionPolicy", "Bypass", "-File", $frontendScript, "-HostName", $hostName, "-Port", $frontendPort, "-BackendPort", $backendPort)
+$backendArgs = @("-ExecutionPolicy", "Bypass", "-File", $backendScript, "-HostName", $hostName, "-Port", $backendPort)
+$frontendArgs = @("-ExecutionPolicy", "Bypass", "-File", $frontendScript, "-HostName", $hostName, "-Port", $frontendPort, "-BackendPort", $backendPort)
 if ($SkipInstall) {
   $backendArgs += "-SkipInstall"
   $frontendArgs += "-SkipInstall"
 }
 
-Start-Process powershell -ArgumentList $backendArgs -WorkingDirectory $repoRoot
+$backendProcess = Start-AiMemoDevProcess -Name "backend" -ArgumentList $backendArgs -WorkingDirectory $repoRoot
 Wait-HttpReady -Url "http://${hostName}:$backendPort/api/health" -Name "Backend" -TimeoutSeconds 75 | Out-Null
-Start-Process powershell -ArgumentList $frontendArgs -WorkingDirectory $repoRoot
+$frontendProcess = Start-AiMemoDevProcess -Name "frontend" -ArgumentList $frontendArgs -WorkingDirectory $repoRoot
 if ($desktopEnabled) {
   $desktopCommand = "npm run dev"
   Start-Sleep -Seconds 2
-  Start-Process powershell -ArgumentList @("-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $desktopCommand) -WorkingDirectory $desktopDir
+  $desktopProcess = Start-AiMemoDevProcess `
+    -Name "desktop" `
+    -ArgumentList @("-ExecutionPolicy", "Bypass", "-Command", $desktopCommand) `
+    -WorkingDirectory $desktopDir
 }
 
-Write-Host "Dev services were started in separate PowerShell windows."
+if ($SeparateWindows) {
+  Write-Host "Dev services were started in separate PowerShell windows."
+} else {
+  Write-Host "Dev services were started without extra terminal windows."
+  Write-Host "Use 'aimemo stop' to stop them."
+  Write-Host "Use 'aimemo start -SeparateWindows' if you need live service consoles."
+}

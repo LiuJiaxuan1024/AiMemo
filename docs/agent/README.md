@@ -70,6 +70,7 @@ LangGraph 不直接替代业务数据库。
 - [Conversation Summary Graph](./conversation-summary-graph.md)
 - [Conversation Memory Graph](./conversation-memory-graph.md)
 - [Context Pyramid](./context-pyramid.md)
+- [Agent 指令配置设计](./command-configuration.md)
 - [聊天模型 Provider 适配设计](./model-provider-adapter.md)
 - [Local Operator Agent](./local-operator-agent.md)
 - [Agent 工具扩展提案](./tooling-expansion-proposal.md)

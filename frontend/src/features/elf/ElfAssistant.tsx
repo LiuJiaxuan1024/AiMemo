@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -38,6 +39,8 @@ export function ElfAssistant({
   const hasBootstrappedJobsRef = useRef(false);
   const knownJobIdsRef = useRef<Set<number>>(new Set());
   const observedActiveJobIdsRef = useRef<Set<number>>(new Set());
+  const bubbleRef = useRef<HTMLDivElement | null>(null);
+  const [isBubbleScrollable, setIsBubbleScrollable] = useState(false);
   const pendingCompletedAnnouncementIdsRef = useRef<Set<number>>(new Set());
   const completedAnnouncementTimersRef = useRef<Map<number, number>>(new Map());
   const idleMotionTimerRef = useRef<number | null>(null);
@@ -306,6 +309,15 @@ export function ElfAssistant({
     onToggleWorkshop();
   }
 
+  useLayoutEffect(() => {
+    const bubble = bubbleRef.current;
+    if (!bubble || elfState.mood === "idle" || !elfState.message) {
+      setIsBubbleScrollable(false);
+      return;
+    }
+    setIsBubbleScrollable(shouldBubbleScroll(bubble));
+  }, [elfState.message, elfState.mood]);
+
   const positionStyle = elfPosition
     ? {
         bottom: "auto",
@@ -328,7 +340,10 @@ export function ElfAssistant({
       />
 
       {elfState.mood !== "idle" && elfState.message ? (
-        <div className="elf-assistant-bubble">
+        <div
+          className={`elf-assistant-bubble${isBubbleScrollable ? " scrollable" : ""}`}
+          ref={bubbleRef}
+        >
           {elfState.mood === "error" ? <AlertTriangle aria-hidden="true" size={15} /> : null}
           {elfState.mood === "working" || elfState.mood === "thinking" ? (
             <Loader2 aria-hidden="true" className="elf-spin" size={15} />
@@ -343,6 +358,12 @@ export function ElfAssistant({
       {failedCount === 0 && activeCount > 0 ? <strong className="elf-badge">{activeCount}</strong> : null}
     </section>
   );
+}
+
+function shouldBubbleScroll(element: HTMLElement) {
+  const maxHeight = Number.parseFloat(window.getComputedStyle(element).maxHeight);
+  const isHeightCapped = Number.isFinite(maxHeight) && element.clientHeight >= maxHeight - 2;
+  return isHeightCapped && element.scrollHeight > element.clientHeight + 12;
 }
 
 function clearIdleMotionTimers(

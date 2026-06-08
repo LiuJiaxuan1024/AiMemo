@@ -368,3 +368,74 @@ export interface ChatActiveTurn {
 export interface ChatActiveTurnList {
   items: ChatActiveTurn[];
 }
+
+export type CommandScope = "turn" | "conversation" | "user" | "system";
+export type CommandRisk = "low" | "medium" | "high";
+export type CommandVisibilityState = "enabled" | "disabled" | "hidden";
+export type CommandResultStatus = "success" | "failed" | "noop" | "pending_confirmation" | "needs_input";
+
+export interface CommandOption {
+  id: string;
+  label: string;
+  value: unknown;
+  description: string;
+}
+
+export interface CommandArg {
+  name: string;
+  type: string;
+  required: boolean;
+  placeholder: string;
+  options: CommandOption[];
+}
+
+export interface CommandVisibility {
+  state: CommandVisibilityState;
+  reason: string;
+  requires_feature: string | null;
+  developer_only: boolean;
+}
+
+export interface CommandSchema {
+  id: string;
+  command: string;
+  title: string;
+  description: string;
+  aliases: string[];
+  category: string;
+  args: CommandArg[];
+  scope: CommandScope;
+  risk: CommandRisk;
+  visibility: CommandVisibility;
+  executor: string;
+  reload: string[];
+  result_view: string;
+}
+
+export interface CommandListResponse {
+  items: CommandSchema[];
+}
+
+export interface CommandResult {
+  source: "command_router";
+  type: "command_result";
+  command: string;
+  command_id: string;
+  status: CommandResultStatus;
+  scope: CommandScope;
+  changed: boolean;
+  target: string;
+  old_value: unknown | null;
+  new_value: unknown | null;
+  message: string;
+  details: Array<{ label: string; value: string; [key: string]: unknown }>;
+  suggestions: string[];
+  audit_id: string | null;
+  rollback_command: string | null;
+}
+
+export interface CommandExecuteResponse {
+  result: CommandResult;
+  user_message: ChatMessage;
+  assistant_message: ChatMessage;
+}
