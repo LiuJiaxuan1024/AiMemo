@@ -16,8 +16,17 @@
         <button id="open-app" type="button">打开 AiMemo</button>
       </section>
       <form class="chat-panel" id="chat-panel" aria-hidden="true">
-        <textarea id="chat-input" maxlength="500" placeholder="想和我说什么？" rows="1"></textarea>
-        <button class="voice-hold" id="voice-hold" type="button" hidden>按住说话</button>
+        <div class="chat-input-wrap">
+          <textarea id="chat-input" maxlength="500" placeholder="想和我说什么？" rows="1"></textarea>
+          <button class="voice-hold" id="voice-hold" type="button" hidden aria-label="语音输入" title="语音输入">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z" />
+              <path d="M5 10v2a7 7 0 0 0 14 0v-2" />
+              <path d="M12 19v3" />
+              <path d="M8 22h8" />
+            </svg>
+          </button>
+        </div>
         <button id="chat-send" type="submit">发送</button>
       </form>
       <form class="choice-panel" id="choice-panel" aria-hidden="true"></form>

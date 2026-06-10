@@ -13,4 +13,7 @@ if (-not (Test-Path $registerScript)) {
 }
 
 & $registerScript -DryRun:$DryRun -NoPathUpdate:$NoPathUpdate -Quiet:$Quiet
-exit $LASTEXITCODE
+if ($?) {
+  exit 0
+}
+exit 1

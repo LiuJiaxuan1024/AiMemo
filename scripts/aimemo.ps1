@@ -134,6 +134,14 @@ function Resolve-Script {
   return $scriptPath
 }
 
+function Exit-FromPowerShellScriptResult {
+  param([bool]$Succeeded)
+  if ($Succeeded) {
+    exit 0
+  }
+  exit 1
+}
+
 $normalizedCommand = $Command.ToLowerInvariant()
 
 switch ($normalizedCommand) {
@@ -148,7 +156,7 @@ switch ($normalizedCommand) {
     if ($NonInteractive) { $forwardParams.NonInteractive = $true }
     if ($NoDesktop) { $forwardParams.NoDesktop = $true }
     & (Resolve-Script "doctor.ps1") @forwardParams @RemainingArgs
-    exit $LASTEXITCODE
+    Exit-FromPowerShellScriptResult $?
   }
   "start" {
     if (($RemainingArgs -contains "--help") -or ($RemainingArgs -contains "-h") -or ($RemainingArgs -contains "help")) {
@@ -161,7 +169,7 @@ switch ($normalizedCommand) {
     if ($SkipDoctor) { $forwardParams.SkipDoctor = $true }
     if ($SeparateWindows) { $forwardParams.SeparateWindows = $true }
     & (Resolve-Script "start-dev.ps1") @forwardParams @RemainingArgs
-    exit $LASTEXITCODE
+    Exit-FromPowerShellScriptResult $?
   }
   "dev" {
     if (($RemainingArgs -contains "--help") -or ($RemainingArgs -contains "-h") -or ($RemainingArgs -contains "help")) {
@@ -174,7 +182,7 @@ switch ($normalizedCommand) {
     if ($SkipDoctor) { $forwardParams.SkipDoctor = $true }
     if ($SeparateWindows) { $forwardParams.SeparateWindows = $true }
     & (Resolve-Script "start-dev.ps1") @forwardParams @RemainingArgs
-    exit $LASTEXITCODE
+    Exit-FromPowerShellScriptResult $?
   }
   "restart" {
     if (($RemainingArgs -contains "--help") -or ($RemainingArgs -contains "-h") -or ($RemainingArgs -contains "help")) {
@@ -184,7 +192,7 @@ switch ($normalizedCommand) {
     $stopParams = @{}
     if ($KeepWindows) { $stopParams.KeepWindows = $true }
     & (Resolve-Script "stop-dev.ps1") @stopParams
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if (-not $?) { exit 1 }
 
     $forwardParams = @{}
     if ($SkipInstall) { $forwardParams.SkipInstall = $true }
@@ -192,7 +200,7 @@ switch ($normalizedCommand) {
     if ($SkipDoctor) { $forwardParams.SkipDoctor = $true }
     if ($SeparateWindows) { $forwardParams.SeparateWindows = $true }
     & (Resolve-Script "start-dev.ps1") @forwardParams @RemainingArgs
-    exit $LASTEXITCODE
+    Exit-FromPowerShellScriptResult $?
   }
   "stop" {
     if (($RemainingArgs -contains "--help") -or ($RemainingArgs -contains "-h") -or ($RemainingArgs -contains "help")) {
@@ -202,7 +210,7 @@ switch ($normalizedCommand) {
     $forwardParams = @{}
     if ($KeepWindows) { $forwardParams.KeepWindows = $true }
     & (Resolve-Script "stop-dev.ps1") @forwardParams @RemainingArgs
-    exit $LASTEXITCODE
+    Exit-FromPowerShellScriptResult $?
   }
   "help" {
     if ($RemainingArgs.Count -gt 0) {
@@ -229,7 +237,7 @@ switch ($normalizedCommand) {
     if ($DryRun) { $forwardParams.DryRun = $true }
     if ($NoPathUpdate) { $forwardParams.NoPathUpdate = $true }
     & (Resolve-Script "register-aimemo.ps1") @forwardParams @RemainingArgs
-    exit $LASTEXITCODE
+    Exit-FromPowerShellScriptResult $?
   }
   "install" {
     if (($RemainingArgs -contains "--help") -or ($RemainingArgs -contains "-h") -or ($RemainingArgs -contains "help")) {
@@ -240,7 +248,7 @@ switch ($normalizedCommand) {
     if ($DryRun) { $forwardParams.DryRun = $true }
     if ($NoPathUpdate) { $forwardParams.NoPathUpdate = $true }
     & (Resolve-Script "install.ps1") @forwardParams @RemainingArgs
-    exit $LASTEXITCODE
+    Exit-FromPowerShellScriptResult $?
   }
   "setup" {
     Write-Error "aimemo setup is planned but not implemented yet. Create .env from .env.example manually for now."

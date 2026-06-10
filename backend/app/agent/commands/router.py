@@ -14,13 +14,13 @@ from app.models.knowledge import KnowledgeSpace
 from app.models.voice_profile import VoiceProfile
 from app.schemas.conversation import ChatMessageCreate
 from app.services.conversation_service import append_message
-from app.services.elf_voice_mode_service import get_elf_voice_mode_enabled, set_elf_voice_mode_enabled
+from app.services.elf_voice_mode_service import get_elf_voice_mode_enabled, set_elf_voice_mode_enabled_persistent
 from app.services.knowledge_mount_service import (
     add_conversation_knowledge_mount,
     delete_conversation_knowledge_mount,
     list_conversation_knowledge_mounts,
 )
-from app.services.runtime_config_service import get_effective_runtime_config, set_runtime_config
+from app.services.runtime_config_service import set_persistent_runtime_config
 from app.services.voice_profile_service import activate_voice_profile, ensure_default_voice_profile
 
 
@@ -88,8 +88,6 @@ def _execute(session: Session, *, conversation_id: int, raw_command: str) -> Com
         return _mount_knowledge(session, conversation_id, raw_command, command.id)
     if command.executor == "unmount_knowledge":
         return _unmount_knowledge(session, conversation_id, raw_command, command.id)
-    if command.executor == "set_elf_enabled":
-        return _set_elf_enabled(session, raw_command, command.id)
     if command.executor == "set_elf_voice_mode":
         return _set_elf_voice_mode(session, raw_command, command.id)
     if command.executor == "set_elf_default_voice":
@@ -106,7 +104,6 @@ def _execute(session: Session, *, conversation_id: int, raw_command: str) -> Com
 
 def _show_config(session: Session, conversation_id: int, raw_command: str, command_id: str) -> CommandResult:
     mounts = list_conversation_knowledge_mounts(session, conversation_id)
-    elf_enabled = bool(get_effective_runtime_config(session, "elf.enabled", True, reload_project_config=True))
     agent_chat = _agent_chat_config()
     details = [
         {
@@ -114,7 +111,6 @@ def _show_config(session: Session, conversation_id: int, raw_command: str, comma
             "value": f"{agent_chat.get('provider', 'dashscope')} / {agent_chat.get('model', AGENT_CHAT_MODEL)}",
         },
         {"label": "Planner", "value": f"dashscope / {PLANNER_CHAT_MODEL}"},
-        {"label": "精灵", "value": "enabled" if elf_enabled else "disabled"},
         {
             "label": "语音",
             "value": f"ASR {settings.voice_aliyun_asr_model} / TTS {settings.voice_aliyun_tts_model}",
@@ -157,13 +153,11 @@ def _agent_status(raw_command: str, command_id: str) -> CommandResult:
 
 
 def _elf_status(session: Session, raw_command: str, command_id: str) -> CommandResult:
-    elf_enabled = bool(get_effective_runtime_config(session, "elf.enabled", True, reload_project_config=True))
     voice_module_enabled = bool(settings.voice_enabled)
     voice_mode_enabled = get_elf_voice_mode_enabled(session)
     active_voice = ensure_default_voice_profile(session)
     details = [
-        {"label": "精灵加载", "value": "enabled" if elf_enabled else "disabled"},
-        {"label": "精灵语音对话", "value": "enabled" if voice_mode_enabled else "disabled"},
+        {"label": "持续语音对话", "value": "enabled" if voice_mode_enabled else "disabled"},
         {"label": "语音服务能力", "value": "enabled" if voice_module_enabled else "disabled"},
         {"label": "默认声线", "value": f"{active_voice.name} (ID {active_voice.id})"},
         {"label": "ASR Provider", "value": settings.voice_asr_provider},
@@ -344,62 +338,6 @@ def _unmount_knowledge(session: Session, conversation_id: int, raw_command: str,
     )
 
 
-def _set_elf_enabled(session: Session, raw_command: str, command_id: str) -> CommandResult:
-    raw_value = _extract_space_arg(raw_command, prefixes=("/config elf.enabled",))
-    if not raw_value:
-        return _boolean_input_result(
-            raw_command,
-            command_id,
-            target="elf.enabled",
-            message="请选择精灵是否加载。",
-            true_label="开启",
-            false_label="关闭",
-            true_command="/config elf.enabled true",
-            false_command="/config elf.enabled false",
-        )
-    parsed = _parse_bool_arg(raw_value)
-    if parsed is None:
-        return CommandResult(
-            command=raw_command.strip(),
-            command_id=command_id,
-            status="failed",
-            scope="user",
-            target="elf.enabled",
-            message="elf.enabled 只接受 true 或 false。",
-        )
-
-    old_value = bool(get_effective_runtime_config(session, "elf.enabled", True, reload_project_config=True))
-    if old_value == parsed:
-        return CommandResult(
-            command=raw_command.strip(),
-            command_id=command_id,
-            status="noop",
-            scope="user",
-            target="elf.enabled",
-            old_value=old_value,
-            new_value=old_value,
-            message=f"精灵当前已经是{'开启' if parsed else '关闭'}状态。",
-        )
-
-    set_runtime_config(session, "elf.enabled", parsed)
-    return CommandResult(
-        command=raw_command.strip(),
-        command_id=command_id,
-        status="success",
-        scope="user",
-        changed=True,
-        target="elf.enabled",
-        old_value=old_value,
-        new_value=parsed,
-        message=f"精灵已{'开启' if parsed else '关闭'}，前端和桌面会按新的运行时配置刷新。",
-        details=[
-            {"label": "运行时配置", "value": "已更新"},
-            {"label": "Reload", "value": "runtime_config / elf_state"},
-        ],
-        rollback_command=f"/config elf.enabled {'true' if old_value else 'false'}",
-    )
-
-
 def _set_elf_voice_mode(session: Session, raw_command: str, command_id: str) -> CommandResult:
     raw_value = _extract_space_arg(raw_command, prefixes=("/config elf.voice.mode",))
     if not raw_value:
@@ -443,10 +381,14 @@ def _set_elf_voice_mode(session: Session, raw_command: str, command_id: str) -> 
             target="elf.voice.mode",
             old_value=old_value,
             new_value=old_value,
-            message=f"精灵语音对话当前已经是{'开启' if parsed else '关闭'}状态。",
+            message=f"精灵持续语音对话模式当前已经是{'开启' if parsed else '关闭'}状态。",
+            details=[
+                {"label": "持续语音对话", "value": "enabled" if old_value else "disabled"},
+                {"label": "语音服务能力", "value": "enabled" if settings.voice_enabled else "disabled"},
+            ],
         )
 
-    set_elf_voice_mode_enabled(parsed, session)
+    set_elf_voice_mode_enabled_persistent(parsed, session)
     return CommandResult(
         command=raw_command.strip(),
         command_id=command_id,
@@ -456,9 +398,11 @@ def _set_elf_voice_mode(session: Session, raw_command: str, command_id: str) -> 
         target="elf.voice.mode",
         old_value=old_value,
         new_value=parsed,
-        message=f"精灵语音对话已{'开启' if parsed else '关闭'}。",
+        message=f"精灵持续语音对话模式已{'开启' if parsed else '关闭'}。",
         details=[
+            {"label": "配置文件", "value": "config.json5 已更新"},
             {"label": "运行时配置", "value": "已更新"},
+            {"label": "语音服务能力", "value": "enabled" if settings.voice_enabled else "disabled"},
             {"label": "Reload", "value": "runtime_config / elf_voice_state"},
         ],
         rollback_command=f"/config elf.voice.mode {'true' if old_value else 'false'}",
@@ -509,6 +453,7 @@ def _set_elf_default_voice(session: Session, raw_command: str, command_id: str) 
         )
 
     activated = activate_voice_profile(session, profile.id)
+    set_persistent_runtime_config(session, "elf.voice.default_profile_id", activated.id)
     return CommandResult(
         command=raw_command.strip(),
         command_id=command_id,
@@ -522,6 +467,7 @@ def _set_elf_default_voice(session: Session, raw_command: str, command_id: str) 
         details=[
             {"label": "旧声线", "value": f"{old_profile.name} (ID {old_profile.id})"},
             {"label": "新声线", "value": f"{activated.name} (ID {activated.id})"},
+            {"label": "配置文件", "value": "config.json5 已更新"},
         ],
         rollback_command=f"/config elf.voice.default {old_profile.id}",
     )

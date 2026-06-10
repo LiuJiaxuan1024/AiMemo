@@ -2307,6 +2307,7 @@ def build_generate_elf_bubble_answer_node(
                 for part in raw_parts
                 if part.get("text")
             ]
+        parts = _drop_trailing_elf_listening_fillers(parts)
         return {
             "elf_bubble_answer_parts": parts,
             "assistant_answer": "\n\n".join(part["text"] for part in parts if part.get("text")),
@@ -4422,6 +4423,10 @@ def build_elf_bubble_answer_system_prompt() -> str:
         "- 每个 bubble 的 emoji 必须和 text 的主要情绪一致，不要让一个 happy 气泡里包含明显 worried 内容。\n"
         "- 不要逐 token 拆分，不要把半句话放进一个 bubble。\n"
         "- text 使用自然中文，像在轻声聊天。\n\n"
+        "收尾规则：\n"
+        "- 不要在回答末尾额外追加空泛待机句，例如“我在听呢”“我陪着你”“继续说吧”“随时和我说”。\n"
+        "- 如果已经回答完用户问题，直接结束；只有用户明确需要安抚、等待或继续闲聊时，才可以表达陪伴。\n"
+        "- 不要每轮都称呼用户名字；称呼只在问候、确认偏好或语气自然需要时使用。\n\n"
         "本地文件工具规则：\n"
         "- 如果 prompt 中出现“本地工具调用结果”或旧版“本地文件读取结果”，说明 Local Operator 已经实际调用本地工具。\n"
         "- 你必须基于这些工具结果回答，不要凭空说自己不能访问用户电脑、硬盘、C 盘或系统日志。\n"
@@ -4489,10 +4494,47 @@ def _parse_elf_bubble_parts(raw_content: str) -> list[ElfBubblePayload]:
             emoji = _normalize_elf_emoji(str(raw_part.get("emoji") or "soft"))
             parts.extend(_normalize_elf_bubble_part(text, emoji))
         if parts:
-            return parts
+            return _drop_trailing_elf_listening_fillers(parts)
     except Exception:
         logger.exception("Failed to parse elf bubble answer JSON.")
     return [{"text": raw_content.strip() or "我刚才有点走神了，再说一次好吗？", "emoji": "soft"}]
+
+
+def _drop_trailing_elf_listening_fillers(parts: list[ElfBubblePayload]) -> list[ElfBubblePayload]:
+    """删除精灵回答末尾的空泛待机陪伴句。
+
+    只在前面已有实质气泡时删除，避免用户问“你在吗”时把唯一回应删掉。
+    """
+
+    normalized_parts = [part for part in parts if str(part.get("text") or "").strip()]
+    while len(normalized_parts) > 1 and _is_elf_listening_filler(str(normalized_parts[-1].get("text") or "")):
+        normalized_parts.pop()
+    return normalized_parts
+
+
+def _is_elf_listening_filler(text: str) -> bool:
+    normalized = re.sub(r"[\s，。！？!?,、~～…\.：:；;“”\"'（）()\[\]【】]+", "", text.strip())
+    if not normalized:
+        return False
+    listening_phrases = [
+        "我在听",
+        "我在听呢",
+        "我听着",
+        "我听着呢",
+        "我在这里",
+        "我一直在",
+        "我陪着你",
+        "我会陪着你",
+        "继续说吧",
+        "接着说吧",
+        "随时和我说",
+        "随时跟我说",
+        "想说什么都可以",
+        "慢慢说",
+    ]
+    if any(phrase in normalized for phrase in listening_phrases):
+        return len(normalized) <= 18
+    return False
 
 
 def _normalize_elf_emoji(emoji: str) -> str:

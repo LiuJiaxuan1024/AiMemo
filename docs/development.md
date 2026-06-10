@@ -124,7 +124,7 @@ cd backend
 
 `config.json5` 用于保存可提交的项目级默认值，`.env` 和系统环境变量仍拥有更高优先级。
 
-当前前端和桌面精灵会通过运行时接口读取开关：
+当前前端和桌面精灵会通过运行时接口读取轻量状态：
 
 ```text
 GET /api/config/runtime
@@ -135,7 +135,10 @@ GET /api/config/runtime
 ```json5
 {
   "elf": {
-    "enabled": true,
+    "voice": {
+      "mode": false,
+      "default_profile_id": 1,
+    },
   },
   "voice": {
     "enabled": true,
@@ -146,8 +149,8 @@ GET /api/config/runtime
 }
 ```
 
-`elf.enabled=false` 时不加载 Web/桌面精灵，但不影响 `/app/workshop/*` 页面。
-桌面精灵启动时如果后端配置接口还没准备好，会等待并重试；只有明确读到 `false` 才保持隐藏。
+`elf.voice.mode` 和 `elf.voice.default_profile_id` 可由斜杠指令持久化更新。
+精灵本体是否显示属于前端 / 桌面渲染行为，不再使用 `elf.enabled` 作为运行时配置。
 
 ## 常用验证
 

@@ -1,12 +1,11 @@
 import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Brain, Hammer, Pin, PinOff, Sparkles } from "lucide-react";
+import { Brain, Hammer, Pin, PinOff } from "lucide-react";
 
 import { ElfAssistant } from "../elf/ElfAssistant";
 import { countActiveJobs, countFailedJobs } from "../elf/elfState";
 import { MemoryPanel } from "../memories/MemoryPanel";
 import { Button, EmptyState, PanelHeader, SegmentedTabs } from "../../shared/ui";
-import { getRuntimeConfig } from "../../shared/runtimeConfig";
 import { deleteJob, getJobGraph, listJobs, retryJob } from "./jobsApi";
 import { JobDetail } from "./JobDetail";
 import { JobList } from "./JobList";
@@ -37,13 +36,6 @@ export function JobDrawer() {
   });
 
   const jobs = jobsQuery.data ?? [];
-  const runtimeConfigQuery = useQuery({
-    queryKey: ["runtime_config"],
-    queryFn: getRuntimeConfig,
-    refetchInterval: (query) => (query.state.error ? 3000 : false),
-    staleTime: 0,
-  });
-  const isElfEnabled = runtimeConfigQuery.data?.elf.enabled === true;
   const activeCount = useMemo(() => countActiveJobs(jobs), [jobs]);
   const failedCount = useMemo(() => countFailedJobs(jobs), [jobs]);
   const selectedJobId = selectedJob?.id ?? null;
@@ -112,28 +104,15 @@ export function JobDrawer() {
 
   return (
     <>
-      {isElfEnabled ? (
-        <ElfAssistant
-          activeCount={activeCount}
-          failedCount={failedCount}
-          isWorkshopOpen={isOpen}
-          jobs={jobs}
-          onToggleWorkshop={() => setIsOpen((value) => !value)}
-        />
-      ) : null}
+      <ElfAssistant
+        activeCount={activeCount}
+        failedCount={failedCount}
+        isWorkshopOpen={isOpen}
+        jobs={jobs}
+        onToggleWorkshop={() => setIsOpen((value) => !value)}
+      />
 
       <aside className={isOpen ? "job-drawer open" : "job-drawer"}>
-      {!isElfEnabled ? (
-        <button
-          aria-label={isOpen ? "收起精灵工坊" : "打开精灵工坊"}
-          className="job-drawer-handle"
-          onClick={() => setIsOpen((value) => !value)}
-          type="button"
-        >
-          <Sparkles aria-hidden="true" size={18} />
-          {activeCount > 0 ? <span>{activeCount}</span> : null}
-        </button>
-      ) : null}
       <div className="job-drawer-panel">
         <PanelHeader
           actions={

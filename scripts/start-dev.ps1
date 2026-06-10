@@ -91,25 +91,6 @@ function Write-PortFallback {
   }
 }
 
-function Get-ProjectConfigValue {
-  param(
-    [string]$Path,
-    [string]$DefaultValue
-  )
-
-  $configPath = Join-Path $repoRoot "config.json5"
-  $readerPath = Join-Path $PSScriptRoot "read-project-config.cjs"
-  if (-not (Test-Path $configPath)) {
-    return $DefaultValue
-  }
-
-  $value = & node $readerPath $configPath $Path $DefaultValue
-  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($value)) {
-    return $DefaultValue
-  }
-  return $value.Trim()
-}
-
 function Wait-HttpReady {
   param(
     [string]$Url,
@@ -192,11 +173,6 @@ function Ensure-FrontendDependencies {
 function Ensure-DesktopDependencies {
   if ($NoDesktop) {
     $script:desktopSkipReason = "disabled by -NoDesktop"
-    return $false
-  }
-
-  if ((Get-ProjectConfigValue -Path "elf.enabled" -DefaultValue "true") -ne "true") {
-    $script:desktopSkipReason = "disabled by config.json5 elf.enabled=false"
     return $false
   }
 

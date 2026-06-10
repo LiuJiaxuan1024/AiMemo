@@ -5,7 +5,7 @@ import json
 from fastapi import HTTPException, status
 from sqlmodel import Session, desc, select
 
-from app.core.config import settings
+from app.core.config import get_project_config_value, settings
 from app.models.note import utc_now
 from app.models.voice_profile import VoiceProfile
 from app.schemas.voice import VoiceProfileCreate, VoiceProfileRead, VoiceProfileUpdate
@@ -16,6 +16,10 @@ ALLOWED_PROFILE_STATUSES = {"draft", "generating", "ready", "failed"}
 
 
 def ensure_default_voice_profile(session: Session) -> VoiceProfile:
+    configured_profile = _configured_default_voice_profile(session)
+    if configured_profile is not None:
+        return configured_profile
+
     existing = session.exec(select(VoiceProfile).where(VoiceProfile.is_active == True)).first()  # noqa: E712
     if existing is not None:
         return existing
@@ -42,6 +46,31 @@ def ensure_default_voice_profile(session: Session) -> VoiceProfile:
         status="ready",
         is_active=True,
     )
+    session.add(profile)
+    session.commit()
+    session.refresh(profile)
+    return profile
+
+
+def _configured_default_voice_profile(session: Session) -> VoiceProfile | None:
+    raw_profile_id = get_project_config_value("elf.voice.default_profile_id", None, reload=True)
+    try:
+        profile_id = int(raw_profile_id)
+    except (TypeError, ValueError):
+        return None
+    profile = session.get(VoiceProfile, profile_id)
+    if profile is None or profile.status != "ready":
+        return None
+    if profile.is_active:
+        return profile
+    active_profiles = session.exec(select(VoiceProfile).where(VoiceProfile.is_active == True)).all()  # noqa: E712
+    now = utc_now()
+    for active in active_profiles:
+        active.is_active = False
+        active.updated_at = now
+        session.add(active)
+    profile.is_active = True
+    profile.updated_at = now
     session.add(profile)
     session.commit()
     session.refresh(profile)

@@ -188,7 +188,6 @@ Debug Window
 显示气泡
 点击打开 Ai 记主窗口
 连接本地后端健康状态
-读取 /api/config/runtime，支持 elf.enabled 运行时开关
 长按说话、ASR 转文本、气泡 TTS 播放
 ```
 
@@ -221,11 +220,7 @@ flowchart TD
   CheckBackend -->|否| StartBackend[启动 FastAPI 后端]
   StartBackend --> WaitHealth[等待 /api/health]
   UseBackend --> WaitHealth
-  WaitHealth --> Config{读取 /api/config/runtime}
-  Config -->|elf.enabled=false| Hidden[保持隐藏]
-  Config -->|接口暂不可用| Retry[等待后重试]
-  Retry --> Config
-  Config -->|elf.enabled=true| BackendOk{健康检查通过?}
+  WaitHealth --> BackendOk{健康检查通过?}
   BackendOk -->|否| ShowError[精灵提示后端启动失败]
   BackendOk -->|是| OpenElf[显示桌面精灵窗口]
   OpenElf --> Tray[注册系统托盘]

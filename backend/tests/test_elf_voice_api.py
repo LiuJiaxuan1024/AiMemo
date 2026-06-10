@@ -3,9 +3,23 @@ from fastapi.testclient import TestClient
 from app.core.database import get_session
 from app.main import create_app
 from app.providers.dashscope_voice import DashScopeVoiceProvider
+from app.services.runtime_config_service import set_runtime_config
 
 
-def test_elf_voice_mode_defaults_off_and_can_toggle(session_factory) -> None:
+def test_elf_voice_mode_defaults_off_and_can_toggle(monkeypatch, session_factory) -> None:
+    monkeypatch.setattr(
+        "app.services.runtime_config_service.get_project_config_value",
+        lambda path, default, *, reload=False: default,
+    )
+
+    def fake_set_elf_voice_mode_enabled_persistent(enabled, session):
+        set_runtime_config(session, "elf.voice.mode", bool(enabled))
+        return bool(enabled)
+
+    monkeypatch.setattr(
+        "app.api.elf_voice.set_elf_voice_mode_enabled_persistent",
+        fake_set_elf_voice_mode_enabled_persistent,
+    )
     app = create_app()
 
     def override_session():

@@ -1,4 +1,5 @@
 import { FormEvent, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import {
   cancelTurn,
@@ -49,6 +50,7 @@ const ChatGraphPanel = lazy(() =>
 );
 
 export function ChatWindow() {
+  const queryClient = useQueryClient();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversation, setActiveConversation] = useState<Conversation | null>(null);
   const [input, setInput] = useState("");
@@ -448,6 +450,9 @@ export function ChatWindow() {
       }));
       await refreshConversations();
       await refreshKnowledgeMounts(conversationId);
+      if (shouldRefreshRuntimeConfig(response.result.target)) {
+        await queryClient.invalidateQueries({ queryKey: ["runtime_config"] });
+      }
     } catch (currentError) {
       setError(conversationId, currentError instanceof Error ? currentError.message : "执行指令失败");
     }
@@ -984,6 +989,10 @@ export function ChatWindow() {
       ) : null}
     </section>
   );
+}
+
+function shouldRefreshRuntimeConfig(target: string): boolean {
+  return target === "elf.voice.mode" || target === "elf.voice.default";
 }
 
 function upsertFollowupThread(

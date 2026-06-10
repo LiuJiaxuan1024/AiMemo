@@ -36,7 +36,7 @@ _COMMANDS: list[CommandSchema] = [
         id="elf.status",
         command="/elf status",
         title="查看精灵状态",
-        description="查看精灵开关、语音对话和默认声线状态。",
+        description="查看精灵语音对话、语音能力和默认声线状态。",
         category="精灵",
         scope="turn",
         risk="low",
@@ -92,30 +92,6 @@ _COMMANDS: list[CommandSchema] = [
         scope="conversation",
         risk="low",
         executor="unmount_knowledge",
-        result_view="config_change",
-    ),
-    CommandSchema(
-        id="config.elf.enabled",
-        command="/config elf.enabled <true|false>",
-        title="开启或关闭精灵",
-        description="控制前端和桌面是否加载精灵。",
-        category="精灵",
-        args=[
-            CommandArg(
-                name="value",
-                type="boolean",
-                required=True,
-                placeholder="true 或 false",
-                options=[
-                    CommandOption(id="true", label="开启", value=True, description="加载前端和桌面精灵。"),
-                    CommandOption(id="false", label="关闭", value=False, description="隐藏前端和桌面精灵。"),
-                ],
-            )
-        ],
-        scope="user",
-        risk="medium",
-        executor="set_elf_enabled",
-        reload=["runtime_config", "elf_state"],
         result_view="config_change",
     ),
     CommandSchema(

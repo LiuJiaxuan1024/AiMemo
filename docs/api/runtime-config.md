@@ -1,6 +1,6 @@
 # Runtime Config API
 
-运行时配置 API 给 Web 前端和桌面精灵读取轻量开关。它不返回密钥，也不替代 `.env`。
+运行时配置 API 给 Web 前端和桌面精灵读取轻量状态。它不返回密钥，也不替代 `.env`。
 
 ## 读取运行时配置
 
@@ -13,7 +13,7 @@ GET /api/config/runtime
 ```json
 {
   "elf": {
-    "enabled": true
+    "voice_mode_enabled": false
   }
 }
 ```
@@ -21,17 +21,17 @@ GET /api/config/runtime
 当前字段：
 
 ```text
-elf.enabled
-  true：允许 Web / 桌面精灵加载。
-  false：不加载精灵；精灵工坊页面仍可访问。
+elf.voice_mode_enabled
+  true：精灵处于持续语音对话模式。
+  false：精灵保留文本交互和气泡播报，但不进入持续语音对话。
 ```
 
 实现说明：
 
 ```text
-接口每次读取最新 config.json5，避免被后端启动时 settings 缓存卡住。
+语音模式来自 runtime config / config.json5 的有效值。
 前端请求使用 no-store。
-桌面精灵启动时如果接口暂不可用，会等待并重试；只有明确读到 false 才保持隐藏。
+桌面精灵不再通过该接口判断是否隐藏自身；精灵显示是前端/桌面渲染行为，不等同于关闭精灵能力。
 ```
 
 相关文件：

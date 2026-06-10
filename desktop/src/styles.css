@@ -314,12 +314,18 @@ html.linux-elf-window .chat-panel {
   transform: translateY(0) scale(1);
 }
 
+.chat-input-wrap {
+  min-width: 0;
+  position: relative;
+}
+
 .chat-panel textarea {
   background: #f8fafc;
   border: 1px solid #cbd5e1;
   border-radius: 8px;
   box-sizing: border-box;
   color: #0f172a;
+  display: block;
   font-size: 13px;
   line-height: 1.45;
   max-height: 110px;
@@ -328,6 +334,11 @@ html.linux-elf-window .chat-panel {
   overflow-y: auto;
   padding: 8px 10px;
   resize: none;
+  width: 100%;
+}
+
+.chat-panel.voice-mode textarea {
+  padding-right: 38px;
 }
 
 .chat-panel textarea:focus {
@@ -347,17 +358,45 @@ html.linux-elf-window .chat-panel {
 }
 
 .chat-panel .voice-hold {
-  background: #f8fafc;
-  border-color: #cbd5e1;
-  color: #1f2a44;
-  grid-column: 1 / -1;
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  color: #5f7f9b;
+  display: flex;
+  height: 28px;
+  justify-content: center;
+  padding: 0;
+  position: absolute;
+  right: 5px;
+  top: 50%;
   touch-action: none;
+  transform: translateY(-50%);
+  transition:
+    color 120ms ease,
+    transform 120ms ease;
+  width: 28px;
+}
+
+.chat-panel .voice-hold svg {
+  fill: none;
+  height: 17px;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+  width: 17px;
+}
+
+.chat-panel .voice-hold:hover {
+  background: transparent;
+  color: #0b77bd;
+  transform: translateY(-50%) scale(1.05);
 }
 
 .chat-panel .voice-hold.recording {
-  background: #fee2e2;
-  border-color: #fca5a5;
-  color: #991b1b;
+  background: transparent;
+  color: #dc2626;
 }
 
 .chat-panel .voice-hold[hidden] {

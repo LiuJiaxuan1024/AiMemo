@@ -5,7 +5,7 @@ from typing import Any
 
 from sqlmodel import Session, select
 
-from app.core.config import get_project_config_value
+from app.core.config import get_project_config_value, set_project_config_value
 from app.models.note import utc_now
 from app.models.runtime_config import RuntimeConfig
 
@@ -50,6 +50,18 @@ def set_runtime_config(session: Session, path: str, value: Any, *, scope: str = 
     session.add(entry)
     session.commit()
     session.refresh(entry)
+    return entry
+
+
+def set_persistent_runtime_config(
+    session: Session,
+    path: str,
+    value: Any,
+    *,
+    scope: str = DEFAULT_SCOPE,
+) -> RuntimeConfig:
+    entry = set_runtime_config(session, path, value, scope=scope)
+    set_project_config_value(path, value)
     return entry
 
 

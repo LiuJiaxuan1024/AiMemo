@@ -47,7 +47,6 @@ Voice Studio
 ```text
 桌面外置精灵助手
 桌面精灵气泡对话与多表情切换
-桌面精灵运行时开关（config.json5: elf.enabled）
 后端精灵事件中心
 Tauri 桌面精灵壳
 打开 AiMemo 主页面
@@ -181,8 +180,12 @@ DASHSCOPE_API_KEY=你的百炼 API Key
 ```json5
 {
   "elf": {
-    // false 时不加载 Web/桌面精灵；精灵工坊页面仍可访问。
-    "enabled": true,
+    "voice": {
+      // 是否进入持续语音对话模式。
+      "mode": false,
+      // 精灵 TTS 默认声线 ID，可通过 /config elf.voice.default 修改。
+      "default_profile_id": 1,
+    },
   },
   "voice": {
     "enabled": true,

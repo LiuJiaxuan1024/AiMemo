@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from app.agent.commands.registry import get_command_by_input, list_command_schemas
 from app.agent.commands.router import execute_slash_command
 from app.models.chat_message import ChatMessage
@@ -8,8 +9,27 @@ from app.models.voice_profile import VoiceProfile
 from app.schemas.conversation import ConversationCreate
 from app.services.conversation_service import create_conversation
 from app.services.elf_voice_mode_service import set_elf_voice_mode_enabled
-from app.services.runtime_config_service import get_runtime_config
+from app.services.runtime_config_service import get_runtime_config, set_runtime_config
 from sqlmodel import select
+
+
+@pytest.fixture(autouse=True)
+def _disable_project_config_writes(monkeypatch):
+    def fake_set_persistent_runtime_config(session, path, value, *, scope="user"):
+        return set_runtime_config(session, path, value, scope=scope)
+
+    def fake_set_elf_voice_mode_enabled_persistent(enabled, session):
+        set_runtime_config(session, "elf.voice.mode", bool(enabled))
+        return bool(enabled)
+
+    monkeypatch.setattr(
+        "app.agent.commands.router.set_persistent_runtime_config",
+        fake_set_persistent_runtime_config,
+    )
+    monkeypatch.setattr(
+        "app.agent.commands.router.set_elf_voice_mode_enabled_persistent",
+        fake_set_elf_voice_mode_enabled_persistent,
+    )
 
 
 def test_command_registry_exposes_readonly_commands(session):
@@ -71,7 +91,7 @@ def test_elf_status_reports_workshop_voice_mode_separately(session):
 
     details = {item["label"]: item["value"] for item in response.result.details}
     assert details["语音服务能力"] in {"enabled", "disabled"}
-    assert details["精灵语音对话"] == "disabled"
+    assert details["持续语音对话"] == "disabled"
 
     set_elf_voice_mode_enabled(True, session)
     response = execute_slash_command(
@@ -80,7 +100,7 @@ def test_elf_status_reports_workshop_voice_mode_separately(session):
         raw_command="/elf status",
     )
     details = {item["label"]: item["value"] for item in response.result.details}
-    assert details["精灵语音对话"] == "enabled"
+    assert details["持续语音对话"] == "enabled"
     set_elf_voice_mode_enabled(False, session)
 
 
@@ -263,54 +283,17 @@ def test_mount_knowledge_invalid_space_fails_without_candidates(session):
     assert response.result.suggestions == []
 
 
-def test_config_elf_enabled_updates_runtime_config(session):
-    conversation = create_conversation(session, ConversationCreate(title="精灵开关"))
+def test_config_elf_enabled_is_not_a_supported_command(session):
+    conversation = create_conversation(session, ConversationCreate(title="旧精灵开关指令"))
 
     response = execute_slash_command(
         session,
         conversation_id=conversation.id,
         raw_command="/config elf.enabled false",
-    )
-
-    assert response.result.status == "success"
-    assert response.result.changed is True
-    assert response.result.target == "elf.enabled"
-    assert response.result.rollback_command == "/config elf.enabled true"
-    assert get_runtime_config(session, "elf.enabled") is False
-
-    response = execute_slash_command(
-        session,
-        conversation_id=conversation.id,
-        raw_command="/config elf.enabled false",
-    )
-
-    assert response.result.status == "noop"
-
-
-def test_config_elf_enabled_missing_arg_needs_input(session):
-    conversation = create_conversation(session, ConversationCreate(title="精灵开关缺参"))
-
-    response = execute_slash_command(
-        session,
-        conversation_id=conversation.id,
-        raw_command="/config elf.enabled",
-    )
-
-    assert response.result.status == "needs_input"
-    assert [item["label"] for item in response.result.details] == ["开启", "关闭"]
-    assert response.result.suggestions == ["/config elf.enabled true", "/config elf.enabled false"]
-
-
-def test_config_elf_enabled_invalid_arg_fails_without_candidates(session):
-    conversation = create_conversation(session, ConversationCreate(title="精灵开关错误"))
-
-    response = execute_slash_command(
-        session,
-        conversation_id=conversation.id,
-        raw_command="/config elf.enabled maybe",
     )
 
     assert response.result.status == "failed"
+    assert response.result.message == "未知指令：/config elf.enabled false"
     assert response.result.details == []
     assert response.result.suggestions == []
 

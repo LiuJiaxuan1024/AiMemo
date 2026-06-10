@@ -9,7 +9,6 @@
 当前已实现：
 
 - 桌面外置精灵窗口
-- `config.json5` 运行时开关：`elf.enabled=false` 时不加载 Web / 桌面精灵
 - 后端精灵事件中心
 - 精灵气泡消息
 - 精灵外部聊天
@@ -31,42 +30,42 @@ backend/app/services/elf_event_service.py
 backend/app/services/elf_chat_service.py
 ```
 
-## 运行时开关
+## 语音配置
 
 仓库根目录 `config.json5`：
 
 ```json5
 "elf": {
-  "enabled": true,
+  "voice": {
+    "mode": false,
+    "default_profile_id": 1,
+  },
 }
 ```
 
 行为：
 
 ```text
-true
-  Web 内精灵组件可以挂载，桌面精灵读取配置后显示窗口。
+elf.voice.mode
+  控制精灵是否进入持续语音对话模式。
 
-false
-  Web 内精灵不挂载；桌面精灵明确读到 false 后保持隐藏。
-  精灵工坊页面、任务、记忆和语音工坊仍可访问。
+elf.voice.default_profile_id
+  控制精灵 TTS 默认使用的声线。
 ```
 
-前端读取：
+配置方式：
 
 ```text
-frontend/src/shared/runtimeConfig.ts
-frontend/src/features/jobs/JobDrawer.tsx
+/config elf.voice.mode true|false
+/config elf.voice.default <voice>
 ```
 
-桌面读取：
+说明：
 
 ```text
-desktop/src/main.ts
-GET /api/config/runtime
+精灵本体是前端 / 桌面渲染组件。
+隐藏组件不等同于关闭精灵能力，因此不再提供 elf.enabled 作为运行时配置项。
 ```
-
-桌面精灵不会把“后端未启动 / 配置接口暂时失败”当成关闭，而是等待并重试。
 
 ## 设计目标
 
@@ -572,7 +571,6 @@ ElfEventBus
 后续可以加入：
 
 ```text
-开关精灵
 切换模型
 气泡显示频率
 减少动效
@@ -616,7 +614,7 @@ Live2D 资源体积可能较大，需要避免阻塞首屏。
 第三方模型资源可能有版权限制，开源项目必须谨慎选择可分发模型。
 精灵动效不能遮挡核心操作区域。
 气泡文案不能过于频繁，否则会打扰用户。
-如果用户关闭精灵，后台任务入口仍然要保留。
+如果未来提供隐藏精灵的显示选项，后台任务入口仍然要保留。
 ```
 
 ## 当前建议

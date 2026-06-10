@@ -14,6 +14,7 @@ from app.agent.graphs.memory_chat.graph import _resolve_graph_input_for_turn
 from app.agent.checkpoints import get_sqlite_checkpointer
 from app.agent.graphs.memory_chat.nodes import RetrievalPlan
 from app.agent.graphs.memory_chat.nodes import build_memory_chat_answer_system_prompt
+from app.agent.graphs.memory_chat.nodes import build_elf_bubble_answer_system_prompt
 from app.agent.graphs.memory_chat.nodes import build_agent_node
 from app.agent.graphs.memory_chat.nodes import build_tools_node
 from app.agent.graphs.memory_chat.nodes import route_after_agent
@@ -1329,6 +1330,30 @@ def test_elf_bubble_parser_accepts_expanded_expression_emoji():
         "tsundere_pout",
         "sparkle_success",
     ]
+
+
+def test_elf_bubble_parser_drops_trailing_listening_filler():
+    parts = _parse_elf_bubble_parts(
+        '{"bubbles":['
+        '{"text":"这个问题的关键是先确认配置有没有持久化。","emoji":"thinking"},'
+        '{"text":"我在听呢，家炫。","emoji":"idle_soft"}'
+        "]}"
+    )
+
+    assert [part["text"] for part in parts] == ["这个问题的关键是先确认配置有没有持久化。"]
+
+
+def test_elf_bubble_parser_keeps_single_listening_reply():
+    parts = _parse_elf_bubble_parts('{"bubbles":[{"text":"我在听呢，家炫。","emoji":"idle_soft"}]}')
+
+    assert [part["text"] for part in parts] == ["我在听呢，家炫。"]
+
+
+def test_elf_bubble_prompt_forbids_generic_listening_closer():
+    prompt = build_elf_bubble_answer_system_prompt()
+
+    assert "不要在回答末尾额外追加空泛待机句" in prompt
+    assert "不要每轮都称呼用户名字" in prompt
 
 
 def test_memory_chat_graph_uses_planned_retrieval_query(

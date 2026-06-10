@@ -24,7 +24,6 @@ const ELF_RUNTIME_STATUS_URL = `${AIMEMO_BACKEND_URL}/api/elf/runtime/status`;
 const ELF_VOICE_MODE_URL = `${AIMEMO_BACKEND_URL}/api/elf/voice/mode`;
 const ELF_VOICE_SPEAK_URL = `${AIMEMO_BACKEND_URL}/api/elf/voice/speak`;
 const ELF_VOICE_TRANSCRIBE_URL = `${AIMEMO_BACKEND_URL}/api/elf/voice/transcribe`;
-const RUNTIME_CONFIG_URL = `${AIMEMO_BACKEND_URL}/api/config/runtime`;
 const ELF_CHAT_RESUME_STREAM_URL = (turnId: number) =>
   `${AIMEMO_BACKEND_URL}/api/elf/chat/turns/${turnId}/resume/stream`;
 const isLinuxElfWindow = navigator.userAgent.includes("Linux");
@@ -35,7 +34,10 @@ const ELF_COMPACT_WINDOW_WIDTH = 300;
 const ELF_BUBBLE_WINDOW_HEIGHT = 300;
 const ELF_CHOICE_WINDOW_WIDTH = 300;
 const ELF_VOICE_REQUEST_TIMEOUT_MS = 45_000;
-const ELF_CONFIG_RETRY_MS = 1500;
+const ELF_VOICE_AUTO_STOP_GRACE_MS = 1200;
+const ELF_VOICE_SILENCE_STOP_MS = 950;
+const ELF_VOICE_MAX_RECORDING_MS = 18_000;
+const ELF_VOICE_RMS_THRESHOLD = 0.022;
 type OverlayMode = "hidden" | "bubble" | "menu" | "chat" | "choice";
 
 if (isLinuxElfWindow) {
@@ -63,6 +65,12 @@ let isElfVoiceModeEnabled = false;
 let isVoiceRecording = false;
 let mediaRecorder: MediaRecorder | null = null;
 let recordedAudioChunks: Blob[] = [];
+let voiceAudioContext: AudioContext | null = null;
+let voiceAnalyser: AnalyserNode | null = null;
+let voiceAnalysisFrame: number | null = null;
+let voiceRecordingStartedAt = 0;
+let voiceLastSpeechAt = 0;
+let voiceSpeechDetected = false;
 let activeToolCallIds = new Set<string>();
 let toolProgressCount = 0;
 let choiceCloseTimer: number | null = null;
@@ -166,29 +174,24 @@ chatPanel?.addEventListener("submit", (event) => {
   });
 });
 
-voiceHoldButton?.addEventListener("pointerdown", (event) => {
-  if (!isElfVoiceModeEnabled || isElfBusy() || isVoiceRecording) {
+voiceHoldButton?.addEventListener("click", (event) => {
+  event.preventDefault();
+  if (!isElfVoiceModeEnabled || isElfBusy()) {
     return;
   }
-  event.preventDefault();
-  voiceHoldButton.setPointerCapture(event.pointerId);
+  if (isVoiceRecording) {
+    stopVoiceRecording();
+    return;
+  }
+  if (mediaRecorder) {
+    return;
+  }
   startVoiceRecording().catch((error) => {
     console.error("[memo-elf] microphone failed", error);
     setBubble("麦克风暂时没连上，请检查浏览器/系统录音权限。");
     clearBubbleAfter(4200);
   });
 });
-
-voiceHoldButton?.addEventListener("pointerup", (event) => {
-  if (!isVoiceRecording) {
-    return;
-  }
-  event.preventDefault();
-  stopVoiceRecording();
-});
-
-voiceHoldButton?.addEventListener("pointercancel", stopVoiceRecording);
-voiceHoldButton?.addEventListener("lostpointercapture", stopVoiceRecording);
 
 chatInput?.addEventListener("input", () => {
   autoResizeChatInput();
@@ -217,12 +220,6 @@ window.addEventListener("pointerdown", (event) => {
 void bootstrapElfDesktop();
 
 async function bootstrapElfDesktop() {
-  const enabled = await waitForElfEnabled();
-  if (enabled === false) {
-    await currentWindow.hide().catch(() => {});
-    return;
-  }
-
   await currentWindow.show().catch(() => {});
   checkBackendHealth().catch(() => {
     setBubble("后端还没连上。");
@@ -231,33 +228,6 @@ async function bootstrapElfDesktop() {
   startElfEventPolling();
   startElfVoiceModePolling();
   startElfChatStatusPolling();
-}
-
-async function waitForElfEnabled(): Promise<boolean> {
-  while (true) {
-    const enabled = await fetchElfEnabled();
-    if (enabled !== null) {
-      return enabled;
-    }
-    await sleep(ELF_CONFIG_RETRY_MS);
-  }
-}
-
-async function fetchElfEnabled(): Promise<boolean | null> {
-  try {
-    const response = await fetch(RUNTIME_CONFIG_URL, { cache: "no-store" });
-    if (!response.ok) {
-      return null;
-    }
-    const payload = (await response.json()) as { elf?: { enabled?: boolean } };
-    return payload.elf?.enabled === true;
-  } catch {
-    return null;
-  }
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 async function checkBackendHealth() {
@@ -501,7 +471,8 @@ function resolveOverlayMode(): OverlayMode {
   if (isChoicePanelOpen) {
     return "choice";
   }
-  if (isBubbleVisible || isElfChatRunning || isElfSpeaking) {
+  const hasBubbleText = bubbleText.trim().length > 0;
+  if ((isBubbleVisible || isElfChatRunning || isElfSpeaking || isElfBackendBusy) && hasBubbleText) {
     return "bubble";
   }
   if (isMenuOpen) {
@@ -518,6 +489,9 @@ function overlayStateForMode(mode: OverlayMode): OverlayState {
     mode,
     bubbleText,
     chatDisabled: isElfBusy(),
+    voiceModeEnabled: isElfVoiceModeEnabled,
+    voiceProcessing: mediaRecorder !== null && !isVoiceRecording,
+    voiceRecording: isVoiceRecording,
     choiceRequest: mode === "choice" ? activeChoiceRequest ?? undefined : undefined,
   };
 }
@@ -612,6 +586,11 @@ async function handleOverlayCommand(command: OverlayCommand) {
     return;
   }
   if (command.type === "close-panels") {
+    if (isVoiceRecording || mediaRecorder) {
+      hideElfMenu({ sync: false });
+      await syncOverlayMode();
+      return;
+    }
     hideElfMenu({ sync: false });
     hideChatPanel({ sync: false });
     await syncOverlayMode();
@@ -623,6 +602,9 @@ async function handleOverlayCommand(command: OverlayCommand) {
     return;
   }
   if (command.type === "voice-start") {
+    if (!isElfVoiceModeEnabled || isElfBusy() || isVoiceRecording || mediaRecorder) {
+      return;
+    }
     await startVoiceRecording().catch((error) => {
       console.error("[memo-elf] microphone failed", error);
       setBubble("麦克风暂时没连上，请检查浏览器/系统录音权限。");
@@ -740,10 +722,30 @@ function setElfVoiceMode(enabled: boolean) {
   isElfVoiceModeEnabled = enabled;
   chatPanel?.classList.toggle("voice-mode", enabled);
   if (voiceHoldButton) {
+    const voiceProcessing = mediaRecorder !== null && !isVoiceRecording;
     voiceHoldButton.hidden = !enabled;
-    voiceHoldButton.disabled = isElfBusy() || !enabled;
-    voiceHoldButton.textContent = isVoiceRecording ? "松开发送" : "按住说话";
+    voiceHoldButton.disabled = isElfBusy() || !enabled || voiceProcessing;
+    voiceHoldButton.classList.toggle("recording", isVoiceRecording);
+    updateVoiceButtonLabel(isVoiceRecording, voiceProcessing);
   }
+  updateVoiceInputHint(isVoiceRecording, mediaRecorder !== null && !isVoiceRecording);
+  void syncOverlayMode();
+}
+
+function updateVoiceButtonLabel(recording: boolean, processing = false) {
+  if (!voiceHoldButton) {
+    return;
+  }
+  const label = processing ? "正在识别" : recording ? "结束录音" : "语音输入";
+  voiceHoldButton.setAttribute("aria-label", label);
+  voiceHoldButton.title = label;
+}
+
+function updateVoiceInputHint(recording: boolean, processing = false) {
+  if (!chatInput) {
+    return;
+  }
+  chatInput.placeholder = processing ? "正在识别..." : recording ? "正在听，说完会自动发送" : "想和我说什么？";
 }
 
 async function startVoiceRecording() {
@@ -768,11 +770,11 @@ async function startVoiceRecording() {
   };
   isVoiceRecording = true;
   voiceHoldButton?.classList.add("recording");
-  if (voiceHoldButton) {
-    voiceHoldButton.textContent = "松开发送";
-  }
-  setBubble("我在听，松开就发给我。");
+  updateVoiceButtonLabel(true);
+  updateVoiceInputHint(true);
+  void syncOverlayMode();
   mediaRecorder.start();
+  startVoiceAutoStop(stream);
 }
 
 function stopVoiceRecording() {
@@ -780,13 +782,76 @@ function stopVoiceRecording() {
     return;
   }
   isVoiceRecording = false;
+  stopVoiceAutoStop();
   voiceHoldButton?.classList.remove("recording");
-  if (voiceHoldButton) {
-    voiceHoldButton.textContent = "正在识别...";
-  }
+  updateVoiceButtonLabel(false, true);
+  updateVoiceInputHint(false, true);
+  void syncOverlayMode();
   if (mediaRecorder && mediaRecorder.state !== "inactive") {
     mediaRecorder.stop();
   }
+}
+
+function startVoiceAutoStop(stream: MediaStream) {
+  stopVoiceAutoStop();
+  voiceRecordingStartedAt = performance.now();
+  voiceLastSpeechAt = voiceRecordingStartedAt;
+  voiceSpeechDetected = false;
+
+  try {
+    voiceAudioContext = new AudioContext();
+    const source = voiceAudioContext.createMediaStreamSource(stream);
+    voiceAnalyser = voiceAudioContext.createAnalyser();
+    voiceAnalyser.fftSize = 1024;
+    source.connect(voiceAnalyser);
+    const data = new Uint8Array(voiceAnalyser.fftSize);
+
+    const tick = () => {
+      if (!isVoiceRecording || !mediaRecorder || !voiceAnalyser) {
+        return;
+      }
+
+      voiceAnalyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (const value of data) {
+        const normalized = (value - 128) / 128;
+        sum += normalized * normalized;
+      }
+
+      const now = performance.now();
+      const rms = Math.sqrt(sum / data.length);
+      if (rms >= ELF_VOICE_RMS_THRESHOLD) {
+        voiceSpeechDetected = true;
+        voiceLastSpeechAt = now;
+      }
+
+      const elapsed = now - voiceRecordingStartedAt;
+      const silentAfterSpeech = voiceSpeechDetected && now - voiceLastSpeechAt >= ELF_VOICE_SILENCE_STOP_MS;
+      if ((elapsed >= ELF_VOICE_AUTO_STOP_GRACE_MS && silentAfterSpeech) || elapsed >= ELF_VOICE_MAX_RECORDING_MS) {
+        stopVoiceRecording();
+        return;
+      }
+
+      voiceAnalysisFrame = window.requestAnimationFrame(tick);
+    };
+
+    voiceAnalysisFrame = window.requestAnimationFrame(tick);
+  } catch (error) {
+    console.warn("[memo-elf] voice auto-stop unavailable", error);
+    voiceAnalysisFrame = window.setTimeout(() => stopVoiceRecording(), ELF_VOICE_MAX_RECORDING_MS);
+  }
+}
+
+function stopVoiceAutoStop() {
+  if (voiceAnalysisFrame !== null) {
+    window.cancelAnimationFrame(voiceAnalysisFrame);
+    window.clearTimeout(voiceAnalysisFrame);
+    voiceAnalysisFrame = null;
+  }
+  void voiceAudioContext?.close().catch(() => {});
+  voiceAudioContext = null;
+  voiceAnalyser = null;
+  voiceSpeechDetected = false;
 }
 
 async function transcribeAndSendVoice(chunks: Blob[]) {
@@ -810,20 +875,21 @@ async function transcribeAndSendVoice(chunks: Blob[]) {
       throw new ElfClientError("VOICE_TRANSCRIBE_EMPTY", "语音接口返回了空文本，可能是声音太短或环境噪声太大。");
     }
     if (chatInput) {
-      chatInput.value = text;
+      chatInput.value = "";
       autoResizeChatInput();
     }
-    setBubble(`我听到：${text}`);
     await streamElfChat(text, { voiceReply: true });
   } catch (error) {
     console.error("[memo-elf] voice turn failed", error);
-    setBubble(formatElfErrorBubble(error, "这段语音我没听清，再按住说一次吧。"));
+    setBubble(formatElfErrorBubble(error, "这段语音我没听清，再点一下麦克风重说吧。"));
     clearBubbleAfter(6200);
   } finally {
     mediaRecorder = null;
     if (voiceHoldButton) {
-      voiceHoldButton.textContent = "按住说话";
+      updateVoiceButtonLabel(false);
     }
+    updateVoiceInputHint(false);
+    void syncOverlayMode();
   }
 }
 
@@ -2189,6 +2255,9 @@ interface OverlayState {
   mode: OverlayMode;
   bubbleText?: string;
   chatDisabled?: boolean;
+  voiceModeEnabled?: boolean;
+  voiceProcessing?: boolean;
+  voiceRecording?: boolean;
   choiceRequest?: UserInputRequest;
 }
 

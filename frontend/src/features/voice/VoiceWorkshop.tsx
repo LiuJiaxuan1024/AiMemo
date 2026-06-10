@@ -134,7 +134,7 @@ export function VoiceWorkshop() {
               <Mic2 aria-hidden="true" size={18} />
             </span>
             <div>
-              <strong>精灵语音对话</strong>
+              <strong>持续语音对话</strong>
               <span>开启后，桌面精灵会显示按住说话入口。普通文字消息仍然保持静默。</span>
             </div>
             <label className="voice-mode-switch">

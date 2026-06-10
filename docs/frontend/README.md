@@ -54,7 +54,7 @@ frontend/src/
 GET /api/config/runtime
 ```
 
-`elf.enabled=false` 时 `JobDrawer` 不挂载 Web 精灵组件，只保留打开精灵工坊的侧边入口。
+当前运行时配置只暴露精灵语音模式等能力状态。Web 精灵组件由前端正常渲染；隐藏组件不再作为“关闭精灵”的配置语义。
 
 产品入口由后端统一提供：
 

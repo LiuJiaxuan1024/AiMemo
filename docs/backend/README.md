@@ -55,8 +55,8 @@ backend/data/ai_note.db
 首次构建依赖等前台短命令可以直接使用这个默认值；长期运行的服务仍应走
 `exec_command_background`，避免阻塞 agent 主循环。
 
-`elf.enabled` 会通过 `GET /api/config/runtime` 被 Web 和桌面精灵读取。该接口每次读取最新
-`config.json5`，用于让用户在重启前端 / 桌面后快速切换是否加载精灵。
+`GET /api/config/runtime` 会返回精灵语音模式等轻量运行时状态。精灵本体是前端 / 桌面渲染组件，
+不再把隐藏组件作为“关闭精灵”的运行时配置语义。
 
 语音模块默认走阿里百炼 / DashScope 远程能力，复用 `DASHSCOPE_API_KEY`，不再要求下载本地
 ASR / TTS 模型。

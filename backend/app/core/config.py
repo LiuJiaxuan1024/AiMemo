@@ -3,11 +3,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+import re
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 _PROJECT_CONFIG = None
+_WRITABLE_PROJECT_CONFIG_PATHS = {
+    "elf.voice.mode",
+    "elf.voice.default_profile_id",
+}
 
 
 def _read_project_config() -> dict[str, Any]:
@@ -58,6 +63,238 @@ def get_project_config_value(path: str, default: Any, *, reload: bool = False) -
             return default
         value = value[part]
     return value
+
+
+def set_project_config_value(path: str, value: Any) -> None:
+    """Persist a controlled project config value into config.json5.
+
+    This writer intentionally targets project-level runtime settings instead of
+    accepting arbitrary JSON patch input from users.
+    """
+
+    if path not in _WRITABLE_PROJECT_CONFIG_PATHS:
+        raise ValueError(f"Project config path is not writable at runtime: {path}")
+
+    config_path = _project_config_path_for_write()
+    current_text = config_path.read_text(encoding="utf-8") if config_path.exists() else "{}\n"
+    current_config = _read_project_config()
+    _set_nested_config_value(current_config, path, value)
+    updated_text = _patch_known_project_config_text(current_text, path, value)
+    if updated_text is None:
+        updated_text = json.dumps(current_config, ensure_ascii=False, indent=2) + "\n"
+    config_path.write_text(updated_text, encoding="utf-8")
+    global _PROJECT_CONFIG
+    _PROJECT_CONFIG = current_config
+
+
+def _project_config_path_for_write() -> Path:
+    for candidate in _config_candidates():
+        if candidate.exists():
+            return candidate
+    current = Path(__file__).resolve()
+    return current.parents[3] / "config.json5"
+
+
+def _set_nested_config_value(config: dict[str, Any], path: str, value: Any) -> None:
+    target = config
+    parts = path.split(".")
+    for part in parts[:-1]:
+        child = target.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            target[part] = child
+        target = child
+    target[parts[-1]] = value
+
+
+def _patch_known_project_config_text(text: str, path: str, value: Any) -> str | None:
+    if not path.startswith("elf."):
+        return None
+    elf_span = _find_object_value_span(text, "elf", 0, len(text))
+    parts = path.split(".")[1:]
+    if elf_span is None:
+        literal = _nested_literal(parts, _json5_literal(value), indent="    ")
+        return _insert_top_level_key(text, "elf", literal)
+    return _patch_object_path(text, elf_span[0], elf_span[1], parts, _json5_literal(value))
+
+
+def _json5_literal(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _insert_top_level_key(text: str, key: str, literal: str) -> str:
+    root_start = text.find("{")
+    root_end = text.rfind("}")
+    if root_start == -1 or root_end == -1 or root_end <= root_start:
+        return "{\n  " + json.dumps(key, ensure_ascii=False) + f": {literal},\n}}\n"
+    body = text[root_start + 1 : root_end].rstrip()
+    prefix = "" if not body.strip() or body.rstrip().endswith(",") else ","
+    insertion = f'{prefix}\n  "{key}": {literal},\n'
+    return text[:root_end] + insertion + text[root_end:]
+
+
+def _patch_object_path(text: str, object_start: int, object_end: int, parts: list[str], literal: str) -> str:
+    key = parts[0]
+    if len(parts) == 1:
+        return _set_direct_object_value(text, object_start, object_end, key, literal)
+    child_span = _find_object_value_span(text, key, object_start, object_end)
+    if child_span is None:
+        nested = _nested_literal(parts[1:], literal, indent="      ")
+        return _insert_direct_object_value(text, object_start, object_end, key, nested)
+    return _patch_object_path(text, child_span[0], child_span[1], parts[1:], literal)
+
+
+def _nested_literal(parts: list[str], literal: str, *, indent: str) -> str:
+    if not parts:
+        return literal
+    key = json.dumps(parts[0], ensure_ascii=False)
+    if len(parts) == 1:
+        return "{\n" + f"{indent}{key}: {literal},\n" + indent[:-2] + "}"
+    return "{\n" + f"{indent}{key}: {_nested_literal(parts[1:], literal, indent=indent + '  ')},\n" + indent[:-2] + "}"
+
+
+def _set_direct_object_value(text: str, object_start: int, object_end: int, key: str, literal: str) -> str:
+    value_span = _find_direct_value_span(text, key, object_start, object_end)
+    if value_span is None:
+        return _insert_direct_object_value(text, object_start, object_end, key, literal)
+    return text[: value_span[0]] + literal + text[value_span[1] :]
+
+
+def _insert_direct_object_value(text: str, object_start: int, object_end: int, key: str, literal: str) -> str:
+    closing_line_start = text.rfind("\n", object_start, object_end) + 1
+    closing_indent = re.match(r"\s*", text[closing_line_start:object_end]).group(0)
+    child_indent = closing_indent + "  "
+    body = text[object_start + 1 : object_end].rstrip()
+    prefix = "" if not body.strip() or body.rstrip().endswith(",") else ","
+    insertion = f'{prefix}\n{child_indent}"{key}": {literal},\n{closing_indent}'
+    return text[:object_end] + insertion + text[object_end:]
+
+
+def _find_object_value_span(text: str, key: str, start: int, end: int) -> tuple[int, int] | None:
+    value_span = _find_direct_value_span(text, key, start, end)
+    if value_span is None:
+        return None
+    value_start, _value_end = value_span
+    if value_start >= len(text) or text[value_start] != "{":
+        return None
+    object_end = _find_matching_brace(text, value_start, end)
+    return (value_start, object_end) if object_end is not None else None
+
+
+def _find_direct_value_span(text: str, key: str, start: int, end: int) -> tuple[int, int] | None:
+    pattern = re.compile(rf'"{re.escape(key)}"\s*:', re.MULTILINE)
+    for match in pattern.finditer(text, start, end):
+        if _brace_depth(text, start, match.start()) != 1:
+            continue
+        value_start = _skip_ws(text, match.end(), end)
+        value_end = _find_value_end(text, value_start, end)
+        return value_start, value_end
+    return None
+
+
+def _skip_ws(text: str, index: int, end: int) -> int:
+    while index < end and text[index].isspace():
+        index += 1
+    return index
+
+
+def _find_value_end(text: str, start: int, end: int) -> int:
+    in_string = False
+    quote = ""
+    escaped = False
+    depth = 0
+    index = start
+    while index < end:
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                in_string = False
+            index += 1
+            continue
+        if char in {'"', "'"}:
+            in_string = True
+            quote = char
+            index += 1
+            continue
+        if char in "{[":
+            depth += 1
+        elif char in "}]":
+            if depth == 0:
+                return index
+            depth -= 1
+        elif char == "," and depth == 0:
+            return index
+        index += 1
+    return end
+
+
+def _find_matching_brace(text: str, start: int, end: int) -> int | None:
+    depth = 0
+    in_string = False
+    quote = ""
+    escaped = False
+    for index in range(start, end):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                in_string = False
+            continue
+        if char in {'"', "'"}:
+            in_string = True
+            quote = char
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def _brace_depth(text: str, start: int, end: int) -> int:
+    depth = 0
+    in_string = False
+    quote = ""
+    escaped = False
+    index = start
+    while index < end:
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                in_string = False
+            index += 1
+            continue
+        next_char = text[index + 1] if index + 1 < end else ""
+        if char == "/" and next_char == "/":
+            newline = text.find("\n", index + 2, end)
+            index = end if newline == -1 else newline + 1
+            continue
+        if char == "/" and next_char == "*":
+            close = text.find("*/", index + 2, end)
+            index = end if close == -1 else close + 2
+            continue
+        if char in {'"', "'"}:
+            in_string = True
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        index += 1
+    return depth
 
 
 def _strip_json5_syntax(text: str) -> str:
@@ -120,7 +357,6 @@ class Settings(BaseSettings):
     # 启动时是否清理所有已终止的后台命令任务（exited / failed / killed / orphaned / unknown）。
     # 子进程是 detached 的，结束后不会自动从 DB 里消失；开启此项可让重启自动收尾旧任务的日志和记录。
     background_task_cleanup_on_startup: bool = True
-    elf_enabled: bool = bool(_config_value("elf.enabled", True))
     local_operator_exec_default_timeout_ms: int = int(
         _config_value("local_operator.exec_command.default_timeout_ms", 180_000)
     )

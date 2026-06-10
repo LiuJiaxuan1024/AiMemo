@@ -15,12 +15,17 @@ const currentWindow = getCurrentWindow();
 
 let currentMode: OverlayMode = "hidden";
 let choiceCloseTimer: number | null = null;
+let isOverlayVoiceRecording = false;
+let isOverlayVoiceProcessing = false;
 
 void currentWindow.listen<OverlayState>("elf-overlay-state", (event) => {
   applyOverlayState(event.payload);
 });
 
 void currentWindow.onFocusChanged(({ payload: focused }) => {
+  if (!focused && (isOverlayVoiceRecording || isOverlayVoiceProcessing)) {
+    return;
+  }
   if (!focused && (currentMode === "menu" || currentMode === "chat")) {
     void emitCommand({ type: "close-panels" });
   }
@@ -55,28 +60,31 @@ chatInput?.addEventListener("keydown", (event) => {
   }
 });
 
-voiceHoldButton?.addEventListener("pointerdown", (event) => {
+voiceHoldButton?.addEventListener("click", (event) => {
   event.preventDefault();
-  void emitCommand({ type: "voice-start" });
-});
-voiceHoldButton?.addEventListener("pointerup", (event) => {
-  event.preventDefault();
-  void emitCommand({ type: "voice-stop" });
-});
-voiceHoldButton?.addEventListener("pointercancel", () => {
-  void emitCommand({ type: "voice-stop" });
+  void emitCommand({ type: isOverlayVoiceRecording ? "voice-stop" : "voice-start" });
 });
 
 function applyOverlayState(state: OverlayState) {
   currentMode = state.mode;
   document.documentElement.dataset.overlayMode = state.mode;
+  if (state.mode !== "chat") {
+    isOverlayVoiceRecording = false;
+    isOverlayVoiceProcessing = false;
+  }
   hideAll();
 
   if (state.mode === "hidden") {
     return;
   }
   if (state.mode === "bubble") {
-    showBubble(state.bubbleText ?? "");
+    const text = (state.bubbleText ?? "").trim();
+    if (!text) {
+      currentMode = "hidden";
+      document.documentElement.dataset.overlayMode = "hidden";
+      return;
+    }
+    showBubble(text);
     return;
   }
   if (state.mode === "menu") {
@@ -85,16 +93,29 @@ function applyOverlayState(state: OverlayState) {
     return;
   }
   if (state.mode === "chat") {
+    const voiceModeEnabled = state.voiceModeEnabled === true;
+    const voiceProcessing = state.voiceProcessing === true;
+    isOverlayVoiceRecording = state.voiceRecording === true;
+    isOverlayVoiceProcessing = voiceProcessing;
     chatPanel?.classList.add("open");
+    chatPanel?.classList.toggle("voice-mode", voiceModeEnabled);
     chatPanel?.setAttribute("aria-hidden", "false");
     if (chatInput) {
       chatInput.disabled = state.chatDisabled === true;
+      chatInput.placeholder = voiceProcessing
+        ? "正在识别..."
+        : isOverlayVoiceRecording
+          ? "正在听，说完会自动发送"
+          : "想和我说什么？";
     }
     if (chatSendButton) {
       chatSendButton.disabled = state.chatDisabled === true;
     }
     if (voiceHoldButton) {
-      voiceHoldButton.hidden = true;
+      voiceHoldButton.hidden = !voiceModeEnabled;
+      voiceHoldButton.disabled = state.chatDisabled === true || !voiceModeEnabled || voiceProcessing;
+      voiceHoldButton.classList.toggle("recording", isOverlayVoiceRecording);
+      updateVoiceButtonLabel(isOverlayVoiceRecording, voiceProcessing);
     }
     window.setTimeout(() => {
       chatInput?.focus();
@@ -111,8 +132,9 @@ function hideAll() {
   bubble?.classList.remove("visible", "scrollable");
   elfMenu?.classList.remove("open");
   elfMenu?.setAttribute("aria-hidden", "true");
-  chatPanel?.classList.remove("open");
+  chatPanel?.classList.remove("open", "voice-mode");
   chatPanel?.setAttribute("aria-hidden", "true");
+  voiceHoldButton?.classList.remove("recording");
   choicePanel?.classList.remove("open", "closing");
   choicePanel?.setAttribute("aria-hidden", "true");
   if (currentMode !== "choice") {
@@ -120,11 +142,26 @@ function hideAll() {
   }
 }
 
+function updateVoiceButtonLabel(recording: boolean, processing = false) {
+  if (!voiceHoldButton) {
+    return;
+  }
+  const label = processing ? "正在识别" : recording ? "结束录音" : "语音输入";
+  voiceHoldButton.setAttribute("aria-label", label);
+  voiceHoldButton.title = label;
+}
+
 function showBubble(message: string) {
   if (!bubble) {
     return;
   }
-  bubble.textContent = message;
+  const text = message.trim();
+  if (!text) {
+    bubble.classList.remove("visible", "scrollable");
+    bubble.textContent = "";
+    return;
+  }
+  bubble.textContent = text;
   bubble.classList.remove("scrollable");
   bubble.classList.add("visible");
   window.requestAnimationFrame(() => {
@@ -379,6 +416,9 @@ interface OverlayState {
   mode: OverlayMode;
   bubbleText?: string;
   chatDisabled?: boolean;
+  voiceModeEnabled?: boolean;
+  voiceProcessing?: boolean;
+  voiceRecording?: boolean;
   choiceRequest?: UserInputRequest;
 }
 
