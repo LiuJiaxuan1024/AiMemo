@@ -34,6 +34,7 @@ frontend/src/
 
 - [Workshop / Job Graph](./job-drawer.md)
 - [Chat Window](./chat-window.md)
+- [Chat View / Conversation Export 重构计划](./chat-view-export-refactor.md)
 - [前端模块路由](./module-decoupling.md)
 - [精灵助手](./elf-assistant.md)
 - [精灵事件总线](./elf-event-bus.md)
