@@ -29,6 +29,9 @@ def build_job_handlers(
             session_factory=session_factory,
             checkpoint_path=checkpoint_path,
         ),
+        JobType.KNOWLEDGE_IMAGE_RETRY.value: _build_knowledge_image_retry_handler(
+            session_factory=session_factory,
+        ),
         JobType.CONVERSATION_SUMMARY.value: _build_conversation_summary_handler(
             session_factory=session_factory,
             checkpoint_path=checkpoint_path,
@@ -91,6 +94,18 @@ def _build_knowledge_ingest_handler(
             session_factory=session_factory,
             checkpoint_path=checkpoint_path,
         )
+
+    return handle
+
+
+def _build_knowledge_image_retry_handler(
+    *,
+    session_factory: SessionFactory,
+) -> JobHandler:
+    def handle(job: Job) -> None:
+        from app.services.knowledge_image_asset_service import run_knowledge_image_retry_job
+
+        run_knowledge_image_retry_job(job, session_factory=session_factory)
 
     return handle
 

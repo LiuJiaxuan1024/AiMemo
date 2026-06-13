@@ -32,5 +32,12 @@ class Note(SQLModel, table=True):
     embedding_error: str = ""
     embedded_at: datetime | None = Field(default=None, index=True)
     deleted_at: datetime | None = Field(default=None, index=True)
+    cloud_revision: int = Field(default=0, index=True)
+    local_revision: int = Field(default=1, index=True)
+    last_synced_revision: int = Field(default=0, index=True)
+    sync_status: str = Field(default="dirty", index=True, max_length=24)
+    sync_conflict_id: str = Field(default="", index=True, max_length=80)
+    cloud_object_key: str = Field(default="", index=True, max_length=400)
+    last_synced_at: datetime | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=utc_now, index=True)
     updated_at: datetime = Field(default_factory=utc_now, index=True)

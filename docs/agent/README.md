@@ -72,6 +72,7 @@ LangGraph 不直接替代业务数据库。
 - [Context Pyramid](./context-pyramid.md)
 - [Agent 指令配置设计](./command-configuration.md)
 - [聊天模型 Provider 适配设计](./model-provider-adapter.md)
+- [模型 Provider 与凭据解耦设计草案](./model-provider-auth-design.md)
 - [Local Operator Agent](./local-operator-agent.md)
 - [Agent 工具扩展提案](./tooling-expansion-proposal.md)
 - [前后台任务边界](./background-vs-foreground.md)

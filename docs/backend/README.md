@@ -74,13 +74,17 @@ ASR / TTS 模型。
       "max_image_bytes": 5242880,
       "max_images_per_document": 80,
       "min_confidence": 0.45,
-      "timeout_seconds": 60
+      "timeout_seconds": 60,
+      "max_attempts": 3,
+      "retry_backoff_seconds": 0.5
     }
   }
 }
 ```
 
 `mode=off` 时跳过图片转文本；`mode=local_ocr` 时才启用本地 Tesseract 检测和一键安装流程。本地 OCR 不再作为 qwen-vl-ocr 缺 Key 或失败时的自动兜底，避免把噪声 OCR 结果写入知识库索引。
+
+qwen-vl-ocr 单张图片默认最多尝试 `max_attempts=3` 次，只对超时、网络错误、限流、服务端错误和模型非 JSON 输出这类临时失败重试；图片为空、过大、格式不支持、低价值或低置信度会直接跳过/失败，不重复调用模型。
 
 ## 当前 Note 模型
 
@@ -109,5 +113,8 @@ notes
 - [长期记忆管理](./memories.md)
 - [向量存储](./vector-storage.md)
 - [向量检索](./vector-search.md)
+- [阿里云 OSS 云存储使用规划](./aliyun-oss-storage-plan.md)
+- [云存储模块设计](./cloud-storage-module-design.md)
 - [从本地 OCR 切换到 qwen-vl-ocr](./qwen-vl-ocr-migration.md)
+- [知识库图片明细与定向重试设计](./knowledge-image-asset-retry-design.md)
 - [阿里云远程语音能力接入设计](../desktop/aliyun-voice-provider.md)

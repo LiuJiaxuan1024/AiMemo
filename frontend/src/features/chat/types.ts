@@ -21,6 +21,13 @@ export interface Conversation {
   updated_at: string;
 }
 
+export interface ConversationExportRequest {
+  messageIds?: number[];
+  includeAll?: boolean;
+  includeGraphs?: boolean;
+  includeFollowups?: boolean;
+}
+
 export interface ConversationKnowledgeMount {
   id: number;
   conversation_id: number;

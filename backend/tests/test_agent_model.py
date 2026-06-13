@@ -78,6 +78,68 @@ def test_agent_chat_model_uses_configured_openai_compatible_provider(monkeypatch
     assert model.streaming is True
 
 
+def test_agent_chat_model_uses_slot_provider_config(monkeypatch):
+    reset_agent_models()
+
+    def fake_config(path, default):
+        if path == "models.slots":
+            return {
+                "agent_chat": {
+                    "provider": "custom_gateway",
+                    "model": "custom-model",
+                    "temperature": 0.4,
+                    "streaming": False,
+                }
+            }
+        if path == "models.providers":
+            return {
+                "custom_gateway": {
+                    "base_url": "https://gateway.test/v1",
+                    "api_key": {"source": "env", "id": "CUSTOM_GATEWAY_KEY"},
+                    "capabilities": {"tool_calling": True},
+                    "extra_body": {"trace": "off"},
+                }
+            }
+        return default
+
+    monkeypatch.setattr("app.agent.model.get_project_config_value", fake_config)
+    monkeypatch.setenv("CUSTOM_GATEWAY_KEY", "custom-test-key")
+
+    model = get_agent_chat_model()
+
+    assert model.model_name == "custom-model"
+    assert str(model.openai_api_base) == "https://gateway.test/v1"
+    assert model.openai_api_key.get_secret_value() == "custom-test-key"
+    assert model.temperature == 0.4
+    assert model.streaming is False
+    assert model.extra_body == {"trace": "off"}
+
+
+def test_agent_chat_model_allows_local_provider_without_api_key(monkeypatch):
+    reset_agent_models()
+
+    def fake_config(path, default):
+        if path == "models.slots":
+            return {"agent_chat": {"provider": "local", "model": "qwen3"}}
+        if path == "models.providers":
+            return {
+                "local": {
+                    "base_url": "http://127.0.0.1:11434/v1",
+                    "api_key": {"source": "none"},
+                    "capabilities": {"tool_calling": True},
+                }
+            }
+        return default
+
+    monkeypatch.setattr("app.agent.model.get_project_config_value", fake_config)
+
+    model = get_agent_chat_model()
+
+    assert model.model_name == "qwen3"
+    assert str(model.openai_api_base) == "http://127.0.0.1:11434/v1"
+    assert model.openai_api_key.get_secret_value() == "no-api-key-required"
+
+
 def test_agent_chat_model_rejects_tool_calling_disabled(monkeypatch):
     reset_agent_models()
     monkeypatch.setattr(
@@ -102,10 +164,26 @@ def test_planner_chat_model_uses_fast_qwen_turbo(monkeypatch):
 
     reset_agent_models()
     monkeypatch.setattr(settings, "dashscope_api_key", "test-key")
+    monkeypatch.setattr("app.agent.model.get_project_config_value", lambda path, default: default)
 
     model = get_planner_chat_model()
 
     assert model.model_name == PLANNER_CHAT_MODEL
+    assert model.streaming is False
+    assert model.extra_body == {"enable_thinking": False}
+
+
+def test_planner_chat_model_uses_configured_model(monkeypatch):
+    reset_agent_models()
+    monkeypatch.setattr(settings, "dashscope_api_key", "test-key")
+    monkeypatch.setattr(
+        "app.agent.model.get_project_config_value",
+        lambda path, default: "qwen-plus" if path == "models.planner.model" else default,
+    )
+
+    model = get_planner_chat_model()
+
+    assert model.model_name == "qwen-plus"
     assert model.streaming is False
     assert model.extra_body == {"enable_thinking": False}
 
@@ -127,6 +205,7 @@ def test_agent_models_are_cached(monkeypatch):
 
     reset_agent_models()
     monkeypatch.setattr(settings, "dashscope_api_key", "test-key")
+    monkeypatch.setattr("app.agent.model.get_project_config_value", lambda path, default: default)
 
     assert get_agent_chat_model() is get_agent_chat_model()
     assert get_planner_chat_model() is get_planner_chat_model()

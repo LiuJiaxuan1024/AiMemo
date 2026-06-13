@@ -27,6 +27,9 @@ def test_create_note_returns_immediately_with_pending_job(session):
     assert note.processing_status == "pending"
     assert note.embedding_status == "pending"
     assert note.content_hash == build_note_content_hash("今天想先把 Ai 记的后台任务队列做出来。")
+    db_note = session.get(Note, note.id)
+    assert db_note.sync_status == "dirty"
+    assert db_note.local_revision == 1
     assert note.summary == ""
     assert note.tags == []
     assert [job.type for job in jobs] == [
@@ -96,6 +99,8 @@ def test_update_note_rebuilds_current_content_version_jobs_and_clears_chunks(ses
 
 def test_update_note_dual_store_fields_without_rebuild_when_markdown_same(session):
     note = create_note(session, NoteCreate(content="同一份 Markdown。"))
+    db_note = session.get(Note, note.id)
+    original_revision = db_note.local_revision
 
     updated = update_note(
         session,
@@ -112,6 +117,9 @@ def test_update_note_dual_store_fields_without_rebuild_when_markdown_same(sessio
     assert updated.content_blocks == '[{"type":"paragraph"}]'
     assert updated.content_format == "blocknote"
     assert updated.content_version == 1
+    db_note = session.get(Note, note.id)
+    assert db_note.sync_status == "dirty"
+    assert db_note.local_revision == original_revision + 1
 
 
 def test_delete_restore_and_hard_delete_note(session):

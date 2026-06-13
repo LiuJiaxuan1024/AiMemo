@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 from dataclasses import dataclass, field
 from typing import Any
@@ -43,6 +42,7 @@ class ChatModelConfig:
             "provider": self.provider,
             "model": self.model,
             "base_url": self.base_url,
+            "api_key_env": self.api_key_env,
             "temperature": self.temperature,
             "streaming": self.streaming,
             "extra_body": self.extra_body,
@@ -104,7 +104,7 @@ def get_planner_chat_model() -> ChatOpenAI:
     with _model_cache_lock:
         if _planner_chat_model is None:
             _planner_chat_model = _build_dashscope_chat_model(
-                model=PLANNER_CHAT_MODEL,
+                model=_resolve_planner_model_name(),
                 streaming=False,
                 cache_name="planner",
             )
@@ -179,94 +179,26 @@ def reset_agent_models() -> None:
 
 
 def _resolve_agent_chat_config() -> ChatModelConfig:
-    raw_config = get_project_config_value("models.agent_chat", None)
-    if isinstance(raw_config, dict):
-        return _resolve_configured_chat_model(raw_config)
-    return _resolve_legacy_agent_chat_config()
+    from app.services.model_config_service import resolve_model_slot
 
-
-def _resolve_legacy_agent_chat_config() -> ChatModelConfig:
+    resolved = resolve_model_slot(AGENT_CHAT_SLOT, config_reader=get_project_config_value)
     return ChatModelConfig(
-        slot=AGENT_CHAT_SLOT,
-        provider="dashscope",
-        model=settings.chat_model or AGENT_CHAT_MODEL,
-        base_url=settings.dashscope_base_url,
-        api_key_env="DASHSCOPE_API_KEY",
-        api_key=settings.dashscope_api_key,
-        temperature=0.2,
-        streaming=True,
-        extra_body={"enable_thinking": False},
-        capabilities={
-            "tool_calling": True,
-            "json_mode": True,
-            "streaming": True,
-            "vision": False,
-        },
+        slot=resolved.slot,
+        provider=resolved.provider,
+        model=resolved.model,
+        base_url=resolved.base_url,
+        api_key_env=resolved.api_key_env,
+        api_key=resolved.api_key,
+        temperature=resolved.temperature,
+        streaming=resolved.streaming,
+        extra_body=dict(resolved.extra_body or {}),
+        capabilities=dict(resolved.capabilities or {}),
     )
 
 
-def _resolve_configured_chat_model(raw_config: dict[str, Any]) -> ChatModelConfig:
-    provider = str(raw_config.get("provider") or "dashscope").strip().lower()
-    default_base_url = _default_base_url_for_provider(provider)
-    api_key_env = str(raw_config.get("api_key_env") or _default_api_key_env_for_provider(provider)).strip()
-    model = str(raw_config.get("model") or AGENT_CHAT_MODEL).strip()
-    base_url = str(raw_config.get("base_url") or default_base_url).strip()
-    extra_body = raw_config.get("extra_body")
-    if extra_body is None and provider == "dashscope":
-        extra_body = {"enable_thinking": False}
-    capabilities = raw_config.get("capabilities")
-
-    return ChatModelConfig(
-        slot=AGENT_CHAT_SLOT,
-        provider=provider,
-        model=model,
-        base_url=base_url,
-        api_key_env=api_key_env,
-        api_key=_api_key_for_env(api_key_env),
-        temperature=float(raw_config.get("temperature", 0.2)),
-        streaming=bool(raw_config.get("streaming", True)),
-        extra_body=extra_body if isinstance(extra_body, dict) else {},
-        capabilities=capabilities if isinstance(capabilities, dict) else {},
-    )
-
-
-def _default_base_url_for_provider(provider: str) -> str:
-    if provider == "dashscope":
-        return settings.dashscope_base_url
-    if provider == "openai":
-        return settings.openai_base_url
-    if provider == "deepseek":
-        return "https://api.deepseek.com/v1"
-    if provider == "openrouter":
-        return "https://openrouter.ai/api/v1"
-    if provider == "siliconflow":
-        return "https://api.siliconflow.cn/v1"
-    if provider == "local_openai_compatible":
-        return "http://127.0.0.1:11434/v1"
-    return settings.openai_base_url
-
-
-def _default_api_key_env_for_provider(provider: str) -> str:
-    provider_envs = {
-        "dashscope": "DASHSCOPE_API_KEY",
-        "openai": "OPENAI_API_KEY",
-        "deepseek": "DEEPSEEK_API_KEY",
-        "openrouter": "OPENROUTER_API_KEY",
-        "siliconflow": "SILICONFLOW_API_KEY",
-        "local_openai_compatible": "LOCAL_LLM_API_KEY",
-        "anthropic": "ANTHROPIC_API_KEY",
-    }
-    return provider_envs.get(provider, "OPENAI_API_KEY")
-
-
-def _api_key_for_env(env_name: str) -> str:
-    value = os.getenv(env_name)
-    if value:
-        return value
-    settings_attr = env_name.lower()
-    if hasattr(settings, settings_attr):
-        return str(getattr(settings, settings_attr) or "")
-    return ""
+def _resolve_planner_model_name() -> str:
+    model = str(get_project_config_value("models.planner.model", PLANNER_CHAT_MODEL) or "").strip()
+    return model or PLANNER_CHAT_MODEL
 
 
 def _validate_agent_chat_config(config: ChatModelConfig) -> None:
@@ -276,18 +208,10 @@ def _validate_agent_chat_config(config: ChatModelConfig) -> None:
         raise RuntimeError("models.agent_chat.model is required.")
     if not config.base_url:
         raise RuntimeError("models.agent_chat.base_url is required.")
+    if not config.provider:
+        raise RuntimeError("models.agent_chat.provider is required.")
     if config.provider == "anthropic":
         raise RuntimeError("provider=anthropic is documented for future use but is not implemented yet.")
-    if config.provider not in {
-        "dashscope",
-        "openai",
-        "openai_compatible",
-        "deepseek",
-        "openrouter",
-        "siliconflow",
-        "local_openai_compatible",
-    }:
-        raise RuntimeError(f"Unsupported agent_chat provider: {config.provider}")
     if config.capabilities.get("tool_calling") is False:
         raise RuntimeError("models.agent_chat.capabilities.tool_calling must be true for the ReAct agent.")
 

@@ -105,6 +105,31 @@ def test_pptx_parser_reads_slides_tables_and_notes(tmp_path: Path) -> None:
     assert all(block.page_number == 1 for block in parsed.blocks)
 
 
+def test_pptx_parser_treats_unreadable_picture_as_single_failed_asset() -> None:
+    pytest.importorskip("pptx")
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+    from app.rag.document_parsers.pptx_parser import _shape_image_assets
+
+    class BrokenPictureShape:
+        shape_type = MSO_SHAPE_TYPE.PICTURE
+        alternative_text = "broken image"
+        name = "Picture 1"
+        width = 100
+        height = 100
+
+        @property
+        def image(self):
+            raise ValueError("cannot identify image file <_io.BytesIO object>")
+
+    assets = _shape_image_assets(BrokenPictureShape(), MSO_SHAPE_TYPE, 1, ["Slide 1"], 0)
+
+    assert len(assets) == 1
+    assert assets[0].asset_id == "pptx-slide-1-image-1"
+    assert assets[0].data is None
+    assert assets[0].mime_type is None
+
+
 def test_pdf_parser_reads_page_text(tmp_path: Path) -> None:
     fitz = pytest.importorskip("fitz")
 

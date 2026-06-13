@@ -30,6 +30,7 @@ interface MessageListProps {
   onScroll?: () => void;
   activeFollowupSourceId?: number | null;
   activeFollowupSegmentId?: string | null;
+  exportMode?: boolean;
   isStreaming?: boolean;
   onDeleteMessage: (message: DraftAssistantMessage) => void;
   onOpenGraph: (message: DraftAssistantMessage) => void;
@@ -38,6 +39,8 @@ interface MessageListProps {
   onSegmentFollowup: (request: SegmentFollowupRequest) => void;
   onStopGeneration: () => void;
   onSubmitUserInput: (message: DraftAssistantMessage, answer: UserInputAnswer) => void;
+  onToggleExportMessage?: (messageId: number) => void;
+  selectedExportMessageIds?: Set<number>;
   thoughts?: ChatThought[];
 }
 
@@ -48,6 +51,7 @@ export function MessageList({
   onScroll,
   activeFollowupSourceId,
   activeFollowupSegmentId,
+  exportMode = false,
   isStreaming = false,
   onDeleteMessage,
   onOpenGraph,
@@ -56,6 +60,8 @@ export function MessageList({
   onSegmentFollowup,
   onStopGeneration,
   onSubmitUserInput,
+  onToggleExportMessage,
+  selectedExportMessageIds = new Set(),
   thoughts = [],
 }: MessageListProps) {
   const [selectionMenu, setSelectionMenu] = useState<{
@@ -111,6 +117,9 @@ export function MessageList({
     eventTarget: EventTarget | null,
     pointer: { x: number; y: number },
   ) {
+    if (exportMode) {
+      return;
+    }
     if (message.isStreaming || message.role !== "assistant") {
       return;
     }
@@ -194,6 +203,8 @@ export function MessageList({
       {messages.filter((message) => !message.ui_hidden).map((message) => {
         const isAssistant = message.role === "assistant";
         const isStreaming = isAssistant && message.isStreaming === true;
+        const isExportSelected = selectedExportMessageIds.has(message.id);
+        const canSelectForExport = exportMode && message.id > 0;
         // 优先使用 segments：streaming 期间由 streamingStore 实时拼装；done 后从落库消息恢复。
         const segments = message.segments ?? [];
         const hasVisibleWork = hasVisibleAssistantWork(segments, thoughts, message.content);
@@ -203,10 +214,28 @@ export function MessageList({
 
         return (
           <article
-            className={`chat-message ${message.role}`}
+            className={`chat-message ${message.role}${exportMode ? " chat-message--export-mode" : ""}${isExportSelected ? " chat-message--export-selected" : ""}`}
             key={message.id}
-            onContextMenu={(event) => openMessageMenu(message, event)}
+            onContextMenu={(event) => {
+              if (exportMode) {
+                return;
+              }
+              openMessageMenu(message, event);
+            }}
           >
+            {exportMode ? (
+              <button
+                aria-label={isExportSelected ? "取消选择这条消息" : "选择这条消息"}
+                aria-pressed={isExportSelected}
+                className="chat-message-export-check"
+                disabled={!canSelectForExport}
+                onClick={() => onToggleExportMessage?.(message.id)}
+                title={isExportSelected ? "取消选择" : "选择导出"}
+                type="button"
+              >
+                {isExportSelected ? <Check aria-hidden="true" size={14} /> : null}
+              </button>
+            ) : null}
             <div className="chat-message-bubble">
               <div
                 className="chat-message-content"

@@ -60,6 +60,57 @@ class KnowledgeDocumentUploadResponse(BaseModel):
     job: dict | None = None
 
 
+class KnowledgeDocumentRetryResponse(BaseModel):
+    document: KnowledgeDocumentRead
+    job: dict | None = None
+
+
+class KnowledgeImageAssetRead(BaseModel):
+    id: int
+    space_id: int
+    document_id: int
+    asset_id: str
+    asset_uid: str
+    parser: str
+    location_label: str
+    page_number: int | None
+    source_offset: int | None
+    heading_path: list[str]
+    alt_text: str | None
+    caption: str | None
+    mime_type: str | None
+    width: float | None
+    height: float | None
+    bbox: str | None
+    content_hash: str
+    byte_size: int
+    status: str
+    retryable: bool
+    attempt_count: int
+    extractor: str | None
+    image_type: str | None
+    confidence: float | None
+    should_index: bool | None
+    error_code: str | None
+    error_message: str | None
+    chunk_ids: list[int] = Field(default_factory=list)
+    last_attempted_at: datetime | None
+    processed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class KnowledgeImageAssetRetryRequest(BaseModel):
+    only_retryable: bool = True
+    max_assets: int = Field(default=20, ge=1, le=100)
+
+
+class KnowledgeImageAssetRetryResponse(BaseModel):
+    document: KnowledgeDocumentRead
+    job: dict | None = None
+    queued_asset_count: int = 0
+
+
 class KnowledgeChunkDraftRead(BaseModel):
     chunk_index: int
     text: str

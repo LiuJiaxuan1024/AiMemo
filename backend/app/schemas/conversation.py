@@ -70,3 +70,12 @@ class ChatMessageRead(BaseModel):
     pending_interrupt: dict | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class ConversationExportRequest(BaseModel):
+    """导出对话 HTML 的请求体。"""
+
+    message_ids: list[int] = Field(default_factory=list)
+    include_all: bool = False
+    include_graphs: bool = True
+    include_followups: bool = True

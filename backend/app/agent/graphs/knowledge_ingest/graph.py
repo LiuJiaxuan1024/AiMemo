@@ -36,7 +36,7 @@ def build_knowledge_ingest_graph(
 ):
     graph = StateGraph(KnowledgeIngestGraphState)
     graph.add_node("load_document", build_load_document_node(session_factory))
-    graph.add_node("parse_and_chunk", build_parse_and_chunk_node(image_text_extractor))
+    graph.add_node("parse_and_chunk", build_parse_and_chunk_node(session_factory, image_text_extractor))
     graph.add_node("persist_chunks", build_persist_chunks_node(session_factory))
     graph.add_node("generate_embeddings", build_generate_embeddings_node(embedding_generator))
     graph.add_node("write_vector_index", build_write_vector_index_node(session_factory))

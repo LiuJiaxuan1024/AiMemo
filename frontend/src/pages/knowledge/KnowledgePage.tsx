@@ -21,13 +21,18 @@ import {
   installKnowledgeOcr,
   listKnowledgeChunks,
   listKnowledgeDocuments,
+  listKnowledgeImageAssets,
   listKnowledgeSpaces,
+  retryKnowledgeDocumentFailedImages,
+  retryKnowledgeDocumentProcessing,
+  retryKnowledgeImageAsset,
   searchKnowledge,
   uploadKnowledgeDocument,
 } from "../../features/knowledge/knowledgeApi";
 import type {
   KnowledgeChunk,
   KnowledgeDocument,
+  KnowledgeImageAsset,
   KnowledgeOcrStatus,
   KnowledgeSearchResultItem,
   KnowledgeSpace,
@@ -35,6 +40,7 @@ import type {
 import { Badge, Button, EmptyState, PanelHeader } from "../../shared/ui";
 
 const PROCESSING_DOCUMENT_STATUSES = new Set(["pending", "parsing", "chunking", "embedding", "indexing"]);
+const PROCESSING_IMAGE_ASSET_STATUSES = new Set(["pending", "processing"]);
 
 export function KnowledgePage() {
   const queryClient = useQueryClient();
@@ -81,6 +87,17 @@ export function KnowledgePage() {
     queryFn: () => listKnowledgeChunks(Number(selectedDocument?.id)),
   });
   const chunks = chunksQuery.data ?? [];
+
+  const imageAssetsQuery = useQuery({
+    enabled: Boolean(selectedDocument?.id && selectedDocument.image_asset_count > 0),
+    queryKey: ["knowledge", "image-assets", selectedDocument?.id],
+    queryFn: () => listKnowledgeImageAssets(Number(selectedDocument?.id)),
+    refetchInterval: (query) => {
+      const imageAssets = query.state.data ?? [];
+      return imageAssets.some((asset) => PROCESSING_IMAGE_ASSET_STATUSES.has(asset.status)) ? 2500 : false;
+    },
+  });
+  const imageAssets = imageAssetsQuery.data ?? [];
 
   const stats = useMemo(() => {
     const ready = spaces.reduce((sum, space) => sum + space.ready_document_count, 0);
@@ -171,6 +188,44 @@ export function KnowledgePage() {
       await queryClient.invalidateQueries({ queryKey: ["knowledge"] });
     },
     onError: (caught) => setError(errorMessage(caught, "删除文档失败")),
+  });
+
+  const retryDocumentProcessingMutation = useMutation({
+    mutationFn: retryKnowledgeDocumentProcessing,
+    onSuccess: async (response) => {
+      setSelectedDocumentId(response.document.id);
+      setSearchResults([]);
+      setError("");
+      await queryClient.invalidateQueries({ queryKey: ["knowledge"] });
+      await queryClient.invalidateQueries({ queryKey: ["background_tasks"] });
+    },
+    onError: (caught) => setError(errorMessage(caught, "重新处理文档失败")),
+  });
+
+  const retryFailedImageAssetsMutation = useMutation({
+    mutationFn: (documentId: number) => retryKnowledgeDocumentFailedImages(documentId, { onlyRetryable: true, maxAssets: 20 }),
+    onSuccess: async (response) => {
+      setSelectedDocumentId(response.document.id);
+      setSearchResults([]);
+      setError("");
+      await queryClient.invalidateQueries({ queryKey: ["knowledge"] });
+      await queryClient.invalidateQueries({ queryKey: ["knowledge", "image-assets", response.document.id] });
+      await queryClient.invalidateQueries({ queryKey: ["background_tasks"] });
+    },
+    onError: (caught) => setError(errorMessage(caught, "重试失败图片失败")),
+  });
+
+  const retrySingleImageAssetMutation = useMutation({
+    mutationFn: (imageAssetId: number) => retryKnowledgeImageAsset(imageAssetId, { onlyRetryable: true }),
+    onSuccess: async (response) => {
+      setSelectedDocumentId(response.document.id);
+      setSearchResults([]);
+      setError("");
+      await queryClient.invalidateQueries({ queryKey: ["knowledge"] });
+      await queryClient.invalidateQueries({ queryKey: ["knowledge", "image-assets", response.document.id] });
+      await queryClient.invalidateQueries({ queryKey: ["background_tasks"] });
+    },
+    onError: (caught) => setError(errorMessage(caught, "重试图片失败")),
   });
 
   function handleCreateSpace(event: FormEvent<HTMLFormElement>) {
@@ -305,7 +360,47 @@ export function KnowledgePage() {
     deleteDocumentMutation.mutate(document.id);
   }
 
-  const requestError = spacesQuery.error ?? documentsQuery.error ?? chunksQuery.error;
+  function handleRetryDocumentProcessing(document: KnowledgeDocument) {
+    const isFailed = document.status === "failed";
+    const confirmed = window.confirm(
+      isFailed
+        ? [`确认重新处理“${document.title}”吗？`, "系统会使用已保存的原始文档重新解析并重建 chunk 和向量索引。"].join("\n")
+        : [
+            `确认重新处理“${document.title}”吗？`,
+            "当前还不是定向重试失败图片，会重新解析整份文档并重建 chunk 和向量索引。",
+          ].join("\n")
+    );
+    if (!confirmed) {
+      return;
+    }
+    retryDocumentProcessingMutation.mutate(document.id);
+  }
+
+  function handleRetryFailedImages(document: KnowledgeDocument) {
+    const confirmed = window.confirm(
+      [
+        `确认重试“${document.title}”中的失败图片吗？`,
+        "系统只会重新处理当前失败且可自动重试的图片，不会重跑已成功图片，也不会重建整份文档正文 chunk。",
+      ].join("\n"),
+    );
+    if (!confirmed) {
+      return;
+    }
+    retryFailedImageAssetsMutation.mutate(document.id);
+  }
+
+  function handleRetryImageAsset(imageAsset: KnowledgeImageAsset) {
+    const label = imageAsset.location_label || imageAsset.asset_id;
+    const confirmed = window.confirm(
+      [`确认重试这张图片吗？`, label, "系统只会删除并重建这张图片对应的图片 chunk。"].join("\n"),
+    );
+    if (!confirmed) {
+      return;
+    }
+    retrySingleImageAssetMutation.mutate(imageAsset.id);
+  }
+
+  const requestError = spacesQuery.error ?? documentsQuery.error ?? chunksQuery.error ?? imageAssetsQuery.error;
   const visibleError = error || (requestError ? errorMessage(requestError, "读取知库失败") : "");
 
   return (
@@ -441,7 +536,11 @@ export function KnowledgePage() {
             documents={documents}
             isLoading={documentsQuery.isFetching && documents.length === 0}
             isDeleting={deleteDocumentMutation.isPending}
+            isRetrying={retryDocumentProcessingMutation.isPending}
+            isRetryingImages={retryFailedImageAssetsMutation.isPending}
             onDelete={handleDeleteDocument}
+            onRetryFailedImages={handleRetryFailedImages}
+            onRetryProcessing={handleRetryDocumentProcessing}
             onSelect={setSelectedDocumentId}
             selectedDocument={selectedDocument}
           />
@@ -459,7 +558,17 @@ export function KnowledgePage() {
           {searchResults.length > 0 ? (
             <SearchResults results={searchResults} />
           ) : (
-            <DocumentDetail chunks={chunks} document={selectedDocument} isLoading={chunksQuery.isFetching} />
+            <DocumentDetail
+              chunks={chunks}
+              document={selectedDocument}
+              imageAssets={imageAssets}
+              isLoading={chunksQuery.isFetching}
+              isLoadingImageAssets={imageAssetsQuery.isFetching}
+              isRetryingImageAsset={retrySingleImageAssetMutation.isPending}
+              isRetryingImages={retryFailedImageAssetsMutation.isPending}
+              onRetryFailedImages={handleRetryFailedImages}
+              onRetryImageAsset={handleRetryImageAsset}
+            />
           )}
         </section>
       </div>
@@ -525,14 +634,22 @@ function DocumentList({
   documents,
   isLoading,
   isDeleting,
+  isRetrying,
+  isRetryingImages,
   onDelete,
+  onRetryFailedImages,
+  onRetryProcessing,
   onSelect,
   selectedDocument,
 }: {
   documents: KnowledgeDocument[];
   isLoading: boolean;
   isDeleting: boolean;
+  isRetrying: boolean;
+  isRetryingImages: boolean;
   onDelete: (document: KnowledgeDocument) => void;
+  onRetryFailedImages: (document: KnowledgeDocument) => void;
+  onRetryProcessing: (document: KnowledgeDocument) => void;
   onSelect: (documentId: number) => void;
   selectedDocument: KnowledgeDocument | null;
 }) {
@@ -547,36 +664,40 @@ function DocumentList({
   return (
     <div className="knowledge-document-list">
       {documents.map((document) => (
-        <button
+        <article
           className={`knowledge-document-card ${selectedDocument?.id === document.id ? "selected" : ""}`}
           key={document.id}
-          onClick={() => {
-            setOpenMenuDocumentId(null);
-            onSelect(document.id);
-          }}
-          type="button"
         >
-          <span className="knowledge-document-card__title">{document.title}</span>
-          <span className="knowledge-document-card__file">{document.original_filename ?? document.source_type}</span>
-          <span className="knowledge-document-card__footer">
-            <StatusBadge status={document.status} />
-            <small>{document.chunk_count} chunks</small>
-          </span>
-          {document.image_asset_count > 0 ? (
-            <span className="knowledge-document-card__image-progress">
-              <ImageIcon aria-hidden="true" size={14} />
-              <small>
-                图片 {document.image_asset_processed_count}/{document.image_asset_count}
-                {document.image_text_chunk_count > 0 ? ` · ${document.image_text_chunk_count} chunks` : ""}
-                {document.image_asset_failed_count > 0 ? ` · 失败 ${document.image_asset_failed_count}` : ""}
-              </small>
+          <button
+            className="knowledge-document-card__select"
+            onClick={() => {
+              setOpenMenuDocumentId(null);
+              onSelect(document.id);
+            }}
+            type="button"
+          >
+            <span className="knowledge-document-card__title">{document.title}</span>
+            <span className="knowledge-document-card__file">{document.original_filename ?? document.source_type}</span>
+            <span className="knowledge-document-card__footer">
+              <StatusBadge status={document.status} />
+              <small>{document.chunk_count} chunks</small>
             </span>
-          ) : null}
-          {document.error_message ? <span className="knowledge-document-card__error">{document.error_message}</span> : null}
+            {document.image_asset_count > 0 ? (
+              <span className="knowledge-document-card__image-progress">
+                <ImageIcon aria-hidden="true" size={14} />
+                <small>
+                  图片 {document.image_asset_processed_count}/{document.image_asset_count}
+                  {document.image_text_chunk_count > 0 ? ` · ${document.image_text_chunk_count} chunks` : ""}
+                  {document.image_asset_failed_count > 0 ? ` · 失败 ${document.image_asset_failed_count}` : ""}
+                </small>
+              </span>
+            ) : null}
+            {document.error_message ? <span className="knowledge-document-card__error">{document.error_message}</span> : null}
+          </button>
           {document.status === "failed" || document.status === "ready" ? (
             <span className="knowledge-document-card__actions">
               <span className="knowledge-document-menu">
-                <span
+                <button
                   aria-expanded={openMenuDocumentId === document.id}
                   aria-label="文档操作"
                   className="knowledge-document-menu__trigger"
@@ -584,22 +705,49 @@ function DocumentList({
                     event.stopPropagation();
                     setOpenMenuDocumentId((current) => (current === document.id ? null : document.id));
                   }}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter" && event.key !== " ") {
-                      return;
-                    }
-                    event.preventDefault();
-                    event.stopPropagation();
-                    setOpenMenuDocumentId((current) => (current === document.id ? null : document.id));
-                  }}
-                  role="button"
-                  tabIndex={0}
+                  type="button"
                 >
                   <MoreHorizontal aria-hidden="true" size={16} />
-                </span>
+                </button>
                 {openMenuDocumentId === document.id ? (
                   <span className="knowledge-document-menu__popover">
-                    <span
+                    {document.image_asset_failed_count > 0 ? (
+                      <button
+                        className="knowledge-inline-action"
+                        disabled={isRetryingImages}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (isRetryingImages) {
+                            return;
+                          }
+                          setOpenMenuDocumentId(null);
+                          onRetryFailedImages(document);
+                        }}
+                        type="button"
+                      >
+                        <RefreshCw aria-hidden="true" size={14} />
+                        重试失败图片
+                      </button>
+                    ) : null}
+                    {document.status === "failed" || document.image_asset_failed_count > 0 ? (
+                      <button
+                        className="knowledge-inline-action"
+                        disabled={isRetrying}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (isRetrying) {
+                            return;
+                          }
+                          setOpenMenuDocumentId(null);
+                          onRetryProcessing(document);
+                        }}
+                        type="button"
+                      >
+                        <RefreshCw aria-hidden="true" size={14} />
+                        {document.status === "failed" ? "重新处理" : "重建索引"}
+                      </button>
+                    ) : null}
+                    <button
                       className="knowledge-inline-action danger"
                       onClick={(event) => {
                         event.stopPropagation();
@@ -609,31 +757,18 @@ function DocumentList({
                         setOpenMenuDocumentId(null);
                         onDelete(document);
                       }}
-                      onKeyDown={(event) => {
-                        if (event.key !== "Enter" && event.key !== " ") {
-                          return;
-                        }
-                        event.preventDefault();
-                        event.stopPropagation();
-                        if (isDeleting) {
-                          return;
-                        }
-                        setOpenMenuDocumentId(null);
-                        onDelete(document);
-                      }}
-                      role="button"
-                      aria-disabled={isDeleting}
-                      tabIndex={0}
+                      disabled={isDeleting}
+                      type="button"
                     >
                       <Trash2 aria-hidden="true" size={14} />
                       删除
-                    </span>
+                    </button>
                   </span>
                 ) : null}
               </span>
             </span>
           ) : null}
-        </button>
+        </article>
       ))}
     </div>
   );
@@ -642,11 +777,23 @@ function DocumentList({
 function DocumentDetail({
   chunks,
   document,
+  imageAssets,
   isLoading,
+  isLoadingImageAssets,
+  isRetryingImageAsset,
+  isRetryingImages,
+  onRetryFailedImages,
+  onRetryImageAsset,
 }: {
   chunks: KnowledgeChunk[];
   document: KnowledgeDocument | null;
+  imageAssets: KnowledgeImageAsset[];
   isLoading: boolean;
+  isLoadingImageAssets: boolean;
+  isRetryingImageAsset: boolean;
+  isRetryingImages: boolean;
+  onRetryFailedImages: (document: KnowledgeDocument) => void;
+  onRetryImageAsset: (imageAsset: KnowledgeImageAsset) => void;
 }) {
   const [chunkKindFilter, setChunkKindFilter] = useState<ChunkKind | "all">("all");
   if (!document) {
@@ -694,6 +841,15 @@ function DocumentDetail({
           <small>parser</small>
         </span>
       </div>
+      <ImageAssetPanel
+        document={document}
+        imageAssets={imageAssets}
+        isLoading={isLoadingImageAssets}
+        isRetryingImageAsset={isRetryingImageAsset}
+        isRetryingImages={isRetryingImages}
+        onRetryFailedImages={onRetryFailedImages}
+        onRetryImageAsset={onRetryImageAsset}
+      />
       <div className="knowledge-chunk-filter" aria-label="Chunk 来源筛选">
         {(["all", "text", "table", "image"] as const).map((kind) => (
           <button
@@ -726,6 +882,136 @@ function DocumentDetail({
       </div>
     </div>
   );
+}
+
+function ImageAssetPanel({
+  document,
+  imageAssets,
+  isLoading,
+  isRetryingImageAsset,
+  isRetryingImages,
+  onRetryFailedImages,
+  onRetryImageAsset,
+}: {
+  document: KnowledgeDocument;
+  imageAssets: KnowledgeImageAsset[];
+  isLoading: boolean;
+  isRetryingImageAsset: boolean;
+  isRetryingImages: boolean;
+  onRetryFailedImages: (document: KnowledgeDocument) => void;
+  onRetryImageAsset: (imageAsset: KnowledgeImageAsset) => void;
+}) {
+  if (document.image_asset_count <= 0) {
+    return null;
+  }
+  const failedAssets = imageAssets.filter((asset) => asset.status === "failed");
+  return (
+    <section className="knowledge-image-assets">
+      <header className="knowledge-image-assets__header">
+        <span>
+          <ImageIcon aria-hidden="true" size={15} />
+          图片明细
+        </span>
+        {document.image_asset_failed_count > 0 ? (
+          <Button disabled={isRetryingImages} onClick={() => onRetryFailedImages(document)} size="sm" variant="secondary">
+            <RefreshCw aria-hidden="true" size={14} />
+            重试失败图片
+          </Button>
+        ) : null}
+      </header>
+      {isLoading && imageAssets.length === 0 ? <div className="module-loading">正在读取图片明细...</div> : null}
+      {!isLoading && imageAssets.length === 0 ? <EmptyState>图片明细会在文档处理后显示。</EmptyState> : null}
+      {failedAssets.length > 0 ? (
+        <div className="knowledge-image-assets__notice">失败图片只会定向重试，不会重跑已成功图片或整份文档正文。</div>
+      ) : null}
+      {imageAssets.length > 0 ? (
+        <div className="knowledge-image-assets__list">
+          {imageAssets.map((asset) => (
+            <article className={`knowledge-image-asset-row ${asset.status}`} key={asset.id}>
+              <div className="knowledge-image-asset-row__main">
+                <strong>{imageAssetLabel(asset)}</strong>
+                <small>{imageAssetMeta(asset)}</small>
+                {asset.error_message ? <span>{asset.error_code ? `${asset.error_code}: ` : ""}{asset.error_message}</span> : null}
+              </div>
+              <div className="knowledge-image-asset-row__side">
+                <Badge tone={imageAssetStatusTone(asset.status)}>{imageAssetStatusLabel(asset.status)}</Badge>
+                <small>{asset.chunk_ids.length} chunk · {asset.attempt_count} 次</small>
+                {asset.status === "failed" || asset.status === "skipped" ? (
+                  <button
+                    className="knowledge-inline-action"
+                    disabled={isRetryingImageAsset || (asset.status === "failed" && !asset.retryable)}
+                    onClick={() => onRetryImageAsset(asset)}
+                    type="button"
+                  >
+                    <RefreshCw aria-hidden="true" size={14} />
+                    单张重试
+                  </button>
+                ) : null}
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function imageAssetLabel(asset: KnowledgeImageAsset): string {
+  if (asset.location_label) {
+    return asset.location_label;
+  }
+  if (asset.page_number) {
+    return `第 ${asset.page_number} 页图片`;
+  }
+  return asset.asset_id;
+}
+
+function imageAssetMeta(asset: KnowledgeImageAsset): string {
+  const parts = [
+    asset.parser || "parser",
+    asset.mime_type ?? "unknown",
+    asset.width && asset.height ? `${Math.round(asset.width)}x${Math.round(asset.height)}` : "",
+    asset.byte_size > 0 ? formatBytes(asset.byte_size) : "",
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
+function imageAssetStatusTone(status: string): "neutral" | "info" | "success" | "warning" | "danger" {
+  if (status === "completed") {
+    return "success";
+  }
+  if (status === "failed") {
+    return "danger";
+  }
+  if (status === "pending" || status === "processing") {
+    return "warning";
+  }
+  if (status === "skipped") {
+    return "neutral";
+  }
+  return "info";
+}
+
+function imageAssetStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    completed: "完成",
+    failed: "失败",
+    pending: "待处理",
+    processing: "处理中",
+    skipped: "跳过",
+    stale: "过期",
+  };
+  return labels[status] ?? status;
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) {
+    return `${value} B`;
+  }
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toFixed(1)} KB`;
+  }
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
 type ChunkKind = "text" | "table" | "image";

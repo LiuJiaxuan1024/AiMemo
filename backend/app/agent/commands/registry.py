@@ -5,6 +5,11 @@ from sqlmodel import Session, select
 from app.agent.commands.schemas import CommandArg, CommandOption, CommandSchema, CommandVisibility
 from app.models.knowledge import KnowledgeSpace
 from app.models.voice_profile import VoiceProfile
+from app.services.model_config_service import (
+    agent_chat_provider_specs,
+    current_agent_chat_provider,
+    planner_model_options,
+)
 
 
 _COMMANDS: list[CommandSchema] = [
@@ -138,6 +143,66 @@ _COMMANDS: list[CommandSchema] = [
         reload=["elf_voice_state"],
         result_view="config_change",
     ),
+    CommandSchema(
+        id="config.agent.chat.provider",
+        command="/config agent.chat.provider <provider>",
+        title="设置主 Agent Provider",
+        description="切换主 ReAct Agent 使用的 OpenAI-compatible Provider。",
+        category="Agent",
+        args=[
+            CommandArg(
+                name="provider",
+                type="model_provider",
+                required=True,
+                placeholder="provider 名称",
+            )
+        ],
+        scope="user",
+        risk="medium",
+        executor="set_agent_chat_provider",
+        reload=["runtime_config", "agent_models"],
+        result_view="config_change",
+    ),
+    CommandSchema(
+        id="config.agent.chat.model",
+        command="/config agent.chat.model <model>",
+        title="设置主 Agent 模型",
+        description="切换主 ReAct Agent 的模型名，保留当前 provider。",
+        category="Agent",
+        args=[
+            CommandArg(
+                name="model",
+                type="model_name",
+                required=True,
+                placeholder="模型名",
+            )
+        ],
+        scope="user",
+        risk="medium",
+        executor="set_agent_chat_model",
+        reload=["runtime_config", "agent_models"],
+        result_view="config_change",
+    ),
+    CommandSchema(
+        id="config.planner.model",
+        command="/config planner.model <model>",
+        title="设置 Planner 模型",
+        description="切换轻量 planner 使用的 DashScope 模型名。",
+        category="Agent",
+        args=[
+            CommandArg(
+                name="model",
+                type="model_name",
+                required=True,
+                placeholder="模型名",
+            )
+        ],
+        scope="user",
+        risk="low",
+        executor="set_planner_model",
+        reload=["runtime_config", "agent_models"],
+        result_view="config_change",
+    ),
 ]
 
 
@@ -182,6 +247,38 @@ def list_command_schemas(session: Session) -> list[CommandSchema]:
             item.args[0].options = space_options
         if item.id == "config.elf.voice_default" and item.args:
             item.args[0].options = voice_options
+        if item.id == "config.agent.chat.provider" and item.args:
+            item.args[0].options = [
+                CommandOption(
+                    id=f"model-provider-{spec.provider}",
+                    label=spec.provider,
+                    value=spec.provider,
+                    description=f"{spec.label} / {spec.default_model}",
+                )
+                for spec in agent_chat_provider_specs().values()
+            ]
+        if item.id == "config.agent.chat.model" and item.args:
+            provider = current_agent_chat_provider()
+            spec = agent_chat_provider_specs().get(provider)
+            item.args[0].options = [
+                CommandOption(
+                    id=f"agent-chat-model-{index}",
+                    label=model,
+                    value=model,
+                    description=f"{provider} 推荐模型",
+                )
+                for index, model in enumerate(spec.models if spec else (), start=1)
+            ]
+        if item.id == "config.planner.model" and item.args:
+            item.args[0].options = [
+                CommandOption(
+                    id=f"planner-model-{index}",
+                    label=model,
+                    value=model,
+                    description="DashScope planner 模型",
+                )
+                for index, model in enumerate(planner_model_options(), start=1)
+            ]
         if item.id in {"mount.knowledge", "unmount.knowledge"} and not has_spaces:
             item.visibility = CommandVisibility(
                 state="disabled",

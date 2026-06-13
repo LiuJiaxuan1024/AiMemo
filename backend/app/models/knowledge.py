@@ -73,6 +73,62 @@ class KnowledgeChunk(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utc_now, index=True)
 
 
+class KnowledgeImageAsset(SQLModel, table=True):
+    """A single image resource extracted from a knowledge document."""
+
+    __table_args__ = (
+        UniqueConstraint("document_id", "asset_uid", name="uq_knowledge_image_asset_uid"),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    space_id: int = Field(foreign_key="knowledgespace.id", index=True)
+    document_id: int = Field(foreign_key="knowledgedocument.id", index=True)
+    asset_id: str = Field(index=True, max_length=160)
+    asset_uid: str = Field(index=True, max_length=64)
+    parser: str = Field(default="", index=True, max_length=80)
+    location_label: str = Field(default="", max_length=240)
+    page_number: int | None = Field(default=None, index=True)
+    source_offset: int | None = None
+    heading_path_json: str | None = None
+    alt_text: str | None = None
+    caption: str | None = None
+    mime_type: str | None = Field(default=None, max_length=120)
+    width: float | None = None
+    height: float | None = None
+    bbox: str | None = Field(default=None, max_length=160)
+    content_hash: str = Field(default="", index=True, max_length=64)
+    byte_size: int = Field(default=0)
+    status: str = Field(default="pending", index=True, max_length=24)
+    retryable: bool = Field(default=False, index=True)
+    attempt_count: int = Field(default=0)
+    extractor: str | None = Field(default=None, max_length=120)
+    image_type: str | None = Field(default=None, max_length=80)
+    confidence: float | None = None
+    should_index: bool | None = None
+    error_code: str | None = Field(default=None, max_length=120)
+    error_message: str | None = None
+    token_usage_json: str | None = None
+    last_attempted_at: datetime | None = Field(default=None, index=True)
+    processed_at: datetime | None = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=utc_now, index=True)
+    updated_at: datetime = Field(default_factory=utc_now, index=True)
+
+
+class KnowledgeImageAssetChunk(SQLModel, table=True):
+    """Join table linking image assets to generated knowledge chunks."""
+
+    __table_args__ = (
+        UniqueConstraint("image_asset_id", "chunk_id", name="uq_knowledge_image_asset_chunk"),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    image_asset_id: int = Field(foreign_key="knowledgeimageasset.id", index=True)
+    chunk_id: int = Field(foreign_key="knowledgechunk.id", index=True)
+    created_at: datetime = Field(default_factory=utc_now, index=True)
+
+
 class ConversationKnowledgeMount(SQLModel, table=True):
     """Explicit mount scope that allows a conversation to search a knowledge space."""
 

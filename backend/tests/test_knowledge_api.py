@@ -1,7 +1,7 @@
 from collections.abc import Generator
 
 from fastapi.testclient import TestClient
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.core.database import get_session
 from app.main import create_app
@@ -255,3 +255,280 @@ def test_upload_document_stores_file_and_previews_chunk_drafts(session: Session,
     drafts = drafts_response.json()
     assert drafts[0]["heading_path"] == ["Title"]
     assert "Body text" in drafts[-1]["text"]
+
+
+def test_retry_document_image_processing_requeues_existing_document(session: Session, tmp_path, monkeypatch) -> None:
+    from app.models.knowledge import KnowledgeDocument, KnowledgeSpace
+    from app.services import knowledge_document_service
+
+    monkeypatch.setattr(knowledge_document_service, "KNOWLEDGE_DATA_ROOT", tmp_path / "knowledge")
+    client = _client(session)
+
+    space = KnowledgeSpace(name="旧 PDF")
+    session.add(space)
+    session.flush()
+    assert space.id is not None
+    document = KnowledgeDocument(
+        space_id=space.id,
+        title="lecture",
+        source_type="file",
+        original_filename="lecture.pdf",
+        storage_path=f"files/{space.id}/1/original-lecture.pdf",
+        content_hash="hash-lecture",
+        parser="pdf",
+        status="ready",
+        chunk_count=20,
+        image_asset_count=5,
+        image_asset_processed_count=4,
+        image_text_chunk_count=4,
+        image_asset_failed_count=1,
+    )
+    session.add(document)
+    session.flush()
+    assert document.id is not None
+    document.storage_path = f"files/{space.id}/{document.id}/original-lecture.pdf"
+    stored_path = knowledge_document_service.KNOWLEDGE_DATA_ROOT / document.storage_path
+    stored_path.parent.mkdir(parents=True, exist_ok=True)
+    stored_path.write_bytes(b"%PDF-1.7 fake")
+    session.add(document)
+    session.commit()
+
+    response = client.post(f"/api/knowledge/documents/{document.id}/retry-image-processing")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["document"]["status"] == "pending"
+    assert payload["document"]["id"] == document.id
+    assert payload["job"]["type"] == "knowledge_ingest"
+    assert payload["job"]["status"] == "pending"
+
+
+def test_retry_document_image_processing_requires_failed_images(session: Session, tmp_path, monkeypatch) -> None:
+    from app.models.knowledge import KnowledgeDocument, KnowledgeSpace
+    from app.services import knowledge_document_service
+
+    monkeypatch.setattr(knowledge_document_service, "KNOWLEDGE_DATA_ROOT", tmp_path / "knowledge")
+    client = _client(session)
+
+    space = KnowledgeSpace(name="无失败图片")
+    session.add(space)
+    session.flush()
+    assert space.id is not None
+    document = KnowledgeDocument(
+        space_id=space.id,
+        title="clean",
+        source_type="file",
+        original_filename="clean.pdf",
+        storage_path=f"files/{space.id}/1/original-clean.pdf",
+        content_hash="hash-clean",
+        parser="pdf",
+        status="ready",
+        image_asset_count=2,
+        image_asset_processed_count=2,
+        image_text_chunk_count=2,
+        image_asset_failed_count=0,
+    )
+    session.add(document)
+    session.commit()
+    session.refresh(document)
+
+    response = client.post(f"/api/knowledge/documents/{document.id}/retry-image-processing")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "KNOWLEDGE_DOCUMENT_NO_FAILED_IMAGES"
+
+
+def test_image_asset_detail_endpoint_and_targeted_retry(session: Session) -> None:
+    from app.models.knowledge import (
+        KnowledgeChunk,
+        KnowledgeDocument,
+        KnowledgeImageAsset,
+        KnowledgeImageAssetChunk,
+        KnowledgeSpace,
+    )
+
+    client = _client(session)
+
+    space = KnowledgeSpace(name="图片明细")
+    session.add(space)
+    session.flush()
+    assert space.id is not None
+    document = KnowledgeDocument(
+        space_id=space.id,
+        title="lecture",
+        source_type="file",
+        original_filename="lecture.pdf",
+        storage_path=f"files/{space.id}/1/original-lecture.pdf",
+        content_hash="hash-lecture",
+        parser="pdf",
+        status="ready",
+        chunk_count=1,
+        image_asset_count=2,
+        image_asset_processed_count=1,
+        image_text_chunk_count=1,
+        image_asset_failed_count=1,
+    )
+    session.add(document)
+    session.flush()
+    assert document.id is not None
+    completed_asset = KnowledgeImageAsset(
+        space_id=space.id,
+        document_id=document.id,
+        asset_id="pdf-page-1-image-1",
+        asset_uid="completed-asset",
+        parser="pdf",
+        location_label="PDF 第 1 页图片 1",
+        status="completed",
+        attempt_count=1,
+        should_index=True,
+    )
+    failed_asset = KnowledgeImageAsset(
+        space_id=space.id,
+        document_id=document.id,
+        asset_id="pdf-page-2-image-1",
+        asset_uid="failed-asset",
+        parser="pdf",
+        location_label="PDF 第 2 页图片 1",
+        status="failed",
+        retryable=True,
+        attempt_count=1,
+        error_code="DASHSCOPE_REQUEST_TIMEOUT",
+        error_message="timeout",
+    )
+    session.add(completed_asset)
+    session.add(failed_asset)
+    session.flush()
+    assert completed_asset.id is not None
+    chunk = KnowledgeChunk(
+        space_id=space.id,
+        document_id=document.id,
+        chunk_index=0,
+        text="图片文字",
+        content_hash="chunk-hash",
+        metadata_json='{"source_modalities":["image_asset"],"asset_ids":["pdf-page-1-image-1"]}',
+    )
+    session.add(chunk)
+    session.flush()
+    assert chunk.id is not None
+    session.add(KnowledgeImageAssetChunk(image_asset_id=completed_asset.id, chunk_id=chunk.id))
+    session.commit()
+
+    list_response = client.get(f"/api/knowledge/documents/{document.id}/image-assets")
+
+    assert list_response.status_code == 200
+    assets = list_response.json()
+    assert [asset["asset_id"] for asset in assets] == ["pdf-page-1-image-1", "pdf-page-2-image-1"]
+    assert assets[0]["chunk_ids"] == [chunk.id]
+    assert assets[1]["status"] == "failed"
+    assert assets[1]["retryable"] is True
+
+    retry_response = client.post(
+        f"/api/knowledge/documents/{document.id}/image-assets/retry-failed",
+        json={"only_retryable": True, "max_assets": 20},
+    )
+
+    assert retry_response.status_code == 200
+    payload = retry_response.json()
+    assert payload["queued_asset_count"] == 1
+    assert payload["document"]["id"] == document.id
+    assert payload["job"]["type"] == "knowledge_image_retry"
+    assert payload["job"]["graph_name"] == "knowledge_image_retry_graph"
+
+
+def test_targeted_retry_backfills_legacy_image_assets(session: Session, tmp_path, monkeypatch) -> None:
+    from app.models.knowledge import KnowledgeDocument, KnowledgeImageAsset, KnowledgeSpace
+    from app.services import knowledge_document_service
+
+    monkeypatch.setattr(knowledge_document_service, "KNOWLEDGE_DATA_ROOT", tmp_path / "knowledge")
+    client = _client(session)
+
+    space = KnowledgeSpace(name="旧图片失败")
+    session.add(space)
+    session.flush()
+    assert space.id is not None
+    document = KnowledgeDocument(
+        space_id=space.id,
+        title="legacy",
+        source_type="file",
+        original_filename="legacy.md",
+        storage_path=f"files/{space.id}/1/original-legacy.md",
+        content_hash="hash-legacy",
+        parser="markdown",
+        status="ready",
+        chunk_count=1,
+        image_asset_count=1,
+        image_asset_processed_count=0,
+        image_text_chunk_count=0,
+        image_asset_failed_count=1,
+    )
+    session.add(document)
+    session.flush()
+    assert document.id is not None
+    document.storage_path = f"files/{space.id}/{document.id}/original-legacy.md"
+    source_path = knowledge_document_service.KNOWLEDGE_DATA_ROOT / document.storage_path
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("# 图示\n\n![架构图](arch.png)\n\n正文。", encoding="utf-8")
+    (source_path.parent / "arch.png").write_bytes(b"fake-image")
+    session.add(document)
+    session.commit()
+
+    response = client.post(
+        f"/api/knowledge/documents/{document.id}/image-assets/retry-failed",
+        json={"only_retryable": True, "max_assets": 20},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["queued_asset_count"] == 1
+    assert payload["job"]["type"] == "knowledge_image_retry"
+
+    image_assets = session.exec(
+        select(KnowledgeImageAsset).where(KnowledgeImageAsset.document_id == document.id)
+    ).all()
+    assert len(image_assets) == 1
+    assert image_assets[0].status == "failed"
+    assert image_assets[0].retryable is True
+    assert image_assets[0].error_code == "IMAGE_ASSET_BACKFILLED_UNPROCESSED"
+
+
+def test_retry_failed_document_processing_requeues_without_failed_image_count(session: Session, tmp_path, monkeypatch) -> None:
+    from app.models.knowledge import KnowledgeDocument, KnowledgeSpace
+    from app.services import knowledge_document_service
+
+    monkeypatch.setattr(knowledge_document_service, "KNOWLEDGE_DATA_ROOT", tmp_path / "knowledge")
+    client = _client(session)
+
+    space = KnowledgeSpace(name="失败文档")
+    session.add(space)
+    session.flush()
+    assert space.id is not None
+    document = KnowledgeDocument(
+        space_id=space.id,
+        title="broken",
+        source_type="file",
+        original_filename="broken.pptx",
+        storage_path=f"files/{space.id}/1/original-broken.pptx",
+        content_hash="hash-broken",
+        parser="pptx",
+        status="failed",
+        error_code="KNOWLEDGE_INGEST_FAILED",
+        error_message="cannot identify image file <_io.BytesIO object>",
+        image_asset_failed_count=0,
+    )
+    session.add(document)
+    session.flush()
+    assert document.id is not None
+    document.storage_path = f"files/{space.id}/{document.id}/original-broken.pptx"
+    stored_path = knowledge_document_service.KNOWLEDGE_DATA_ROOT / document.storage_path
+    stored_path.parent.mkdir(parents=True, exist_ok=True)
+    stored_path.write_bytes(b"fake pptx")
+    session.add(document)
+    session.commit()
+
+    response = client.post(f"/api/knowledge/documents/{document.id}/retry-processing")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["document"]["status"] == "pending"
+    assert payload["document"]["error_message"] is None
+    assert payload["job"]["type"] == "knowledge_ingest"

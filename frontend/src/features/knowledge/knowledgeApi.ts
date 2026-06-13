@@ -1,7 +1,10 @@
 import type {
   KnowledgeChunk,
   KnowledgeDocument,
+  KnowledgeDocumentRetryResponse,
   KnowledgeDocumentUploadResponse,
+  KnowledgeImageAsset,
+  KnowledgeImageAssetRetryResponse,
   KnowledgeOcrInstallResult,
   KnowledgeOcrStatus,
   KnowledgeSearchResponse,
@@ -89,9 +92,45 @@ export function listKnowledgeChunks(documentId: number): Promise<KnowledgeChunk[
   return request<KnowledgeChunk[]>(`/api/knowledge/documents/${documentId}/chunks`);
 }
 
+export function listKnowledgeImageAssets(documentId: number): Promise<KnowledgeImageAsset[]> {
+  return request<KnowledgeImageAsset[]>(`/api/knowledge/documents/${documentId}/image-assets`);
+}
+
 export function deleteKnowledgeDocument(documentId: number): Promise<KnowledgeDocument> {
   return request<KnowledgeDocument>(`/api/knowledge/documents/${documentId}`, {
     method: "DELETE",
+  });
+}
+
+export function retryKnowledgeDocumentProcessing(documentId: number): Promise<KnowledgeDocumentRetryResponse> {
+  return request<KnowledgeDocumentRetryResponse>(`/api/knowledge/documents/${documentId}/retry-processing`, {
+    method: "POST",
+  });
+}
+
+export function retryKnowledgeDocumentFailedImages(
+  documentId: number,
+  input: { onlyRetryable?: boolean; maxAssets?: number } = {},
+): Promise<KnowledgeImageAssetRetryResponse> {
+  return request<KnowledgeImageAssetRetryResponse>(`/api/knowledge/documents/${documentId}/image-assets/retry-failed`, {
+    method: "POST",
+    body: JSON.stringify({
+      only_retryable: input.onlyRetryable ?? true,
+      max_assets: input.maxAssets ?? 20,
+    }),
+  });
+}
+
+export function retryKnowledgeImageAsset(
+  imageAssetId: number,
+  input: { onlyRetryable?: boolean } = {},
+): Promise<KnowledgeImageAssetRetryResponse> {
+  return request<KnowledgeImageAssetRetryResponse>(`/api/knowledge/image-assets/${imageAssetId}/retry`, {
+    method: "POST",
+    body: JSON.stringify({
+      only_retryable: input.onlyRetryable ?? true,
+      max_assets: 1,
+    }),
   });
 }
 

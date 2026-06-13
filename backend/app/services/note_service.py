@@ -11,6 +11,7 @@ from app.models.note_chunk import NoteChunk
 from app.rag.hashing import content_hash
 from app.rag.vector_store import delete_note_chunk_embeddings
 from app.schemas.note import NoteCreate, NoteListItem, NoteRead, NoteUpdate
+from app.services.cloud_sync_service import mark_note_dirty
 
 
 ALLOWED_NOTE_STATUSES = {"active", "deleted"}
@@ -183,6 +184,7 @@ def update_note(session: Session, note_id: int, payload: NoteUpdate) -> NoteRead
         enqueue_note_processing_jobs(session, note)
 
     note.updated_at = utc_now()
+    mark_note_dirty(note)
     session.add(note)
     session.commit()
     session.refresh(note)
@@ -199,6 +201,7 @@ def delete_note(session: Session, note_id: int) -> NoteRead:
     note.status = "deleted"
     note.deleted_at = utc_now()
     note.updated_at = utc_now()
+    mark_note_dirty(note)
     session.add(note)
     session.commit()
     session.refresh(note)
@@ -218,6 +221,7 @@ def restore_note(session: Session, note_id: int) -> NoteRead:
     note.status = "active"
     note.deleted_at = None
     note.updated_at = utc_now()
+    mark_note_dirty(note)
 
     chunk_count = session.exec(
         select(NoteChunk).where(NoteChunk.note_id == (note.id or 0))

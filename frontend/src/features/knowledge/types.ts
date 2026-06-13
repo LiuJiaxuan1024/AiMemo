@@ -47,6 +47,62 @@ export interface KnowledgeDocumentUploadResponse {
   } | null;
 }
 
+export interface KnowledgeDocumentRetryResponse {
+  document: KnowledgeDocument;
+  job: {
+    id: number;
+    type: string;
+    graph_name: string;
+    status: string;
+  } | null;
+}
+
+export interface KnowledgeImageAsset {
+  id: number;
+  space_id: number;
+  document_id: number;
+  asset_id: string;
+  asset_uid: string;
+  parser: string;
+  location_label: string;
+  page_number: number | null;
+  source_offset: number | null;
+  heading_path: string[];
+  alt_text: string | null;
+  caption: string | null;
+  mime_type: string | null;
+  width: number | null;
+  height: number | null;
+  bbox: string | null;
+  content_hash: string;
+  byte_size: number;
+  status: string;
+  retryable: boolean;
+  attempt_count: number;
+  extractor: string | null;
+  image_type: string | null;
+  confidence: number | null;
+  should_index: boolean | null;
+  error_code: string | null;
+  error_message: string | null;
+  chunk_ids: number[];
+  last_attempted_at: string | null;
+  processed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KnowledgeImageAssetRetryResponse {
+  document: KnowledgeDocument;
+  job: {
+    id: number;
+    type: string;
+    graph_name: string;
+    status: string;
+  } | null;
+  queued_asset_count: number;
+}
+
 export interface KnowledgeOcrStatus {
   mode: string;
   ready: boolean;

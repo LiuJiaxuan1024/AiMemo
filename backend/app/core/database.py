@@ -5,7 +5,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from sqlalchemy import MetaData, inspect, text
+from sqlalchemy import MetaData, event, inspect, text
 from sqlalchemy.dialects import sqlite as sqlite_dialect
 from sqlalchemy.schema import CreateTable
 from sqlmodel import Session, SQLModel, create_engine
@@ -18,22 +18,28 @@ from app.models import (
     ChatAttachmentDerivative,
     ChatMessage,
     ChatTurn,
+    CloudObject,
     Conversation,
     ConversationKnowledgeMount,
     ElfRuntimeState,
     Job,
     KnowledgeChunk,
     KnowledgeDocument,
+    KnowledgeImageAsset,
+    KnowledgeImageAssetChunk,
     KnowledgeSpace,
     LongTermMemory,
     Note,
     NoteChunk,
     RuntimeConfig,
+    SyncState,
     VoiceProfile,
 )
 from app.rag.hashing import content_hash
 
 logger = logging.getLogger(__name__)
+SQLITE_BUSY_TIMEOUT_SECONDS = 60
+SQLITE_BUSY_TIMEOUT_MS = SQLITE_BUSY_TIMEOUT_SECONDS * 1000
 
 # 启用 AUTOINCREMENT 的所有业务表。schema 升级时遍历这张清单做 PK rebuild。
 # 用 model 对象本身（不是 tablename 字符串），rebuild 时直接拿 model.__table__
@@ -50,6 +56,8 @@ _AUTOINCREMENT_MODELS = (
     KnowledgeSpace,
     KnowledgeDocument,
     KnowledgeChunk,
+    KnowledgeImageAsset,
+    KnowledgeImageAssetChunk,
     ConversationKnowledgeMount,
     NoteChunk,
     LongTermMemory,
@@ -57,6 +65,8 @@ _AUTOINCREMENT_MODELS = (
     BackgroundTask,
     VoiceProfile,
     RuntimeConfig,
+    CloudObject,
+    SyncState,
 )
 _AUTOINCREMENT_TABLES = tuple(model.__tablename__ for model in _AUTOINCREMENT_MODELS)
 
@@ -75,10 +85,26 @@ _ensure_sqlite_parent_dir(settings.database_url)
 
 engine = create_engine(
     settings.database_url,
-    connect_args={"check_same_thread": False, "timeout": 30}
+    connect_args={"check_same_thread": False, "timeout": SQLITE_BUSY_TIMEOUT_SECONDS}
     if settings.database_url.startswith("sqlite")
     else {},
 )
+
+
+if settings.database_url.startswith("sqlite"):
+
+    @event.listens_for(engine, "connect")
+    def _configure_sqlite_connection(dbapi_connection, connection_record) -> None:  # noqa: ANN001, ARG001
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+            try:
+                cursor.execute("PRAGMA journal_mode = WAL")
+            except Exception:
+                logger.debug("sqlite WAL pragma skipped; database may already be locked", exc_info=True)
+            cursor.execute("PRAGMA synchronous = NORMAL")
+        finally:
+            cursor.close()
 
 
 def create_db_and_tables() -> None:
@@ -121,6 +147,13 @@ def migrate_existing_sqlite_schema() -> None:
                 "embedding_error": "TEXT DEFAULT ''",
                 "embedded_at": "DATETIME",
                 "deleted_at": "DATETIME",
+                "cloud_revision": "INTEGER DEFAULT 0",
+                "local_revision": "INTEGER DEFAULT 1",
+                "last_synced_revision": "INTEGER DEFAULT 0",
+                "sync_status": "VARCHAR(24) DEFAULT 'dirty'",
+                "sync_conflict_id": "VARCHAR(80) DEFAULT ''",
+                "cloud_object_key": "VARCHAR(400) DEFAULT ''",
+                "last_synced_at": "DATETIME",
             },
         )
         _backfill_note_content_markdown(Note.__tablename__)

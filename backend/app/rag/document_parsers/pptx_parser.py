@@ -105,7 +105,7 @@ def _shape_image_assets(shape, shape_type_enum, slide_index: int, heading_path: 
     if getattr(shape, "shape_type", None) == shape_type_enum.PICTURE:
         asset_index = image_offset + 1
         alt_text = getattr(shape, "alternative_text", None) or getattr(shape, "name", None)
-        image = getattr(shape, "image", None)
+        image_data, mime_type = _shape_image_payload(shape)
         assets.append(
             DocumentImageAsset(
                 asset_id=f"pptx-slide-{slide_index}-image-{asset_index}",
@@ -115,8 +115,8 @@ def _shape_image_assets(shape, shape_type_enum, slide_index: int, heading_path: 
                 page_number=slide_index,
                 source_offset=asset_index,
                 alt_text=normalize_text(str(alt_text or "")) or None,
-                data=getattr(image, "blob", None) if image is not None else None,
-                mime_type=getattr(image, "content_type", None) if image is not None else None,
+                data=image_data,
+                mime_type=mime_type,
                 width=int(getattr(shape, "width", 0) or 0) or None,
                 height=int(getattr(shape, "height", 0) or 0) or None,
             )
@@ -128,6 +128,18 @@ def _shape_image_assets(shape, shape_type_enum, slide_index: int, heading_path: 
             nested_offset += len(child_assets)
             assets.extend(child_assets)
     return assets
+
+
+def _shape_image_payload(shape) -> tuple[bytes | None, str | None]:
+    try:
+        image = getattr(shape, "image", None)
+        if image is None:
+            return None, None
+        data = getattr(image, "blob", None)
+        mime_type = getattr(image, "content_type", None)
+    except Exception:
+        return None, None
+    return data if isinstance(data, bytes) else None, str(mime_type) if mime_type else None
 
 
 def _text_frame_text(text_frame) -> str:

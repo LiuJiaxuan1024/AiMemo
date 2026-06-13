@@ -107,6 +107,8 @@ qwen-vl-ocr
       "max_image_bytes": 5242880,
       "max_concurrency": 2,
       "timeout_seconds": 60,
+      "max_attempts": 3,
+      "retry_backoff_seconds": 0.5,
       "min_confidence": 0.45,
       "skip_low_value_images": true,
       "monthly_budget_yuan": 20
@@ -370,13 +372,16 @@ reason = low_value_image | low_confidence | decorative_image
 
 ```text
 网络失败
-  单图重试 1-2 次，指数退避。
+  单图最多尝试 3 次，指数退避。
+
+限流 / 服务端错误
+  HTTP 408 / 409 / 425 / 429 / 5xx 视为临时失败，按单图重试策略处理。
 
 模型超时
-  标记 image_timeout，不影响整篇文档。
+  重试后仍失败则标记 image_timeout，不影响整篇文档。
 
 JSON 解析失败
-  用更强约束 prompt 重试一次。
+  视为模型临时输出异常，按单图重试策略处理。
   仍失败则标记 image_parse_failed。
 
 API key 缺失

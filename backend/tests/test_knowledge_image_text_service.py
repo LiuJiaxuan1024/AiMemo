@@ -65,8 +65,12 @@ def test_qwen_vl_ocr_skips_low_value_images(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(settings, "dashscope_api_key", "test-key")
     monkeypatch.setattr(settings, "knowledge_image_text_extraction_provider", "dashscope")
     monkeypatch.setattr(settings, "knowledge_image_text_extraction_min_confidence", 0.45)
+    monkeypatch.setattr(settings, "knowledge_image_text_extraction_max_attempts", 3)
+    calls = 0
 
     def fake_post(payload: dict) -> dict:  # noqa: ARG001
+        nonlocal calls
+        calls += 1
         return {
             "choices": [
                 {
@@ -85,6 +89,75 @@ def test_qwen_vl_ocr_skips_low_value_images(monkeypatch: pytest.MonkeyPatch) -> 
     with pytest.raises(service.ImageTextExtractionError) as exc_info:
         service.extract_qwen_vl_ocr_text(_asset())
     assert exc_info.value.code == "IMAGE_TEXT_SKIPPED_LOW_VALUE"
+    assert calls == 1
+
+
+def test_qwen_vl_ocr_retries_transient_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "dashscope_api_key", "test-key")
+    monkeypatch.setattr(settings, "knowledge_image_text_extraction_provider", "dashscope")
+    monkeypatch.setattr(settings, "knowledge_image_text_extraction_min_confidence", 0.45)
+    monkeypatch.setattr(settings, "knowledge_image_text_extraction_max_attempts", 3)
+    monkeypatch.setattr(settings, "knowledge_image_text_extraction_retry_backoff_seconds", 0)
+    calls = 0
+
+    def fake_post(payload: dict) -> dict:  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise service.ImageTextExtractionError(
+                "DASHSCOPE_REQUEST_TIMEOUT",
+                "temporary timeout",
+                retryable=True,
+            )
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"image_type":"table","should_index":true,"confidence":0.9,'
+                            '"ocr_text":["字段 A","字段 B"],'
+                            '"entities":["字段 A"],'
+                            '"summary":"表格截图",'
+                            '"key_facts":["字段 A 与字段 B 同时出现"],'
+                            '"warnings":[]}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(service, "_post_dashscope_chat_completion", fake_post)
+
+    result = service.extract_qwen_vl_ocr_text(_asset())
+
+    assert calls == 3
+    assert result.image_type == "table"
+    assert "字段 A" in result.text
+
+
+def test_qwen_vl_ocr_stops_after_configured_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "dashscope_api_key", "test-key")
+    monkeypatch.setattr(settings, "knowledge_image_text_extraction_provider", "dashscope")
+    monkeypatch.setattr(settings, "knowledge_image_text_extraction_max_attempts", 3)
+    monkeypatch.setattr(settings, "knowledge_image_text_extraction_retry_backoff_seconds", 0)
+    calls = 0
+
+    def fake_post(payload: dict) -> dict:  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        raise service.ImageTextExtractionError(
+            "DASHSCOPE_REQUEST_TIMEOUT",
+            "temporary timeout",
+            retryable=True,
+        )
+
+    monkeypatch.setattr(service, "_post_dashscope_chat_completion", fake_post)
+
+    with pytest.raises(service.ImageTextExtractionError) as exc_info:
+        service.extract_qwen_vl_ocr_text(_asset())
+
+    assert calls == 3
+    assert exc_info.value.code == "DASHSCOPE_REQUEST_TIMEOUT"
 
 
 def test_qwen_vl_ocr_status_uses_dashscope_key(monkeypatch: pytest.MonkeyPatch) -> None:

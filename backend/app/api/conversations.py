@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, status
+from urllib.parse import quote
+
+from fastapi import APIRouter, Depends, Response, status
 from sqlmodel import Session
 
 from app.core.database import get_session
@@ -6,6 +8,7 @@ from app.schemas.conversation import (
     ChatMessageCreate,
     ChatMessageRead,
     ConversationCreate,
+    ConversationExportRequest,
     ConversationListItem,
     ConversationRead,
 )
@@ -22,6 +25,7 @@ from app.services.conversation_service import (
     list_conversations,
     list_messages,
 )
+from app.services.conversation_export_service import export_conversation_html
 from app.services.knowledge_mount_service import (
     add_conversation_knowledge_mount,
     delete_conversation_knowledge_mount,
@@ -61,6 +65,25 @@ def list_messages_api(
     session: Session = Depends(get_session),
 ) -> list[ChatMessageRead]:
     return list_messages(session, conversation_id)
+
+
+@router.post("/{conversation_id}/export")
+def export_conversation_api(
+    conversation_id: int,
+    payload: ConversationExportRequest,
+    session: Session = Depends(get_session),
+) -> Response:
+    html, filename = export_conversation_html(session, conversation_id, payload)
+    ascii_filename = filename.encode("ascii", "ignore").decode("ascii") or "conversation-export.html"
+    return Response(
+        content=html,
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=\"{ascii_filename}\"; filename*=UTF-8''{quote(filename)}"
+            )
+        },
+    )
 
 
 @router.get("/{conversation_id}/knowledge-mounts", response_model=list[ConversationKnowledgeMountRead])

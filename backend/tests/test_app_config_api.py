@@ -61,6 +61,60 @@ def test_project_config_writer_creates_voice_section(monkeypatch, tmp_path) -> N
     assert get_project_config_value("elf.voice.mode", False, reload=True) is True
 
 
+def test_project_config_writer_persists_model_settings(monkeypatch, tmp_path) -> None:
+    config_path = tmp_path / "config.json5"
+    config_path.write_text(
+        """{
+  // keep model comments
+  "models": {
+    "agent_chat": {
+      "provider": "dashscope",
+      "model": "qwen3.5-plus",
+    },
+  },
+}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.core.config._config_candidates", lambda: [config_path])
+    monkeypatch.setattr("app.core.config._PROJECT_CONFIG", None)
+
+    set_project_config_value("models.agent_chat.model", "qwen-max")
+    set_project_config_value("models.planner.model", "qwen-plus")
+
+    text = config_path.read_text(encoding="utf-8")
+    assert "// keep model comments" in text
+    assert get_project_config_value("models.agent_chat.provider", "", reload=True) == "dashscope"
+    assert get_project_config_value("models.agent_chat.model", "", reload=True) == "qwen-max"
+    assert get_project_config_value("models.planner.model", "", reload=True) == "qwen-plus"
+
+
+def test_project_config_writer_ignores_commented_model_examples(monkeypatch, tmp_path) -> None:
+    config_path = tmp_path / "config.json5"
+    config_path.write_text(
+        """{
+  "models": {
+    // "agent_chat": {"provider": "dashscope", "model": "qwen3.5-plus"},
+    "agent_chat": {
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+    },
+  },
+}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.core.config._config_candidates", lambda: [config_path])
+    monkeypatch.setattr("app.core.config._PROJECT_CONFIG", None)
+
+    set_project_config_value("models.agent_chat.model", "qwen-max")
+
+    text = config_path.read_text(encoding="utf-8")
+    assert '// "agent_chat": {"provider": "dashscope", "model": "qwen3.5-plus"}' in text
+    assert get_project_config_value("models.agent_chat.provider", "", reload=True) == "deepseek"
+    assert get_project_config_value("models.agent_chat.model", "", reload=True) == "qwen-max"
+
+
 def test_project_config_writer_rejects_elf_enabled(monkeypatch, tmp_path) -> None:
     config_path = tmp_path / "config.json5"
     config_path.write_text("{}\n", encoding="utf-8")

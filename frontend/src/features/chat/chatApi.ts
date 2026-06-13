@@ -9,6 +9,7 @@ import type {
   ConversationKnowledgeMount,
   ChatTurnStateHistory,
   Conversation,
+  ConversationExportRequest,
   SegmentFollowupRequest,
   UserInputAnswer,
 } from "./types";
@@ -65,6 +66,32 @@ export async function deleteMessageBranch(conversationId: number, messageId: num
 
 export function listMessages(conversationId: number): Promise<ChatMessage[]> {
   return request<ChatMessage[]>(`/api/conversations/${conversationId}/messages`);
+}
+
+export async function exportConversationHtml(
+  conversationId: number,
+  input: ConversationExportRequest,
+): Promise<{ blob: Blob; filename: string }> {
+  const response = await fetch(`${API_BASE_URL}/api/conversations/${conversationId}/export`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      message_ids: input.messageIds ?? [],
+      include_all: input.includeAll ?? false,
+      include_graphs: input.includeGraphs ?? true,
+      include_followups: input.includeFollowups ?? true,
+    }),
+  });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `Request failed with status ${response.status}`);
+  }
+  return {
+    blob: await response.blob(),
+    filename: filenameFromContentDisposition(response.headers.get("content-disposition")) ?? "conversation-export.html",
+  };
 }
 
 export function listConversationKnowledgeMounts(conversationId: number): Promise<ConversationKnowledgeMount[]> {
@@ -291,4 +318,20 @@ function parseSseEvent(rawEvent: string): ChatStreamEvent | null {
   const event = eventLine.slice("event:".length).trim();
   const data = JSON.parse(dataLine.slice("data:".length).trim());
   return { event, data } as ChatStreamEvent;
+}
+
+function filenameFromContentDisposition(value: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+  const utf8Match = value.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+  const asciiMatch = value.match(/filename="([^"]+)"/i);
+  return asciiMatch?.[1] ?? null;
 }

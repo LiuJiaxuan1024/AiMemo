@@ -4,6 +4,7 @@ import base64
 from dataclasses import dataclass
 import json
 import re
+import time
 from typing import Any
 from urllib import error as urllib_error
 from urllib import request
@@ -13,10 +14,11 @@ from app.rag.document_parsers.base import DocumentImageAsset
 
 
 class ImageTextExtractionError(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.retryable = retryable
 
 
 @dataclass(frozen=True)
@@ -31,12 +33,24 @@ class ImageTextExtractionResult:
 def extract_qwen_vl_ocr_text(asset: DocumentImageAsset) -> ImageTextExtractionResult:
     _validate_asset(asset)
     payload = _build_dashscope_payload(asset)
-    response = _post_dashscope_chat_completion(payload)
-    content = _extract_message_content(response)
-    parsed = _parse_json_object(content)
-    result = _build_result_from_json(asset, parsed, usage=response.get("usage") if isinstance(response, dict) else None)
-    _validate_result_quality(result, parsed)
-    return result
+    attempts = _configured_max_attempts()
+    for attempt in range(1, attempts + 1):
+        try:
+            response = _post_dashscope_chat_completion(payload)
+            content = _extract_message_content(response)
+            parsed = _parse_json_object(content)
+            result = _build_result_from_json(
+                asset,
+                parsed,
+                usage=response.get("usage") if isinstance(response, dict) else None,
+            )
+            _validate_result_quality(result, parsed)
+            return result
+        except ImageTextExtractionError as exc:
+            if not exc.retryable or attempt >= attempts:
+                raise
+            _sleep_before_retry(attempt)
+    raise ImageTextExtractionError("IMAGE_TEXT_EXTRACTION_FAILED", "image text extraction failed.")
 
 
 def format_image_text_result(asset: DocumentImageAsset, result: ImageTextExtractionResult) -> str:
@@ -145,24 +159,44 @@ def _post_dashscope_chat_completion(payload: dict[str, Any]) -> dict[str, Any]:
             raw = response.read()
     except urllib_error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:1000]
-        raise ImageTextExtractionError("DASHSCOPE_REQUEST_FAILED", detail or str(exc)) from exc
+        raise ImageTextExtractionError(
+            "DASHSCOPE_REQUEST_FAILED",
+            detail or str(exc),
+            retryable=_is_retryable_http_status(getattr(exc, "code", None)),
+        ) from exc
     except TimeoutError as exc:
-        raise ImageTextExtractionError("DASHSCOPE_REQUEST_TIMEOUT", "qwen-vl-ocr request timed out.") from exc
+        raise ImageTextExtractionError(
+            "DASHSCOPE_REQUEST_TIMEOUT",
+            "qwen-vl-ocr request timed out.",
+            retryable=True,
+        ) from exc
     except OSError as exc:
-        raise ImageTextExtractionError("DASHSCOPE_REQUEST_FAILED", str(exc)) from exc
+        raise ImageTextExtractionError("DASHSCOPE_REQUEST_FAILED", str(exc), retryable=True) from exc
     try:
         parsed = json.loads(raw.decode("utf-8"))
     except Exception as exc:
-        raise ImageTextExtractionError("DASHSCOPE_BAD_RESPONSE", "DashScope response is not valid JSON.") from exc
+        raise ImageTextExtractionError(
+            "DASHSCOPE_BAD_RESPONSE",
+            "DashScope response is not valid JSON.",
+            retryable=True,
+        ) from exc
     if not isinstance(parsed, dict):
-        raise ImageTextExtractionError("DASHSCOPE_BAD_RESPONSE", "DashScope response is not a JSON object.")
+        raise ImageTextExtractionError(
+            "DASHSCOPE_BAD_RESPONSE",
+            "DashScope response is not a JSON object.",
+            retryable=True,
+        )
     return parsed
 
 
 def _extract_message_content(response: dict[str, Any]) -> str:
     choices = response.get("choices")
     if not isinstance(choices, list) or not choices:
-        raise ImageTextExtractionError("DASHSCOPE_BAD_RESPONSE", "DashScope response missing choices.")
+        raise ImageTextExtractionError(
+            "DASHSCOPE_BAD_RESPONSE",
+            "DashScope response missing choices.",
+            retryable=True,
+        )
     message = choices[0].get("message") if isinstance(choices[0], dict) else None
     content = message.get("content") if isinstance(message, dict) else None
     if isinstance(content, str):
@@ -170,7 +204,11 @@ def _extract_message_content(response: dict[str, Any]) -> str:
     if isinstance(content, list):
         texts = [item.get("text", "") for item in content if isinstance(item, dict)]
         return "\n".join(text for text in texts if text)
-    raise ImageTextExtractionError("DASHSCOPE_BAD_RESPONSE", "DashScope response missing message content.")
+    raise ImageTextExtractionError(
+        "DASHSCOPE_BAD_RESPONSE",
+        "DashScope response missing message content.",
+        retryable=True,
+    )
 
 
 def _parse_json_object(content: str) -> dict[str, Any]:
@@ -181,10 +219,33 @@ def _parse_json_object(content: str) -> dict[str, Any]:
     try:
         parsed = json.loads(text)
     except Exception as exc:
-        raise ImageTextExtractionError("MODEL_JSON_PARSE_FAILED", "qwen-vl-ocr output is not valid JSON.") from exc
+        raise ImageTextExtractionError(
+            "MODEL_JSON_PARSE_FAILED",
+            "qwen-vl-ocr output is not valid JSON.",
+            retryable=True,
+        ) from exc
     if not isinstance(parsed, dict):
-        raise ImageTextExtractionError("MODEL_JSON_PARSE_FAILED", "qwen-vl-ocr output is not a JSON object.")
+        raise ImageTextExtractionError(
+            "MODEL_JSON_PARSE_FAILED",
+            "qwen-vl-ocr output is not a JSON object.",
+            retryable=True,
+        )
     return parsed
+
+
+def _configured_max_attempts() -> int:
+    return max(1, int(settings.knowledge_image_text_extraction_max_attempts or 1))
+
+
+def _sleep_before_retry(attempt: int) -> None:
+    backoff = max(0.0, float(settings.knowledge_image_text_extraction_retry_backoff_seconds or 0.0))
+    if backoff <= 0:
+        return
+    time.sleep(min(backoff * (2 ** max(0, attempt - 1)), 5.0))
+
+
+def _is_retryable_http_status(status_code: int | None) -> bool:
+    return status_code in {408, 409, 425, 429} or (status_code is not None and status_code >= 500)
 
 
 def _build_result_from_json(asset: DocumentImageAsset, data: dict[str, Any], *, usage: Any) -> ImageTextExtractionResult:

@@ -3,6 +3,7 @@ import json
 import pytest
 from app.agent.commands.registry import get_command_by_input, list_command_schemas
 from app.agent.commands.router import execute_slash_command
+from app.core.config import settings
 from app.models.chat_message import ChatMessage
 from app.models.knowledge import ConversationKnowledgeMount, KnowledgeSpace
 from app.models.voice_profile import VoiceProfile
@@ -25,6 +26,14 @@ def _disable_project_config_writes(monkeypatch):
     monkeypatch.setattr(
         "app.agent.commands.router.set_persistent_runtime_config",
         fake_set_persistent_runtime_config,
+    )
+    monkeypatch.setattr(
+        "app.services.model_config_service.set_persistent_runtime_config",
+        fake_set_persistent_runtime_config,
+    )
+    monkeypatch.setattr(
+        "app.services.model_config_service.get_project_config_value",
+        lambda path, default=None, reload=False: default,
     )
     monkeypatch.setattr(
         "app.agent.commands.router.set_elf_voice_mode_enabled_persistent",
@@ -363,6 +372,111 @@ def test_config_elf_default_voice_not_ready_fails_without_candidates(session):
     assert response.result.status == "failed"
     assert response.result.details == []
     assert response.result.suggestions == []
+
+
+def test_config_agent_chat_provider_missing_arg_lists_providers(session):
+    conversation = create_conversation(session, ConversationCreate(title="模型 provider 缺参"))
+
+    response = execute_slash_command(
+        session,
+        conversation_id=conversation.id,
+        raw_command="/config agent.chat.provider",
+    )
+
+    assert response.result.status == "needs_input"
+    assert response.result.target == "models.slots.agent_chat.provider"
+    assert "dashscope" in [item["value"] for item in response.result.details]
+
+
+def test_config_agent_chat_provider_requires_api_key(session, monkeypatch):
+    conversation = create_conversation(session, ConversationCreate(title="模型 provider 缺 key"))
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(settings, "deepseek_api_key", "")
+
+    response = execute_slash_command(
+        session,
+        conversation_id=conversation.id,
+        raw_command="/config agent.chat.provider deepseek",
+    )
+
+    assert response.result.status == "failed"
+    assert "DEEPSEEK_API_KEY" in response.result.message
+    assert response.result.details == []
+    assert response.result.suggestions == []
+
+
+def test_config_agent_chat_provider_updates_config_and_resets_models(session, monkeypatch):
+    conversation = create_conversation(session, ConversationCreate(title="模型 provider"))
+    reset_calls = []
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setattr("app.services.model_config_service.reset_agent_models", lambda: reset_calls.append("reset"))
+
+    response = execute_slash_command(
+        session,
+        conversation_id=conversation.id,
+        raw_command="/config agent.chat.provider openai",
+    )
+
+    assert response.result.status == "success"
+    assert response.result.target == "models.slots.agent_chat.provider"
+    assert response.result.rollback_command == "/config agent.chat.provider dashscope"
+    stored = get_runtime_config(session, "models.slots.agent_chat")
+    assert stored["provider"] == "openai"
+    assert stored["model"] == "gpt-4.1"
+    assert reset_calls == ["reset"]
+
+
+def test_config_agent_chat_model_updates_current_provider_model(session, monkeypatch):
+    conversation = create_conversation(session, ConversationCreate(title="主模型"))
+    reset_calls = []
+    monkeypatch.setattr(settings, "dashscope_api_key", "test-dashscope-key")
+    monkeypatch.setattr("app.services.model_config_service.reset_agent_models", lambda: reset_calls.append("reset"))
+
+    response = execute_slash_command(
+        session,
+        conversation_id=conversation.id,
+        raw_command="/config agent.chat.model qwen-max",
+    )
+
+    assert response.result.status == "success"
+    assert response.result.target == "models.slots.agent_chat.model"
+    stored = get_runtime_config(session, "models.slots.agent_chat")
+    assert stored["provider"] == "dashscope"
+    assert stored["model"] == "qwen-max"
+    assert reset_calls == ["reset"]
+
+
+def test_config_agent_chat_model_invalid_fails_without_candidates(session):
+    conversation = create_conversation(session, ConversationCreate(title="主模型非法"))
+
+    response = execute_slash_command(
+        session,
+        conversation_id=conversation.id,
+        raw_command="/config agent.chat.model ???",
+    )
+
+    assert response.result.status == "failed"
+    assert response.result.details == []
+    assert response.result.suggestions == []
+
+
+def test_config_planner_model_updates_config_and_resets_models(session, monkeypatch):
+    conversation = create_conversation(session, ConversationCreate(title="planner 模型"))
+    reset_calls = []
+    monkeypatch.setattr(settings, "dashscope_api_key", "test-dashscope-key")
+    monkeypatch.setattr("app.services.model_config_service.reset_agent_models", lambda: reset_calls.append("reset"))
+
+    response = execute_slash_command(
+        session,
+        conversation_id=conversation.id,
+        raw_command="/config planner.model qwen-plus",
+    )
+
+    assert response.result.status == "success"
+    assert response.result.target == "models.planner.model"
+    assert get_runtime_config(session, "models.planner.model") == "qwen-plus"
+    assert response.result.rollback_command == "/config planner.model qwen-turbo"
+    assert reset_calls == ["reset"]
 
 
 def _create_space(session, name: str) -> KnowledgeSpace:

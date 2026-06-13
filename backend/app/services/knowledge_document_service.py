@@ -5,22 +5,29 @@ from pathlib import Path
 import re
 
 from fastapi import HTTPException, UploadFile, status
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
-from app.jobs.models import GraphName, JobType
+from app.jobs.models import GraphName, JobStatus, JobType
 from app.jobs.queue import enqueue_job
 from app.models.job import Job
-from app.models.knowledge import KnowledgeChunk, KnowledgeDocument
+from app.models.knowledge import KnowledgeChunk, KnowledgeDocument, KnowledgeImageAsset, KnowledgeImageAssetChunk
 from app.models.note import utc_now
 from app.rag.document_parsers import DocumentParseError, parse_document_file, parser_name_for_path, supported_document_suffixes
 from app.rag.knowledge_chunking import KnowledgeChunkDraft, build_chunk_drafts
 from app.rag.vector_store import delete_knowledge_chunk_embeddings
-from app.schemas.knowledge import KnowledgeChunkDraftRead, KnowledgeChunkRead, KnowledgeDocumentRead, KnowledgeDocumentUploadResponse
+from app.schemas.knowledge import (
+    KnowledgeChunkDraftRead,
+    KnowledgeChunkRead,
+    KnowledgeDocumentRead,
+    KnowledgeDocumentRetryResponse,
+    KnowledgeDocumentUploadResponse,
+)
 from app.services.knowledge_space_service import get_active_space_or_404, get_space_or_404
 
 
 MAX_KNOWLEDGE_UPLOAD_BYTES = 25 * 1024 * 1024
 KNOWLEDGE_DATA_ROOT = Path(__file__).resolve().parents[2] / "data" / "knowledge"
+PROCESSING_DOCUMENT_STATUSES = {"pending", "parsing", "chunking", "embedding", "indexing"}
 
 
 def list_knowledge_documents(session: Session, space_id: int) -> list[KnowledgeDocumentRead]:
@@ -42,7 +49,7 @@ def get_knowledge_document(session: Session, document_id: int) -> KnowledgeDocum
 
 def delete_knowledge_document(session: Session, document_id: int) -> KnowledgeDocumentRead:
     document = get_document_or_404(session, document_id)
-    if document.status in {"pending", "parsing", "chunking", "embedding", "indexing"}:
+    if document.status in PROCESSING_DOCUMENT_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "KNOWLEDGE_DOCUMENT_ACTIVE", "message": "文档仍在处理中，暂时不能删除。"},
@@ -51,9 +58,21 @@ def delete_knowledge_document(session: Session, document_id: int) -> KnowledgeDo
     chunks = session.exec(
         select(KnowledgeChunk).where(KnowledgeChunk.document_id == (document.id or 0))
     ).all()
+    image_assets = session.exec(
+        select(KnowledgeImageAsset).where(KnowledgeImageAsset.document_id == (document.id or 0))
+    ).all()
+    image_asset_ids = [asset.id for asset in image_assets if asset.id is not None]
+    if image_asset_ids:
+        image_asset_links = session.exec(
+            select(KnowledgeImageAssetChunk).where(col(KnowledgeImageAssetChunk.image_asset_id).in_(image_asset_ids))
+        ).all()
+        for image_asset_link in image_asset_links:
+            session.delete(image_asset_link)
     delete_knowledge_chunk_embeddings([chunk.id for chunk in chunks if chunk.id is not None])
     for chunk in chunks:
         session.delete(chunk)
+    for image_asset in image_assets:
+        session.delete(image_asset)
 
     document.status = "deleted"
     document.error_code = None
@@ -71,6 +90,52 @@ def delete_knowledge_document(session: Session, document_id: int) -> KnowledgeDo
     session.refresh(document)
     _delete_stored_document_file(document)
     return to_document_read(document)
+
+
+def retry_knowledge_document_image_processing(session: Session, document_id: int) -> KnowledgeDocumentRetryResponse:
+    document = get_document_or_404(session, document_id)
+    if document.status in PROCESSING_DOCUMENT_STATUSES:
+        active_job = _active_knowledge_ingest_job(session, document)
+        return KnowledgeDocumentRetryResponse(document=to_document_read(document), job=_job_payload(active_job) if active_job else None)
+    if document.status != "failed" and document.image_asset_failed_count <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "KNOWLEDGE_DOCUMENT_NO_FAILED_IMAGES", "message": "这个文档没有需要重试的失败图片。"},
+        )
+    return retry_knowledge_document_processing(session, document_id)
+
+
+def retry_knowledge_document_processing(session: Session, document_id: int) -> KnowledgeDocumentRetryResponse:
+    document = get_document_or_404(session, document_id)
+    if document.status in PROCESSING_DOCUMENT_STATUSES:
+        active_job = _active_knowledge_ingest_job(session, document)
+        return KnowledgeDocumentRetryResponse(document=to_document_read(document), job=_job_payload(active_job) if active_job else None)
+    if not document.storage_path:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "DOCUMENT_HAS_NO_STORAGE", "message": "文档没有可重新处理的原始文件。"},
+        )
+    path = KNOWLEDGE_DATA_ROOT / document.storage_path
+    if not path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "DOCUMENT_STORAGE_NOT_FOUND", "message": "找不到文档原始文件，无法重试图片处理。"},
+        )
+
+    active_job = _active_knowledge_ingest_job(session, document)
+    if active_job is not None:
+        return KnowledgeDocumentRetryResponse(document=to_document_read(document), job=_job_payload(active_job))
+
+    document.status = "pending"
+    document.error_code = None
+    document.error_message = None
+    document.updated_at = utc_now()
+    session.add(document)
+    session.flush()
+    job = enqueue_knowledge_ingest_job(session, document)
+    session.commit()
+    session.refresh(document)
+    return KnowledgeDocumentRetryResponse(document=to_document_read(document), job=_job_payload(job))
 
 
 async def upload_knowledge_document(
@@ -280,6 +345,15 @@ def _bytes_hash(content: bytes) -> str:
 
 def _knowledge_ingest_dedupe_key(document: KnowledgeDocument) -> str:
     return f"{JobType.KNOWLEDGE_INGEST.value}:document:{document.id}:content:{document.content_hash}"
+
+
+def _active_knowledge_ingest_job(session: Session, document: KnowledgeDocument) -> Job | None:
+    return session.exec(
+        select(Job).where(
+            Job.dedupe_key == _knowledge_ingest_dedupe_key(document),
+            col(Job.status).in_({JobStatus.PENDING.value, JobStatus.RUNNING.value}),
+        )
+    ).first()
 
 
 def _job_payload(job: Job) -> dict:

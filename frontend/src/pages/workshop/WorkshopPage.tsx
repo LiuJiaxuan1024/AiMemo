@@ -1,4 +1,4 @@
-import { Brain, Hammer, Sparkles, Volume2 } from "lucide-react";
+import { Brain, Cloud, Hammer, Sparkles, Volume2 } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
 
 import { PanelHeader } from "../../shared/ui";
@@ -27,6 +27,10 @@ export function WorkshopPage() {
         <NavLink to="/app/workshop/voice">
           <Volume2 aria-hidden="true" size={16} />
           语音
+        </NavLink>
+        <NavLink to="/app/workshop/sync">
+          <Cloud aria-hidden="true" size={16} />
+          同步
         </NavLink>
       </nav>
 

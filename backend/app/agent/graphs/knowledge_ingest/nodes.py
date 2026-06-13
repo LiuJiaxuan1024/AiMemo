@@ -29,6 +29,12 @@ from app.rag.vector_store import (
     upsert_knowledge_chunk_embeddings,
 )
 from app.services import knowledge_document_service
+from app.services.knowledge_image_asset_service import (
+    image_asset_stats,
+    process_document_image_assets,
+    replace_document_image_chunk_links,
+    update_document_image_asset_stats,
+)
 from app.services.knowledge_image_text_service import (
     extract_qwen_vl_ocr_text,
     format_image_text_result,
@@ -80,20 +86,43 @@ def build_load_document_node(session_factory: SessionFactory):
     return load_document
 
 
-def build_parse_and_chunk_node(image_text_extractor: ImageTextExtractor | None = None):
+def build_parse_and_chunk_node(
+    session_factory: SessionFactory,
+    image_text_extractor: ImageTextExtractor | None = None,
+):
     def parse_and_chunk(state: KnowledgeIngestGraphState) -> KnowledgeIngestGraphState:
         if state.get("should_skip"):
             return {"chunks": []}
+        document_id = _resolve_document_id(state)
         storage_path = state.get("storage_path")
         if not storage_path:
             raise ValueError("storage_path is required before parsing.")
         parsed = parse_document_file(knowledge_document_service.KNOWLEDGE_DATA_ROOT / storage_path)
-        image_blocks, image_failures = _build_image_analysis_blocks(
-            parsed.image_assets,
-            image_text_extractor or _build_default_image_text_extractor(),
-        )
+        with session_factory() as session:
+            document = session.get(KnowledgeDocument, document_id)
+            if document is None:
+                raise ValueError(f"KnowledgeDocument {document_id} not found.")
+            image_results = process_document_image_assets(
+                session_factory=session_factory,
+                document=document,
+                assets=parsed.image_assets,
+                image_text_extractor=image_text_extractor or _build_default_image_text_extractor(),
+            )
+        asset_by_id = {asset.asset_id: asset for asset in parsed.image_assets}
+        image_blocks = [
+            image_analysis_block(
+                asset=asset_by_id[result.asset_id],
+                analysis_text=result.analysis_text,
+            )
+            for result in image_results
+            if result.asset_id in asset_by_id
+        ]
+        with session_factory() as session:
+            stats = image_asset_stats(session, document_id)
+        image_asset_count = stats["image_asset_count"]
+        image_asset_processed_count = stats["image_asset_processed_count"]
+        image_asset_failed_count = stats["image_asset_failed_count"]
         drafts = build_chunk_drafts([*parsed.blocks, *image_blocks])
-        image_asset_count = len(parsed.image_assets)
         chunks: list[KnowledgeChunkPayload] = [
             {
                 "chunk_index": draft.chunk_index,
@@ -113,9 +142,9 @@ def build_parse_and_chunk_node(image_text_extractor: ImageTextExtractor | None =
             "parser": parsed.parser,
             "chunks": chunks,
             "image_asset_count": image_asset_count,
-            "image_asset_processed_count": len(image_blocks),
+            "image_asset_processed_count": image_asset_processed_count,
             "image_text_chunk_count": _count_image_chunks(chunks),
-            "image_asset_failed_count": image_failures,
+            "image_asset_failed_count": image_asset_failed_count,
         }
 
     return parse_and_chunk
@@ -149,15 +178,20 @@ def build_persist_chunks_node(session_factory: SessionFactory):
             document.updated_at = utc_now()
             session.add(document)
 
-            old_chunks = session.exec(
-                select(KnowledgeChunk).where(KnowledgeChunk.document_id == document_id)
-            ).all()
+            # Avoid autoflush before sqlite-vec cleanup. Otherwise this SQLModel
+            # session can take a write lock, then vector_store's separate sqlite3
+            # connection may fail with "database is locked".
+            with session.no_autoflush:
+                old_chunks = session.exec(
+                    select(KnowledgeChunk).where(KnowledgeChunk.document_id == document_id)
+                ).all()
             delete_knowledge_chunk_embeddings([chunk.id for chunk in old_chunks if chunk.id is not None])
             for old_chunk in old_chunks:
                 session.delete(old_chunk)
             session.flush()
 
             stored_chunks: list[StoredKnowledgeChunkPayload] = []
+            stored_chunk_rows: list[KnowledgeChunk] = []
             for chunk in chunks:
                 knowledge_chunk = KnowledgeChunk(
                     space_id=document.space_id,
@@ -177,8 +211,12 @@ def build_persist_chunks_node(session_factory: SessionFactory):
                 if knowledge_chunk.id is None:
                     raise RuntimeError("KnowledgeChunk id was not generated.")
                 stored_chunks.append({**chunk, "id": knowledge_chunk.id})
+                stored_chunk_rows.append(knowledge_chunk)
 
             document.chunk_count = len(stored_chunks)
+            replace_document_image_chunk_links(session, document_id=document_id, chunks=stored_chunk_rows)
+            update_document_image_asset_stats(session, document)
+            document.image_text_chunk_count = _count_image_chunks(stored_chunks)
             document.text_chunk_count = max(0, len(stored_chunks) - document.image_text_chunk_count)
             document.token_count = sum(int(chunk["token_count"]) for chunk in stored_chunks)
             document.status = "embedding"

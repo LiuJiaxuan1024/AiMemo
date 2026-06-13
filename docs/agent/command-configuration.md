@@ -810,6 +810,93 @@ Command schema registry 需要给 Step 3 命令提供动态 options：
 
 必须接入 `reset_agent_models()`，并做好 provider 能力校验。
 
+#### Step 4.1：配置路径与作用域
+
+Step 4 只开放低风险模型 slot，不开放 API Key、base_url、temperature 等高风险或容易误配的字段：
+
+```text
+/config agent.chat.provider <provider>
+  写入 models.agent_chat.provider。
+  同时补齐该 provider 的默认 base_url、api_key_env、capabilities 和 extra_body。
+  作用域：user。风险：medium。需要 provider 能力校验。
+
+/config agent.chat.model <model>
+  写入 models.agent_chat.model。
+  保留当前 provider/base_url/api_key_env/capabilities。
+  作用域：user。风险：medium。需要 agent_chat 能力校验。
+
+/config planner.model <model>
+  写入 models.planner.model。
+  第一版 planner provider 固定为 dashscope，不开放 /config planner.provider。
+  作用域：user。风险：low。模型必须是 DashScope 可用模型名。
+```
+
+`/config agent.chat.*` 的底层路径使用 `models.agent_chat`，不是 `agent.chat`。斜杠指令名称面向用户保持短一点，后端负责映射到模型 slot。
+
+#### Step 4.2：Provider 能力策略
+
+`agent_chat` 是 ReAct agent 的主模型，必须满足：
+
+- OpenAI-compatible chat completion 接口。
+- 支持 tool calling。
+- 支持普通流式文本输出。
+- API Key 已配置；不能把 provider 切到缺 key 的状态。
+
+第一版支持：
+
+```text
+dashscope
+openai
+openai_compatible
+deepseek
+openrouter
+siliconflow
+local_openai_compatible
+```
+
+`anthropic` 暂时只保留设计，不在 `/config agent.chat.provider` 中开放；用户手动输入时返回 failed。
+
+#### Step 4.3：命令行为
+
+`/config agent.chat.provider <provider>`
+
+- 参数缺失：返回 `needs_input`，展示 provider 单选卡。
+- 参数非法或暂不支持：返回 `failed`，不展示候选项。
+- provider 缺 API Key：返回 `failed`，说明缺少的环境变量；不自动弹候选。
+- 设置成功：写入 runtime config / config.json5，调用 `reset_agent_models()`，返回 `success`。
+- 如果当前已经是该 provider：返回 `noop`。
+
+`/config agent.chat.model <model>`
+
+- 参数缺失：根据当前 provider 返回推荐模型单选卡。
+- 参数非法（空字符串、明显不是模型名）：返回 `failed`。
+- 设置成功：写入 runtime config / config.json5，调用 `reset_agent_models()`。
+- 不主动调用远端试模型；远端不可用由下一次真实模型调用暴露明确错误。
+
+`/config planner.model <model>`
+
+- 参数缺失：返回 DashScope planner 推荐模型单选卡。
+- 参数非法：返回 `failed`。
+- 设置成功：写入 runtime config / config.json5，调用 `reset_agent_models()`。
+
+#### Step 4.4：结果展示
+
+沿用前面阶段规则：
+
+- `needs_input` 才展示可选项。
+- `failed` 只展示失败卡片，不展示候选。
+- `success` 展示旧值、新值、配置文件、runtime config 和 reload。
+- `rollback_command` 指向旧 provider 或旧 model。
+
+#### Step 4.5：实现顺序
+
+1. 扩展 runtime config 受控写入白名单，允许写 `models.agent_chat`、`models.agent_chat.model`、`models.agent_chat.provider`、`models.planner.model`。
+2. 让 `get_planner_chat_model()` 读取 `models.planner.model`，默认仍为 `qwen-turbo`。
+3. 增加模型配置 service，集中处理 provider 默认值、能力校验、API Key 检查、写入和 `reset_agent_models()`。
+4. 在 command registry 新增三个命令和动态 options。
+5. 在 command router 接 executor。
+6. 补测试：缺参数 needs_input、非法 provider failed、缺 key failed、success reset、noop、planner model 生效。
+
 ### Step 5：设置页联动
 
 把聊天指令和设置 UI 做成同一套后端 API。用户从 UI 修改和从 Agent 指令修改，最终都走同一条验证、审计、reload 流程。

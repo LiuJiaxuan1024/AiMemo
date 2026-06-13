@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from sqlmodel import Session, select
@@ -8,8 +7,8 @@ from sqlmodel import Session, select
 from app.agent.commands.registry import get_command_by_input
 from app.agent.commands.result_codec import serialize_command_result
 from app.agent.commands.schemas import CommandExecuteResponse, CommandResult
-from app.agent.model import AGENT_CHAT_MODEL, PLANNER_CHAT_MODEL
-from app.core.config import get_project_config_value, settings
+from app.agent.model import AGENT_CHAT_MODEL
+from app.core.config import settings
 from app.models.knowledge import KnowledgeSpace
 from app.models.voice_profile import VoiceProfile
 from app.schemas.conversation import ChatMessageCreate
@@ -19,6 +18,18 @@ from app.services.knowledge_mount_service import (
     add_conversation_knowledge_mount,
     delete_conversation_knowledge_mount,
     list_conversation_knowledge_mounts,
+)
+from app.services.model_config_service import (
+    agent_chat_provider_specs,
+    current_agent_chat_config,
+    current_agent_chat_model,
+    current_agent_chat_provider,
+    current_planner_model,
+    normalize_model_name,
+    planner_model_options,
+    set_agent_chat_model,
+    set_agent_chat_provider,
+    set_planner_model,
 )
 from app.services.runtime_config_service import set_persistent_runtime_config
 from app.services.voice_profile_service import activate_voice_profile, ensure_default_voice_profile
@@ -92,6 +103,12 @@ def _execute(session: Session, *, conversation_id: int, raw_command: str) -> Com
         return _set_elf_voice_mode(session, raw_command, command.id)
     if command.executor == "set_elf_default_voice":
         return _set_elf_default_voice(session, raw_command, command.id)
+    if command.executor == "set_agent_chat_provider":
+        return _set_agent_chat_provider(session, raw_command, command.id)
+    if command.executor == "set_agent_chat_model":
+        return _set_agent_chat_model(session, raw_command, command.id)
+    if command.executor == "set_planner_model":
+        return _set_planner_model(session, raw_command, command.id)
     return CommandResult(
         command=raw_command.strip(),
         command_id=command.id,
@@ -110,7 +127,7 @@ def _show_config(session: Session, conversation_id: int, raw_command: str, comma
             "label": "主聊天模型",
             "value": f"{agent_chat.get('provider', 'dashscope')} / {agent_chat.get('model', AGENT_CHAT_MODEL)}",
         },
-        {"label": "Planner", "value": f"dashscope / {PLANNER_CHAT_MODEL}"},
+        {"label": "Planner", "value": f"dashscope / {current_planner_model()}"},
         {
             "label": "语音",
             "value": f"ASR {settings.voice_aliyun_asr_model} / TTS {settings.voice_aliyun_tts_model}",
@@ -138,7 +155,7 @@ def _agent_status(raw_command: str, command_id: str) -> CommandResult:
         {"label": "Provider", "value": str(agent_chat.get("provider", "dashscope"))},
         {"label": "工具调用", "value": "enabled"},
         {"label": "流式输出", "value": "enabled" if bool(agent_chat.get("streaming", True)) else "disabled"},
-        {"label": "Planner", "value": PLANNER_CHAT_MODEL},
+        {"label": "Planner", "value": current_planner_model()},
         {"label": "Thinking", "value": "disabled by default"},
     ]
     return CommandResult(
@@ -473,21 +490,247 @@ def _set_elf_default_voice(session: Session, raw_command: str, command_id: str) 
     )
 
 
+def _set_agent_chat_provider(session: Session, raw_command: str, command_id: str) -> CommandResult:
+    raw_provider = _extract_space_arg(raw_command, prefixes=("/config agent.chat.provider",))
+    specs = agent_chat_provider_specs()
+    if not raw_provider:
+        return CommandResult(
+            command=raw_command.strip(),
+            command_id=command_id,
+            status="needs_input",
+            scope="user",
+            target="models.slots.agent_chat.provider",
+            message="请选择主 Agent 使用的 provider。",
+            details=[
+                {
+                    "label": spec.provider,
+                    "value": spec.provider,
+                    "model": spec.default_model,
+                    "api_key_env": spec.api_key_env,
+                    "command": f"/config agent.chat.provider {spec.provider}",
+                }
+                for spec in specs.values()
+            ],
+            suggestions=[f"/config agent.chat.provider {spec.provider}" for spec in specs.values()],
+        )
+
+    provider = raw_provider.strip().lower()
+    old_provider = current_agent_chat_provider()
+    if provider == old_provider:
+        return CommandResult(
+            command=raw_command.strip(),
+            command_id=command_id,
+            status="noop",
+            scope="user",
+            target="models.slots.agent_chat.provider",
+            old_value=old_provider,
+            new_value=old_provider,
+            message=f"主 Agent provider 当前已经是 {old_provider}。",
+            details=_agent_model_details(current_agent_chat_config(), current_planner_model()),
+        )
+
+    old_config = current_agent_chat_config()
+    next_config, error = set_agent_chat_provider(session, provider)
+    if error:
+        return CommandResult(
+            command=raw_command.strip(),
+            command_id=command_id,
+            status="failed",
+            scope="user",
+            target="models.slots.agent_chat.provider",
+            message=error,
+        )
+    assert next_config is not None
+    return CommandResult(
+        command=raw_command.strip(),
+        command_id=command_id,
+        status="success",
+        scope="user",
+        changed=True,
+        target="models.slots.agent_chat.provider",
+        old_value=old_provider,
+        new_value=next_config.get("provider"),
+        message=f"主 Agent provider 已切换为 {next_config.get('provider')}。",
+        details=[
+            {"label": "旧模型", "value": f"{old_config.get('provider', 'dashscope')} / {old_config.get('model', AGENT_CHAT_MODEL)}"},
+            {"label": "新模型", "value": f"{next_config.get('provider')} / {next_config.get('model')}"},
+            {"label": "配置文件", "value": "config.json5 已更新"},
+            {"label": "Reload", "value": "runtime_config / agent_models"},
+        ],
+        rollback_command=f"/config agent.chat.provider {old_provider}",
+    )
+
+
+def _set_agent_chat_model(session: Session, raw_command: str, command_id: str) -> CommandResult:
+    raw_model = _extract_space_arg(raw_command, prefixes=("/config agent.chat.model",))
+    provider = current_agent_chat_provider()
+    spec = agent_chat_provider_specs().get(provider)
+    if not raw_model:
+        models = list(spec.models) if spec else []
+        return CommandResult(
+            command=raw_command.strip(),
+            command_id=command_id,
+            status="needs_input",
+            scope="user",
+            target="models.slots.agent_chat.model",
+            message=f"请选择 {provider} 的主 Agent 模型。",
+            details=[
+                {
+                    "label": model,
+                    "value": model,
+                    "provider": provider,
+                    "command": f"/config agent.chat.model {model}",
+                }
+                for model in models
+            ],
+            suggestions=[f"/config agent.chat.model {model}" for model in models],
+        )
+
+    model = normalize_model_name(raw_model)
+    if model is None:
+        return CommandResult(
+            command=raw_command.strip(),
+            command_id=command_id,
+            status="failed",
+            scope="user",
+            target="models.slots.agent_chat.model",
+            message="agent.chat.model 不能为空，只能包含模型名称字符。",
+        )
+
+    old_model = current_agent_chat_model()
+    if model == old_model:
+        return CommandResult(
+            command=raw_command.strip(),
+            command_id=command_id,
+            status="noop",
+            scope="user",
+            target="models.slots.agent_chat.model",
+            old_value=old_model,
+            new_value=old_model,
+            message=f"主 Agent 模型当前已经是 {old_model}。",
+            details=_agent_model_details(current_agent_chat_config(), current_planner_model()),
+        )
+
+    next_config, error = set_agent_chat_model(session, model)
+    if error:
+        return CommandResult(
+            command=raw_command.strip(),
+            command_id=command_id,
+            status="failed",
+            scope="user",
+            target="models.slots.agent_chat.model",
+            message=error,
+        )
+    assert next_config is not None
+    return CommandResult(
+        command=raw_command.strip(),
+        command_id=command_id,
+        status="success",
+        scope="user",
+        changed=True,
+        target="models.slots.agent_chat.model",
+        old_value=old_model,
+        new_value=next_config.get("model"),
+        message=f"主 Agent 模型已切换为 {next_config.get('model')}。",
+        details=[
+            {"label": "Provider", "value": str(next_config.get("provider", provider))},
+            {"label": "旧模型", "value": old_model},
+            {"label": "新模型", "value": str(next_config.get("model"))},
+            {"label": "配置文件", "value": "config.json5 已更新"},
+            {"label": "Reload", "value": "runtime_config / agent_models"},
+        ],
+        rollback_command=f"/config agent.chat.model {old_model}",
+    )
+
+
+def _set_planner_model(session: Session, raw_command: str, command_id: str) -> CommandResult:
+    raw_model = _extract_space_arg(raw_command, prefixes=("/config planner.model",))
+    if not raw_model:
+        return CommandResult(
+            command=raw_command.strip(),
+            command_id=command_id,
+            status="needs_input",
+            scope="user",
+            target="models.planner.model",
+            message="请选择 planner 使用的 DashScope 模型。",
+            details=[
+                {
+                    "label": model,
+                    "value": model,
+                    "provider": "dashscope",
+                    "command": f"/config planner.model {model}",
+                }
+                for model in planner_model_options()
+            ],
+            suggestions=[f"/config planner.model {model}" for model in planner_model_options()],
+        )
+
+    model = normalize_model_name(raw_model)
+    if model is None:
+        return CommandResult(
+            command=raw_command.strip(),
+            command_id=command_id,
+            status="failed",
+            scope="user",
+            target="models.planner.model",
+            message="planner.model 不能为空，只能包含模型名称字符。",
+        )
+
+    old_model = current_planner_model()
+    if model == old_model:
+        return CommandResult(
+            command=raw_command.strip(),
+            command_id=command_id,
+            status="noop",
+            scope="user",
+            target="models.planner.model",
+            old_value=old_model,
+            new_value=old_model,
+            message=f"Planner 模型当前已经是 {old_model}。",
+            details=_agent_model_details(current_agent_chat_config(), old_model),
+        )
+
+    next_model, error = set_planner_model(session, model)
+    if error:
+        return CommandResult(
+            command=raw_command.strip(),
+            command_id=command_id,
+            status="failed",
+            scope="user",
+            target="models.planner.model",
+            message=error,
+        )
+    assert next_model is not None
+    return CommandResult(
+        command=raw_command.strip(),
+        command_id=command_id,
+        status="success",
+        scope="user",
+        changed=True,
+        target="models.planner.model",
+        old_value=old_model,
+        new_value=next_model,
+        message=f"Planner 模型已切换为 {next_model}。",
+        details=[
+            {"label": "Provider", "value": "dashscope"},
+            {"label": "旧模型", "value": old_model},
+            {"label": "新模型", "value": next_model},
+            {"label": "配置文件", "value": "config.json5 已更新"},
+            {"label": "Reload", "value": "runtime_config / agent_models"},
+        ],
+        rollback_command=f"/config planner.model {old_model}",
+    )
+
+
 def _agent_chat_config() -> dict[str, Any]:
-    raw_config = get_project_config_value("models.agent_chat", None, reload=True)
-    if isinstance(raw_config, dict):
-        return raw_config
-    if isinstance(raw_config, str):
-        try:
-            parsed = json.loads(raw_config)
-        except json.JSONDecodeError:
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
-    return {
-        "provider": "dashscope",
-        "model": settings.chat_model or AGENT_CHAT_MODEL,
-        "streaming": True,
-    }
+    return current_agent_chat_config()
+
+
+def _agent_model_details(agent_chat: dict[str, Any], planner_model: str) -> list[dict[str, Any]]:
+    return [
+        {"label": "主聊天模型", "value": f"{agent_chat.get('provider', 'dashscope')} / {agent_chat.get('model', AGENT_CHAT_MODEL)}"},
+        {"label": "Planner", "value": f"dashscope / {planner_model}"},
+    ]
 
 
 def _extract_space_arg(raw_command: str, *, prefixes: tuple[str, ...]) -> str:

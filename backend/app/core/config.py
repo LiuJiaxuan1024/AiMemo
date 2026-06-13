@@ -12,6 +12,13 @@ _PROJECT_CONFIG = None
 _WRITABLE_PROJECT_CONFIG_PATHS = {
     "elf.voice.mode",
     "elf.voice.default_profile_id",
+    "models.agent_chat",
+    "models.agent_chat.model",
+    "models.agent_chat.provider",
+    "models.slots.agent_chat",
+    "models.slots.agent_chat.model",
+    "models.slots.agent_chat.provider",
+    "models.planner.model",
 }
 
 
@@ -108,14 +115,15 @@ def _set_nested_config_value(config: dict[str, Any], path: str, value: Any) -> N
 
 
 def _patch_known_project_config_text(text: str, path: str, value: Any) -> str | None:
-    if not path.startswith("elf."):
+    top_key = path.split(".", 1)[0]
+    if top_key not in {"elf", "models"}:
         return None
-    elf_span = _find_object_value_span(text, "elf", 0, len(text))
+    top_span = _find_object_value_span(text, top_key, 0, len(text))
     parts = path.split(".")[1:]
-    if elf_span is None:
+    if top_span is None:
         literal = _nested_literal(parts, _json5_literal(value), indent="    ")
-        return _insert_top_level_key(text, "elf", literal)
-    return _patch_object_path(text, elf_span[0], elf_span[1], parts, _json5_literal(value))
+        return _insert_top_level_key(text, top_key, literal)
+    return _patch_object_path(text, top_span[0], top_span[1], parts, _json5_literal(value))
 
 
 def _json5_literal(value: Any) -> str:
@@ -184,6 +192,8 @@ def _find_object_value_span(text: str, key: str, start: int, end: int) -> tuple[
 def _find_direct_value_span(text: str, key: str, start: int, end: int) -> tuple[int, int] | None:
     pattern = re.compile(rf'"{re.escape(key)}"\s*:', re.MULTILINE)
     for match in pattern.finditer(text, start, end):
+        if _is_in_json5_comment(text, start, match.start()):
+            continue
         if _brace_depth(text, start, match.start()) != 1:
             continue
         value_start = _skip_ws(text, match.end(), end)
@@ -258,6 +268,54 @@ def _find_matching_brace(text: str, start: int, end: int) -> int | None:
             if depth == 0:
                 return index
     return None
+
+
+def _is_in_json5_comment(text: str, start: int, index: int) -> bool:
+    in_string = False
+    quote = ""
+    escaped = False
+    in_line_comment = False
+    in_block_comment = False
+    cursor = start
+    while cursor < index:
+        char = text[cursor]
+        next_char = text[cursor + 1] if cursor + 1 < index else ""
+        if in_line_comment:
+            if char == "\n":
+                in_line_comment = False
+            cursor += 1
+            continue
+        if in_block_comment:
+            if char == "*" and next_char == "/":
+                in_block_comment = False
+                cursor += 2
+                continue
+            cursor += 1
+            continue
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                in_string = False
+            cursor += 1
+            continue
+        if char in {'"', "'"}:
+            in_string = True
+            quote = char
+            cursor += 1
+            continue
+        if char == "/" and next_char == "/":
+            in_line_comment = True
+            cursor += 2
+            continue
+        if char == "/" and next_char == "*":
+            in_block_comment = True
+            cursor += 2
+            continue
+        cursor += 1
+    return in_line_comment or in_block_comment
 
 
 def _brace_depth(text: str, start: int, end: int) -> int:
@@ -399,6 +457,28 @@ class Settings(BaseSettings):
             ["image/jpeg", "image/png", "image/gif", "image/webp"],
         )
     ]
+    storage_provider: str = str(_config_value("storage.provider", "local_mock"))
+    storage_local_mock_dir: str = str(_config_value("storage.local_mock.dir", "./data/cloud_storage_mock"))
+    storage_aliyun_region: str = str(_config_value("storage.aliyun_oss.region", "cn-hangzhou"))
+    storage_aliyun_bucket: str = str(_config_value("storage.aliyun_oss.bucket", ""))
+    storage_aliyun_endpoint: str = str(
+        _config_value("storage.aliyun_oss.endpoint", "https://oss-cn-hangzhou.aliyuncs.com")
+    )
+    storage_aliyun_access_key_id_env: str = str(
+        _config_value("storage.aliyun_oss.access_key_id_env", "ALIYUN_ACCESS_KEY_ID")
+    )
+    storage_aliyun_access_key_secret_env: str = str(
+        _config_value("storage.aliyun_oss.access_key_secret_env", "ALIYUN_ACCESS_KEY_SECRET")
+    )
+    storage_default_storage_class: str = str(_config_value("storage.aliyun_oss.default_storage_class", "Standard"))
+    storage_signed_url_ttl_seconds: int = int(_config_value("storage.aliyun_oss.signed_url_ttl_seconds", 900))
+    storage_sync_enabled: bool = bool(_config_value("storage.sync.enabled", False))
+    storage_sync_user_id: str = str(_config_value("storage.sync.user_id", "local-user"))
+    storage_sync_pull_interval_seconds: int = int(_config_value("storage.sync.pull_interval_seconds", 900))
+    storage_sync_push_interval_seconds: int = int(_config_value("storage.sync.push_interval_seconds", 900))
+    storage_sync_pull_on_startup: bool = bool(_config_value("storage.sync.pull_on_startup", True))
+    storage_sync_push_on_idle_seconds: int = int(_config_value("storage.sync.push_on_idle_seconds", 30))
+    storage_sync_conflict_policy: str = str(_config_value("storage.sync.conflict_policy", "keep_both"))
     knowledge_image_text_extraction_mode: str = str(
         _config_value("knowledge.image_text_extraction.mode", "qwen_vl_ocr")
     )
@@ -419,6 +499,12 @@ class Settings(BaseSettings):
     )
     knowledge_image_text_extraction_timeout_seconds: int = int(
         _config_value("knowledge.image_text_extraction.timeout_seconds", 60)
+    )
+    knowledge_image_text_extraction_max_attempts: int = int(
+        _config_value("knowledge.image_text_extraction.max_attempts", 3)
+    )
+    knowledge_image_text_extraction_retry_backoff_seconds: float = float(
+        _config_value("knowledge.image_text_extraction.retry_backoff_seconds", 0.5)
     )
     knowledge_image_ocr_languages: str = str(
         _config_value("knowledge.image_text_extraction.ocr_languages", "chi_sim+eng")

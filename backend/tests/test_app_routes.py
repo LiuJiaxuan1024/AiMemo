@@ -9,6 +9,7 @@ def test_app_registers_search_routes():
     assert "/api/search/notes" in paths
     assert "/api/conversations" in paths
     assert "/api/conversations/{conversation_id}/messages" in paths
+    assert "/api/conversations/{conversation_id}/export" in paths
     assert "/api/conversations/{conversation_id}/chat" in paths
     delete_route = next(
         (
@@ -32,6 +33,10 @@ def test_app_registers_search_routes():
     assert "/api/background_tasks/{task_id}" in paths
     assert "/api/background_tasks/{task_id}/output" in paths
     assert "/api/background_tasks/{task_id}/kill" in paths
+    assert "/api/cloud-sync/status" in paths
+    assert "/api/cloud-sync/pull" in paths
+    assert "/api/cloud-sync/push" in paths
+    assert "/api/cloud-sync/sync" in paths
 
 
 def test_frontend_static_module_mime_types_are_registered():

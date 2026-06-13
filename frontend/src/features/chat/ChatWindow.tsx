@@ -1,5 +1,6 @@
 import { FormEvent, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { CheckSquare, Download, Square, X } from "lucide-react";
 
 import {
   cancelTurn,
@@ -7,6 +8,7 @@ import {
   deleteConversation,
   deleteMessageBranch,
   executeCommand,
+  exportConversationHtml,
   getTurnGraph,
   listActiveTurns,
   listCommands,
@@ -63,6 +65,9 @@ export function ChatWindow() {
   const [isGraphClosing, setIsGraphClosing] = useState(false);
   const [activeFollowupSourceId, setActiveFollowupSourceId] = useState<number | null>(null);
   const [activeFollowupSegmentId, setActiveFollowupSegmentId] = useState<string | null>(null);
+  const [isExportMode, setIsExportMode] = useState(false);
+  const [selectedExportMessageIds, setSelectedExportMessageIds] = useState<Set<number>>(() => new Set());
+  const [isExportingConversation, setIsExportingConversation] = useState(false);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -95,6 +100,13 @@ export function ChatWindow() {
     const lastMessage = messages[messages.length - 1];
     return `${messages.length}:${lastMessage?.id ?? ""}:${lastMessage?.content.length ?? 0}`;
   }, [messages]);
+  const exportableMessageIds = useMemo(
+    () =>
+      messages
+        .filter((message) => !message.ui_hidden && message.id > 0)
+        .map((message) => message.id),
+    [messages],
+  );
 
   const setError = useCallback((conversationId: number, value: string) => {
     streamingStore.patch(conversationId, { error: value });
@@ -160,6 +172,11 @@ export function ChatWindow() {
     listCommands(activeConversationId)
       .then((response) => setCommands(response.items))
       .catch(() => setCommands([]));
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    setIsExportMode(false);
+    setSelectedExportMessageIds(new Set());
   }, [activeConversationId]);
 
   const updateAutoScrollIntent = useCallback(() => {
@@ -880,6 +897,71 @@ export function ChatWindow() {
     setActiveFollowupSegmentId(segmentId ?? null);
   }
 
+  function toggleExportMode() {
+    setIsExportMode((current) => {
+      if (current) {
+        setSelectedExportMessageIds(new Set());
+      } else {
+        setSelectedExportMessageIds(new Set(exportableMessageIds));
+      }
+      return !current;
+    });
+  }
+
+  function toggleExportMessage(messageId: number) {
+    if (messageId <= 0) {
+      return;
+    }
+    setSelectedExportMessageIds((current) => {
+      const next = new Set(current);
+      if (next.has(messageId)) {
+        next.delete(messageId);
+      } else {
+        next.add(messageId);
+      }
+      return next;
+    });
+  }
+
+  function selectAllExportMessages() {
+    setSelectedExportMessageIds(new Set(exportableMessageIds));
+  }
+
+  function clearExportSelection() {
+    setSelectedExportMessageIds(new Set());
+  }
+
+  async function handleExportConversation(includeAll = false) {
+    if (!activeConversationId) {
+      return;
+    }
+    const messageIds = Array.from(selectedExportMessageIds);
+    if (!includeAll && messageIds.length === 0) {
+      setError(activeConversationId, "请选择要导出的消息，或使用“导出全部”。");
+      return;
+    }
+    setIsExportingConversation(true);
+    setError(activeConversationId, "");
+    try {
+      const { blob, filename } = await exportConversationHtml(activeConversationId, {
+        messageIds,
+        includeAll,
+        includeFollowups: true,
+        includeGraphs: true,
+      });
+      downloadBlob(blob, filename);
+      setIsExportMode(false);
+      setSelectedExportMessageIds(new Set());
+    } catch (currentError) {
+      setError(
+        activeConversationId,
+        currentError instanceof Error ? currentError.message : "导出对话失败",
+      );
+    } finally {
+      setIsExportingConversation(false);
+    }
+  }
+
   async function handleSaveKnowledgeMounts(spaceIds: number[]) {
     if (!activeConversationId) {
       return;
@@ -901,13 +983,22 @@ export function ChatWindow() {
         onSelectConversation={handleSelectConversation}
       />
 
-      <section className="chat-main">
+      <section className={`chat-main ${isExportMode ? "chat-main--exporting" : ""}`}>
         <header className="chat-main-header">
           <div>
             <h2>{activeConversation?.title ?? "新对话"}</h2>
             <p>{activeConversation?.langgraph_thread_id ?? "准备连接 Memory Chat Graph"}</p>
           </div>
           <div className="chat-main-header__tools">
+            <button
+              className={`chat-export-trigger ${isExportMode ? "is-active" : ""}`}
+              disabled={!activeConversationId || exportableMessageIds.length === 0 || isStreaming}
+              onClick={toggleExportMode}
+              type="button"
+            >
+              {isExportMode ? <X aria-hidden="true" size={15} /> : <Download aria-hidden="true" size={15} />}
+              {isExportMode ? "退出导出" : "导出"}
+            </button>
             <KnowledgeMountControl
               conversationId={activeConversationId}
               disabled={isStreaming}
@@ -918,13 +1009,46 @@ export function ChatWindow() {
           </div>
         </header>
 
+        {isExportMode ? (
+          <div className="chat-export-toolbar" role="toolbar" aria-label="导出对话">
+            <span>{selectedExportMessageIds.size} / {exportableMessageIds.length} 已选</span>
+            <button onClick={selectAllExportMessages} type="button">
+              <CheckSquare aria-hidden="true" size={15} />
+              全选
+            </button>
+            <button onClick={clearExportSelection} type="button">
+              <Square aria-hidden="true" size={15} />
+              全部取消
+            </button>
+            <button
+              disabled={selectedExportMessageIds.size === 0 || isExportingConversation}
+              onClick={() => void handleExportConversation(false)}
+              type="button"
+            >
+              <Download aria-hidden="true" size={15} />
+              导出选中
+            </button>
+            <button
+              disabled={isExportingConversation}
+              onClick={() => void handleExportConversation(true)}
+              type="button"
+            >
+              <Download aria-hidden="true" size={15} />
+              导出全部
+            </button>
+          </div>
+        ) : null}
+
         <div className={`chat-dialogue-zone ${activeFollowupSource ? "chat-dialogue-zone--with-followups" : ""}`}>
           <MessageList
             activeFollowupSegmentId={activeFollowupSegmentId}
             activeFollowupSourceId={activeFollowupSourceId}
             endRef={messagesEndRef}
+            exportMode={isExportMode}
+            onToggleExportMessage={toggleExportMessage}
             listRef={messageListRef}
             messages={messages}
+            selectedExportMessageIds={selectedExportMessageIds}
             onExecuteCommandSuggestion={handleExecuteCommandSuggestion}
             onOpenFollowups={handleOpenFollowups}
             onOpenGraph={handleOpenGraph}
@@ -1088,6 +1212,17 @@ function revokePendingAttachmentUrls(attachments: PendingChatAttachment[]) {
       URL.revokeObjectURL(attachment.previewUrl);
     }
   }
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename || "conversation-export.html";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function hydrateSegmentFollowups(messages: DraftAssistantMessage[]): DraftAssistantMessage[] {
