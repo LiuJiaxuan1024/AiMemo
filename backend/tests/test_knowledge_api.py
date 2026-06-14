@@ -491,6 +491,69 @@ def test_targeted_retry_backfills_legacy_image_assets(session: Session, tmp_path
     assert image_assets[0].error_code == "IMAGE_ASSET_BACKFILLED_UNPROCESSED"
 
 
+def test_force_retry_failed_image_assets_allows_non_retryable_failures(session: Session) -> None:
+    from app.models.knowledge import KnowledgeDocument, KnowledgeImageAsset, KnowledgeSpace
+
+    client = _client(session)
+
+    space = KnowledgeSpace(name="手动图片重试")
+    session.add(space)
+    session.flush()
+    assert space.id is not None
+    document = KnowledgeDocument(
+        space_id=space.id,
+        title="manual-retry",
+        source_type="file",
+        original_filename="manual.pptx",
+        storage_path="files/manual/original.pptx",
+        content_hash="hash-manual",
+        parser="pptx",
+        status="ready",
+        image_asset_count=1,
+        image_asset_processed_count=0,
+        image_asset_failed_count=1,
+    )
+    session.add(document)
+    session.flush()
+    assert document.id is not None
+    image_asset = KnowledgeImageAsset(
+        space_id=space.id,
+        document_id=document.id,
+        asset_id="slide-1-image-1",
+        asset_uid="non-retryable-asset",
+        parser="pptx",
+        location_label="Slide 1 图片 1",
+        status="failed",
+        retryable=False,
+        attempt_count=1,
+        error_code="IMAGE_TEXT_EMPTY",
+        error_message="model returned no indexable image text.",
+    )
+    session.add(image_asset)
+    session.commit()
+
+    auto_response = client.post(
+        f"/api/knowledge/documents/{document.id}/image-assets/retry-failed",
+        json={"only_retryable": True, "max_assets": 20},
+    )
+    assert auto_response.status_code == 409
+    session.refresh(document)
+    assert document.image_asset_failed_count == 0
+    assert document.image_asset_warning_count == 1
+
+    force_response = client.post(
+        f"/api/knowledge/documents/{document.id}/image-assets/retry-failed",
+        json={"only_retryable": False, "max_assets": 20},
+    )
+
+    assert force_response.status_code == 200
+    payload = force_response.json()
+    assert payload["queued_asset_count"] == 1
+    assert payload["document"]["image_asset_failed_count"] == 0
+    assert payload["document"]["image_asset_warning_count"] == 1
+    assert payload["job"]["type"] == "knowledge_image_retry"
+
+
 def test_retry_failed_document_processing_requeues_without_failed_image_count(session: Session, tmp_path, monkeypatch) -> None:
     from app.models.knowledge import KnowledgeDocument, KnowledgeSpace
     from app.services import knowledge_document_service

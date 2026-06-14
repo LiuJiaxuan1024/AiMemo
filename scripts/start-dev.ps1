@@ -2,7 +2,8 @@ param(
   [switch]$SkipInstall,
   [switch]$NoDesktop,
   [switch]$SkipDoctor,
-  [switch]$SeparateWindows
+  [switch]$SeparateWindows,
+  [switch]$ProfileStartup
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,6 +17,35 @@ $stopScript = Join-Path $PSScriptRoot "stop-dev.ps1"
 $frontendDir = Join-Path $repoRoot "frontend"
 $desktopSkipReason = ""
 $devLogDir = Join-Path $repoRoot "data\dev_logs"
+$startupProfiler = [System.Diagnostics.Stopwatch]::StartNew()
+
+function Write-StartupProfile {
+  param([string]$Step)
+
+  if (-not $ProfileStartup) {
+    return
+  }
+
+  $elapsed = $startupProfiler.Elapsed.TotalSeconds
+  Write-Host ("[startup {0,7:N2}s] {1}" -f $elapsed, $Step)
+}
+
+function Invoke-ProfiledStep {
+  param(
+    [string]$Name,
+    [scriptblock]$Script
+  )
+
+  Write-StartupProfile "begin $Name"
+  $stepTimer = [System.Diagnostics.Stopwatch]::StartNew()
+  try {
+    & $Script
+  }
+  finally {
+    $stepTimer.Stop()
+    Write-StartupProfile ("end {0} ({1:N2}s)" -f $Name, $stepTimer.Elapsed.TotalSeconds)
+  }
+}
 
 function Assert-CommandAvailable {
   param(
@@ -363,20 +393,25 @@ function Start-AiMemoDevProcess {
   return $process
 }
 
-Invoke-QuickDoctor
-Assert-NodeVersion
-Assert-AiMemoNotAlreadyRunning
-Ensure-FrontendDependencies
-Ensure-FrontendDistForBackendApp
+Write-StartupProfile "start-dev.ps1 begin"
+Invoke-ProfiledStep -Name "doctor quick check" -Script { Invoke-QuickDoctor }
+Invoke-ProfiledStep -Name "node version check" -Script { Assert-NodeVersion }
+Invoke-ProfiledStep -Name "existing process check" -Script { Assert-AiMemoNotAlreadyRunning }
+Invoke-ProfiledStep -Name "frontend dependency check" -Script { Ensure-FrontendDependencies }
+Invoke-ProfiledStep -Name "frontend dist freshness/build" -Script { Ensure-FrontendDistForBackendApp }
 
 $hostName = if ($env:AIMEMO_HOST) { $env:AIMEMO_HOST } else { "127.0.0.1" }
 $preferredBackendPort = if ($env:AIMEMO_BACKEND_PORT) { [int]$env:AIMEMO_BACKEND_PORT } else { 8000 }
 $preferredFrontendPort = if ($env:AIMEMO_FRONTEND_PORT) { [int]$env:AIMEMO_FRONTEND_PORT } else { 5173 }
 $preferredDesktopPort = if ($env:AIMEMO_DESKTOP_PORT) { [int]$env:AIMEMO_DESKTOP_PORT } else { 1420 }
-$backendPort = Find-AvailablePort -HostName $hostName -PreferredPort $preferredBackendPort
-$frontendPort = Find-AvailablePort -HostName $hostName -PreferredPort $preferredFrontendPort
-$desktopPort = Find-AvailablePort -HostName $hostName -PreferredPort $preferredDesktopPort
-$desktopEnabled = Ensure-DesktopDependencies
+Invoke-ProfiledStep -Name "port selection" -Script {
+  $script:backendPort = Find-AvailablePort -HostName $hostName -PreferredPort $preferredBackendPort
+  $script:frontendPort = Find-AvailablePort -HostName $hostName -PreferredPort $preferredFrontendPort
+  $script:desktopPort = Find-AvailablePort -HostName $hostName -PreferredPort $preferredDesktopPort
+}
+Invoke-ProfiledStep -Name "desktop dependency check" -Script {
+  $script:desktopEnabled = Ensure-DesktopDependencies
+}
 $env:AIMEMO_HOST = $hostName
 $env:AIMEMO_BACKEND_PORT = [string]$backendPort
 $env:AIMEMO_FRONTEND_PORT = [string]$frontendPort
@@ -384,6 +419,9 @@ $env:AIMEMO_DESKTOP_PORT = [string]$desktopPort
 $env:AIMEMO_BACKEND_URL = "http://${hostName}:$backendPort"
 $env:VITE_API_BASE_URL = $env:AIMEMO_BACKEND_URL
 $env:VITE_AIMEMO_BACKEND_URL = $env:AIMEMO_BACKEND_URL
+if ($ProfileStartup) {
+  $env:AIMEMO_PROFILE_STARTUP = "1"
+}
 
 Write-Host "Starting AiMemo backend, frontend, and Memo Elf..."
 Write-PortFallback -Name "Backend" -PreferredPort $preferredBackendPort -ActualPort $backendPort
@@ -406,17 +444,29 @@ if ($SkipInstall) {
   $backendArgs += "-SkipInstall"
   $frontendArgs += "-SkipInstall"
 }
+if ($ProfileStartup) {
+  $backendArgs += "-ProfileStartup"
+  $frontendArgs += "-ProfileStartup"
+}
 
-$backendProcess = Start-AiMemoDevProcess -Name "backend" -ArgumentList $backendArgs -WorkingDirectory $repoRoot
-Wait-HttpReady -Url "http://${hostName}:$backendPort/api/health" -Name "Backend" -TimeoutSeconds 75 | Out-Null
-$frontendProcess = Start-AiMemoDevProcess -Name "frontend" -ArgumentList $frontendArgs -WorkingDirectory $repoRoot
+Invoke-ProfiledStep -Name "start backend process" -Script {
+  $script:backendProcess = Start-AiMemoDevProcess -Name "backend" -ArgumentList $backendArgs -WorkingDirectory $repoRoot
+}
+Invoke-ProfiledStep -Name "wait backend /api/health" -Script {
+  Wait-HttpReady -Url "http://${hostName}:$backendPort/api/health" -Name "Backend" -TimeoutSeconds 75 | Out-Null
+}
+Invoke-ProfiledStep -Name "start frontend process" -Script {
+  $script:frontendProcess = Start-AiMemoDevProcess -Name "frontend" -ArgumentList $frontendArgs -WorkingDirectory $repoRoot
+}
 if ($desktopEnabled) {
   $desktopCommand = "npm run dev"
   Start-Sleep -Seconds 2
-  $desktopProcess = Start-AiMemoDevProcess `
-    -Name "desktop" `
-    -ArgumentList @("-ExecutionPolicy", "Bypass", "-Command", $desktopCommand) `
-    -WorkingDirectory $desktopDir
+  Invoke-ProfiledStep -Name "start desktop process" -Script {
+    $script:desktopProcess = Start-AiMemoDevProcess `
+      -Name "desktop" `
+      -ArgumentList @("-ExecutionPolicy", "Bypass", "-Command", $desktopCommand) `
+      -WorkingDirectory $desktopDir
+  }
 }
 
 if ($SeparateWindows) {
@@ -426,3 +476,4 @@ if ($SeparateWindows) {
   Write-Host "Use 'aimemo stop' to stop them."
   Write-Host "Use 'aimemo start -SeparateWindows' if you need live service consoles."
 }
+Write-StartupProfile "start-dev.ps1 done"

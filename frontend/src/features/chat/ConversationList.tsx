@@ -1,4 +1,4 @@
-import { MessageSquare, Plus, Trash2 } from "lucide-react";
+import { Check, MessageSquare, Plus, Trash2 } from "lucide-react";
 
 import { Button } from "../../shared/ui";
 import { formatRelativeTime } from "./formatRelativeTime";
@@ -7,17 +7,23 @@ import type { Conversation } from "./types";
 interface ConversationListProps {
   activeConversationId: number | undefined;
   conversations: Conversation[];
+  exportMode?: boolean;
   onDeleteConversation: (conversation: Conversation) => void;
+  onToggleExportConversation?: (conversationId: number) => void;
   onNewConversation: () => void;
   onSelectConversation: (conversation: Conversation) => void;
+  selectedExportConversationIds?: Set<number>;
 }
 
 export function ConversationList({
   activeConversationId,
   conversations,
+  exportMode = false,
   onDeleteConversation,
+  onToggleExportConversation,
   onNewConversation,
   onSelectConversation,
+  selectedExportConversationIds = new Set(),
 }: ConversationListProps) {
   return (
     <aside className="chat-sidebar">
@@ -62,18 +68,38 @@ export function ConversationList({
                   ) : null}
                 </span>
               </button>
-              <button
-                aria-label={`删除对话「${conversation.title}」`}
-                className="chat-conv-card__delete"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onDeleteConversation(conversation);
-                }}
-                title="删除对话并释放相关资源"
-                type="button"
-              >
-                <Trash2 size={14} aria-hidden="true" />
-              </button>
+              {exportMode ? (
+                <button
+                  aria-label={
+                    selectedExportConversationIds.has(conversation.id)
+                      ? `取消导出对话「${conversation.title}」`
+                      : `选择导出对话「${conversation.title}」`
+                  }
+                  aria-pressed={selectedExportConversationIds.has(conversation.id)}
+                  className="chat-conv-card__export-check"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onToggleExportConversation?.(conversation.id);
+                  }}
+                  title={selectedExportConversationIds.has(conversation.id) ? "取消导出此对话" : "选择导出此对话"}
+                  type="button"
+                >
+                  {selectedExportConversationIds.has(conversation.id) ? <Check size={14} aria-hidden="true" /> : null}
+                </button>
+              ) : (
+                <button
+                  aria-label={`删除对话「${conversation.title}」`}
+                  className="chat-conv-card__delete"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onDeleteConversation(conversation);
+                  }}
+                  title="删除对话并释放相关资源"
+                  type="button"
+                >
+                  <Trash2 size={14} aria-hidden="true" />
+                </button>
+              )}
             </div>
           );
         })}

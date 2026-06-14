@@ -48,6 +48,10 @@ export function MermaidGraphView({
   const [isCtrlPressed, setIsCtrlPressed] = useState(false);
   const nodeIds = useMemo(() => extractNodeIds(chart), [chart]);
   const themeVariablesKey = JSON.stringify(themeVariables);
+  const renderDomId = useMemo(
+    () => `mermaid-graph-${id}-${stableHash(String(renderKey))}`,
+    [id, renderKey],
+  );
   const mergedThemeVariables = useMemo(
     () => ({
       ...DEFAULT_THEME_VARIABLES,
@@ -55,6 +59,10 @@ export function MermaidGraphView({
     }),
     [themeVariablesKey],
   );
+
+  useEffect(() => {
+    setViewport({ scale: 1, x: 0, y: 0 });
+  }, [renderKey]);
 
   useEffect(() => {
     if (!chart) {
@@ -73,13 +81,12 @@ export function MermaidGraphView({
           theme: "base",
           themeVariables: mergedThemeVariables,
         });
-        return mermaid.render(`mermaid-graph-${id}-${renderKey}`, chart);
+        return mermaid.render(renderDomId, chart);
       })
       .then((result) => {
         if (!canceled) {
           setSvg(result.svg);
           setError("");
-          setViewport({ scale: 1, x: 0, y: 0 });
         }
       })
       .catch((currentError: unknown) => {
@@ -92,7 +99,7 @@ export function MermaidGraphView({
     return () => {
       canceled = true;
     };
-  }, [chart, id, renderKey, mergedThemeVariables]);
+  }, [chart, renderDomId, mergedThemeVariables]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -354,6 +361,14 @@ function normalizeMermaidNodeText(value: string) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function stableHash(value: string) {
+  let hash = 5381;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 33) ^ value.charCodeAt(index);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 function extractNodeIds(chart: string) {

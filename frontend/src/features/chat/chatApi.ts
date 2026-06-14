@@ -13,6 +13,7 @@ import type {
   SegmentFollowupRequest,
   UserInputAnswer,
 } from "./types";
+import type { ConversationExportSnapshot, ConversationMultiExportSnapshot } from "../chat_view/types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -80,7 +81,7 @@ export async function exportConversationHtml(
     body: JSON.stringify({
       message_ids: input.messageIds ?? [],
       include_all: input.includeAll ?? false,
-      include_graphs: input.includeGraphs ?? true,
+      include_graphs: input.includeGraphs ?? false,
       include_followups: input.includeFollowups ?? true,
     }),
   });
@@ -92,6 +93,35 @@ export async function exportConversationHtml(
     blob: await response.blob(),
     filename: filenameFromContentDisposition(response.headers.get("content-disposition")) ?? "conversation-export.html",
   };
+}
+
+export function exportConversationSnapshot(
+  conversationId: number,
+  input: ConversationExportRequest,
+): Promise<ConversationExportSnapshot> {
+  return request<ConversationExportSnapshot>(`/api/conversations/${conversationId}/export/snapshot`, {
+    method: "POST",
+    body: JSON.stringify({
+      message_ids: input.messageIds ?? [],
+      include_all: input.includeAll ?? false,
+      include_graphs: input.includeGraphs ?? false,
+      include_followups: input.includeFollowups ?? true,
+    }),
+  });
+}
+
+export function exportConversationSnapshots(
+  conversationIds: number[],
+  input: Pick<ConversationExportRequest, "includeGraphs" | "includeFollowups"> = {},
+): Promise<ConversationMultiExportSnapshot> {
+  return request<ConversationMultiExportSnapshot>("/api/conversations/export/snapshots", {
+    method: "POST",
+    body: JSON.stringify({
+      conversation_ids: conversationIds,
+      include_graphs: input.includeGraphs ?? false,
+      include_followups: input.includeFollowups ?? true,
+    }),
+  });
 }
 
 export function listConversationKnowledgeMounts(conversationId: number): Promise<ConversationKnowledgeMount[]> {

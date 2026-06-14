@@ -32,6 +32,9 @@ from app.models import (
     Note,
     NoteChunk,
     RuntimeConfig,
+    SyncConflict,
+    SyncDevice,
+    SyncItem,
     SyncState,
     VoiceProfile,
 )
@@ -67,6 +70,9 @@ _AUTOINCREMENT_MODELS = (
     RuntimeConfig,
     CloudObject,
     SyncState,
+    SyncItem,
+    SyncConflict,
+    SyncDevice,
 )
 _AUTOINCREMENT_TABLES = tuple(model.__tablename__ for model in _AUTOINCREMENT_MODELS)
 
@@ -166,6 +172,10 @@ def migrate_existing_sqlite_schema() -> None:
                 "graph_name": "VARCHAR(120)",
                 "thread_id": "VARCHAR(120)",
                 "dedupe_key": "VARCHAR(200)",
+                "lane": "VARCHAR(80) DEFAULT 'default'",
+                "lock_key": "VARCHAR(240)",
+                "concurrency_policy": "VARCHAR(24) DEFAULT 'exclusive'",
+                "resource_weight": "INTEGER DEFAULT 1",
             },
         )
 
@@ -236,6 +246,7 @@ def migrate_existing_sqlite_schema() -> None:
                 "image_asset_processed_count": "INTEGER DEFAULT 0",
                 "image_text_chunk_count": "INTEGER DEFAULT 0",
                 "image_asset_failed_count": "INTEGER DEFAULT 0",
+                "image_asset_warning_count": "INTEGER DEFAULT 0",
             },
         )
 

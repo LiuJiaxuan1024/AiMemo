@@ -122,6 +122,7 @@ def build_parse_and_chunk_node(
         image_asset_count = stats["image_asset_count"]
         image_asset_processed_count = stats["image_asset_processed_count"]
         image_asset_failed_count = stats["image_asset_failed_count"]
+        image_asset_warning_count = stats["image_asset_warning_count"]
         drafts = build_chunk_drafts([*parsed.blocks, *image_blocks])
         chunks: list[KnowledgeChunkPayload] = [
             {
@@ -145,6 +146,7 @@ def build_parse_and_chunk_node(
             "image_asset_processed_count": image_asset_processed_count,
             "image_text_chunk_count": _count_image_chunks(chunks),
             "image_asset_failed_count": image_asset_failed_count,
+            "image_asset_warning_count": image_asset_warning_count,
         }
 
     return parse_and_chunk
@@ -175,6 +177,7 @@ def build_persist_chunks_node(session_factory: SessionFactory):
             document.image_asset_processed_count = int(state.get("image_asset_processed_count") or 0)
             document.image_text_chunk_count = int(state.get("image_text_chunk_count") or 0)
             document.image_asset_failed_count = int(state.get("image_asset_failed_count") or 0)
+            document.image_asset_warning_count = int(state.get("image_asset_warning_count") or 0)
             document.updated_at = utc_now()
             session.add(document)
 

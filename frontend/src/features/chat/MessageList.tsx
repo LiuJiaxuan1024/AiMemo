@@ -1,23 +1,19 @@
-import { Check, GitBranch, Maximize2, MessageCircleQuestion, MoreHorizontal, Send, Square, Trash2, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode, type RefObject } from "react";
-import { createPortal } from "react-dom";
+import { Check, GitBranch, MessageCircleQuestion, MoreHorizontal, Trash2, X } from "lucide-react";
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
 
 import { Button, EmptyState } from "../../shared/ui";
+import {
+  ChatMessageBody,
+  hasVisibleAssistantWork as sharedHasVisibleAssistantWork,
+  TypingIndicator as SharedTypingIndicator,
+} from "../chat_view/ChatMessageBody";
 import { resolveAttachmentUrl } from "./chatApi";
 import { MarkdownMessage } from "./MarkdownMessage";
-import { PulseGlyph } from "./PulseGlyph";
-import { groupThoughtsByStep } from "./streamingStore";
-import { ToolCallCard } from "./ToolCallCard";
-import { VerbRotator } from "./VerbRotator";
 import type {
   ChatThought,
   ChatAttachment,
-  CommandResult,
   DraftAssistantMessage,
-  MessageSegment,
   SegmentFollowupRequest,
-  SegmentFollowupThread,
-  ToolInvocation,
   UserInputAnswer,
   UserInputQuestion,
   UserInputRequest,
@@ -82,6 +78,11 @@ export function MessageList({
     position: { start: number; end: number } | null;
     anchor: { x: number; y: number };
   } | null>(null);
+  const [imagePreview, setImagePreview] = useState<{
+    alt: string;
+    name: string;
+    src: string;
+  } | null>(null);
   const followupInputRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
@@ -124,15 +125,30 @@ export function MessageList({
       return;
     }
     const selection = window.getSelection();
-    const selectedText = selection?.toString().replace(/\s+/g, " ").trim() ?? "";
-    if (!selection || selectedText.length < 2) {
+    if (!selection || selectionTouchesCode(selection)) {
+      setDraftFollowup(null);
+      setSelectionMenu(null);
       return;
     }
-    const target = eventTarget instanceof HTMLElement ? eventTarget.closest(".chat-message-content") : null;
+    const selectedText = selection.toString().replace(/\s+/g, " ").trim();
+    if (selectedText.length < 2) {
+      return;
+    }
+    const target = eventTarget instanceof HTMLElement
+      ? eventTarget.closest<HTMLElement>(".chat-message-content")
+      : null;
     if (!target || !target.contains(selection.anchorNode) || !target.contains(selection.focusNode)) {
       return;
     }
-    const position = resolveTextPosition(message.content, selectedText);
+    if (selectionIntersectsFollowupMark(selection, target)) {
+      setDraftFollowup(null);
+      setSelectionMenu(null);
+      return;
+    }
+    const selectionRoot = closestElement(selection.anchorNode)?.closest(".markdown-message") as HTMLElement | null;
+    const position = selectionRoot && selectionRoot.contains(selection.focusNode)
+      ? resolveSelectionTextPosition(selectionRoot, selection)
+      : resolveTextPosition(message.content, selectedText);
     if (selectionOverlapsFollowupThread(message, selectedText, position)) {
       setDraftFollowup(null);
       setSelectionMenu(null);
@@ -144,7 +160,7 @@ export function MessageList({
       message,
       original_text: selectedText,
       position,
-      anchor: clampFloatingAnchor(pointer, { width: 156, height: 46 }),
+      anchor: selectionFollowupAnchor(selection, pointer, { width: 156, height: 46 }),
     });
   }
 
@@ -181,8 +197,10 @@ export function MessageList({
     if (!draftFollowup || !question.trim()) {
       return;
     }
-    const existingThread = draftFollowup.message.followupThreads?.find(
-      (thread) => normalizeText(thread.original_text) === normalizeText(draftFollowup.original_text),
+    const existingThread = findMatchingFollowupThread(
+      draftFollowup.message,
+      draftFollowup.original_text,
+      draftFollowup.position ?? null,
     );
     onSegmentFollowup({
       source_message_id: draftFollowup.message.id,
@@ -207,7 +225,7 @@ export function MessageList({
         const canSelectForExport = exportMode && message.id > 0;
         // 优先使用 segments：streaming 期间由 streamingStore 实时拼装；done 后从落库消息恢复。
         const segments = message.segments ?? [];
-        const hasVisibleWork = hasVisibleAssistantWork(segments, thoughts, message.content);
+        const hasVisibleWork = sharedHasVisibleAssistantWork(segments, thoughts, message.content);
         const isAssistantWarmingUp =
           isStreaming &&
           !hasVisibleWork;
@@ -246,9 +264,9 @@ export function MessageList({
                   })
                 }
               >
-                {isAssistantWarmingUp ? <TypingIndicator /> : null}
+                {isAssistantWarmingUp ? <SharedTypingIndicator /> : null}
                 {isAssistant ? (
-                  <AssistantMessageBody
+                  <ChatMessageBody
                     activeSegmentId={activeFollowupSourceId === message.id ? activeFollowupSegmentId : null}
                     message={message}
                     onExecuteCommandSuggestion={onExecuteCommandSuggestion}
@@ -258,10 +276,10 @@ export function MessageList({
                     isWarmingUp={isAssistantWarmingUp}
                   />
                 ) : (
-                  <p>{message.content}</p>
+                  <MarkdownMessage content={message.content} fallback="" />
                 )}
                 {message.attachments && message.attachments.length > 0 ? (
-                  <MessageAttachments attachments={message.attachments} />
+                  <MessageAttachments attachments={message.attachments} onPreviewImage={setImagePreview} />
                 ) : null}
                 {isAssistant && message.pending_interrupt ? (
                   <UserInputInterruptCard
@@ -334,29 +352,38 @@ export function MessageList({
           onSubmit={submitDraftFollowup}
         />
       ) : null}
+      {imagePreview ? (
+        <ImagePreviewModal image={imagePreview} onClose={() => setImagePreview(null)} />
+      ) : null}
       <div ref={endRef} />
     </div>
   );
 }
 
-function MessageAttachments({ attachments }: { attachments: ChatAttachment[] }) {
+function MessageAttachments({
+  attachments,
+  onPreviewImage,
+}: {
+  attachments: ChatAttachment[];
+  onPreviewImage: (image: { alt: string; name: string; src: string }) => void;
+}) {
   return (
     <div className="chat-message-attachments">
       {attachments.map((attachment, index) => {
         const key = attachment.id ? String(attachment.id) : `${attachment.original_name}-${index}`;
         if (attachment.kind === "image" && attachment.url) {
+          const src = resolveAttachmentUrl(attachment.url);
           return (
-            <a
+            <button
               className="chat-message-attachment chat-message-attachment--image"
-              href={resolveAttachmentUrl(attachment.url)}
               key={key}
-              rel="noreferrer"
-              target="_blank"
+              onClick={() => onPreviewImage({ alt: attachment.original_name, name: attachment.original_name, src })}
               title={attachment.original_name}
+              type="button"
             >
-              <img alt={attachment.original_name} src={resolveAttachmentUrl(attachment.url)} />
+              <img alt={attachment.original_name} src={src} />
               <span>{attachment.original_name}</span>
-            </a>
+            </button>
           );
         }
         return (
@@ -470,896 +497,6 @@ function SegmentFollowupComposer({
   );
 }
 
-export function SegmentFollowupPanel({
-  activeSegmentId,
-  messages,
-  onClose,
-  onDeleteMessage,
-  onOpenGraph,
-  onOpenSegment,
-  onSegmentFollowup,
-  onStopGeneration,
-  sourceMessage,
-  thoughts = [],
-}: {
-  activeSegmentId?: string | null;
-  messages: DraftAssistantMessage[];
-  onClose: () => void;
-  onDeleteMessage: (message: DraftAssistantMessage) => void;
-  onOpenGraph: (message: DraftAssistantMessage) => void;
-  onOpenSegment?: (segmentId: string | null) => void;
-  onSegmentFollowup: (request: SegmentFollowupRequest) => void;
-  onStopGeneration: () => void;
-  sourceMessage: DraftAssistantMessage | null;
-  thoughts?: ChatThought[];
-}) {
-  const [expandedThreadKey, setExpandedThreadKey] = useState<string | null>(null);
-  const itemRefs = useRef<Record<string, HTMLDetailsElement | null>>({});
-  const threads = sourceMessage ? buildFollowupPanelThreads(sourceMessage, messages) : [];
-  const expandedThread = expandedThreadKey == null
-    ? null
-    : threads.find((thread) => thread.key === expandedThreadKey) ?? null;
-  const activeEntryKey =
-    activeSegmentId == null
-      ? null
-      : threads.find((thread) => thread.segmentId === activeSegmentId)?.key ?? null;
-
-  useEffect(() => {
-    if (!activeEntryKey) {
-      return;
-    }
-    const item = itemRefs.current[activeEntryKey];
-    if (!item) {
-      return;
-    }
-    item.open = true;
-    item.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }, [activeEntryKey, threads.length]);
-
-  function submitThreadFollowup(thread: FollowupPanelThread, question: string) {
-    if (!sourceMessage || !question.trim()) {
-      return;
-    }
-    onOpenSegment?.(thread.segmentId);
-    onSegmentFollowup({
-      source_message_id: sourceMessage.id,
-      segment_id: thread.segmentId,
-      original_text: thread.originalText,
-      user_question: question.trim(),
-      position: thread.position,
-    });
-  }
-
-  return (
-    <aside className="segment-followup-panel" aria-label="片段追问侧栏">
-      <header className="segment-followup-panel__header">
-        <div>
-          <h3>片段追问</h3>
-          <p>{sourceMessage ? "当前回复中的局部讨论" : "选择一条 AI 回复查看"}</p>
-        </div>
-        <Button aria-label="收起片段追问" onClick={onClose} size="icon" title="收起片段追问">
-          <X aria-hidden="true" size={16} />
-        </Button>
-      </header>
-
-      {!sourceMessage ? (
-        <EmptyState className="segment-followup-panel__empty">选择一条 AI 回复查看追问</EmptyState>
-      ) : null}
-      {sourceMessage && threads.length === 0 ? (
-        <EmptyState className="segment-followup-panel__empty">
-          选中回复中的文字后，可以在这里继续追问。
-        </EmptyState>
-      ) : null}
-      {threads.length > 0 ? (
-        <div className="segment-followup-panel__list">
-          {threads.map((thread, index) => (
-            <details
-              className={`segment-followup-panel__item ${activeEntryKey === thread.key ? "is-active" : ""}`}
-              key={thread.key}
-              ref={(node) => {
-                itemRefs.current[thread.key] = node;
-              }}
-              open={index === threads.length - 1 || thread.status === "pending"}
-            >
-              <summary className="segment-followup-panel__summary">
-                <span className="segment-followup-panel__badge">片段</span>
-                <span className="segment-followup-panel__source-text">{thread.originalText}</span>
-                <span className={`segment-followup-panel__status segment-followup-panel__status--${thread.status}`}>
-                  {followupStatusText(thread.status)}
-                </span>
-                <strong>{thread.turns[thread.turns.length - 1]?.question ?? "片段追问"}</strong>
-                <small>{thread.turns.length} 轮对话</small>
-                <button
-                  aria-label="放大片段追问"
-                  className="segment-followup-panel__expand"
-                  onClick={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    setExpandedThreadKey(thread.key);
-                  }}
-                  title="放大片段追问"
-                  type="button"
-                >
-                  <Maximize2 aria-hidden="true" size={14} />
-                </button>
-              </summary>
-              <div className="segment-followup-panel__answer">
-                <SegmentFollowupThreadPreview thread={thread} thoughts={thoughts} />
-              </div>
-            </details>
-          ))}
-        </div>
-      ) : null}
-      {expandedThread
-        ? createPortal(
-        <SegmentFollowupModal
-          onClose={() => setExpandedThreadKey(null)}
-          onDeleteMessage={onDeleteMessage}
-          onOpenGraph={onOpenGraph}
-          onStopGeneration={onStopGeneration}
-          onSubmitFollowup={(question) => submitThreadFollowup(expandedThread, question)}
-          thread={expandedThread}
-          thoughts={thoughts}
-        />,
-        document.body,
-      )
-        : null}
-    </aside>
-  );
-}
-
-function AssistantMessageBody({
-  activeSegmentId,
-  commandActionsDisabled = false,
-  message,
-  onExecuteCommandSuggestion,
-  onOpenSegment,
-  thoughts,
-  isWarmingUp = false,
-}: {
-  activeSegmentId?: string | null;
-  commandActionsDisabled?: boolean;
-  message: DraftAssistantMessage;
-  onExecuteCommandSuggestion?: (command: string) => Promise<void> | void;
-  onOpenSegment?: (segmentId: string) => void;
-  thoughts?: ChatThought[];
-  isWarmingUp?: boolean;
-}) {
-  const isStreaming = message.isStreaming === true;
-  const commandResult = parseCommandResult(message.content);
-  const segments = message.segments ?? [];
-  const hasSegments = segments.length > 0;
-  const stepThoughts = groupThoughtsByStep(isStreaming ? thoughts ?? [] : message.thoughts);
-  if (commandResult && !isStreaming) {
-    return (
-      <CommandResultCard
-        disabled={commandActionsDisabled}
-        onExecuteCommandSuggestion={onExecuteCommandSuggestion}
-        result={commandResult}
-      />
-    );
-  }
-  return (
-    <>
-      {hasSegments ? (
-        <ChronologicalTimeline
-          activeSegmentId={activeSegmentId}
-          segments={segments}
-          followupThreads={message.followupThreads}
-          thoughtsByStep={stepThoughts}
-          isStreaming={isStreaming}
-          onOpenSegment={onOpenSegment}
-          showWarmingUp={isWarmingUp}
-        />
-      ) : (
-        <StreamingMarkdown
-          activeSegmentId={activeSegmentId}
-          content={message.content}
-          followupThreads={message.followupThreads}
-          onOpenSegment={onOpenSegment}
-          streaming={isStreaming}
-        />
-      )}
-      {!isStreaming && !hasSegments && message.thoughts?.length ? (
-        <ThoughtRecap thoughts={message.thoughts} />
-      ) : null}
-    </>
-  );
-}
-
-function CommandResultCard({
-  disabled = false,
-  onExecuteCommandSuggestion,
-  result,
-}: {
-  disabled?: boolean;
-  onExecuteCommandSuggestion?: (command: string) => Promise<void> | void;
-  result: CommandResult;
-}) {
-  const statusLabel =
-    result.status === "success"
-      ? "已完成"
-      : result.status === "noop"
-        ? "无变更"
-        : result.status === "failed"
-          ? "失败"
-          : "待处理";
-  const [executingSuggestion, setExecutingSuggestion] = useState<string | null>(null);
-  const [selectedSpaceIds, setSelectedSpaceIds] = useState<number[]>([]);
-  const details = Array.isArray(result.details) ? result.details : [];
-  const suggestions = result.status === "needs_input" && Array.isArray(result.suggestions) ? result.suggestions : [];
-  const multiSelectPrefix = resolveKnowledgeMountMultiSelectPrefix(result);
-  const multiSelectDetails = multiSelectPrefix
-    ? details
-        .map((detail) => ({ ...detail, space_id: detailSpaceId(detail) }))
-        .filter((detail): detail is typeof detail & { space_id: number } => detail.space_id != null)
-    : [];
-  const commandSuggestions = multiSelectDetails.length > 0
-    ? []
-    : suggestions.filter((suggestion) => suggestion.trim().startsWith("/"));
-  const textSuggestions = suggestions.filter((suggestion) => !suggestion.trim().startsWith("/"));
-
-  useEffect(() => {
-    setSelectedSpaceIds([]);
-  }, [result.command, result.command_id]);
-
-  const multiSelectSubmitCommand =
-    multiSelectPrefix && selectedSpaceIds.length > 0
-      ? `${multiSelectPrefix} ${selectedSpaceIds.join(",")}`
-      : "";
-
-  function toggleSelectedSpace(spaceId: number) {
-    setSelectedSpaceIds((current) =>
-      current.includes(spaceId)
-        ? current.filter((item) => item !== spaceId)
-        : [...current, spaceId],
-    );
-  }
-
-  return (
-    <section className={`chat-command-result is-${result.status}`}>
-      <header>
-        <span className="chat-command-result__status">
-          {result.status === "failed" ? (
-            <X aria-hidden="true" size={14} />
-          ) : result.status === "needs_input" ? (
-            <Send aria-hidden="true" size={14} />
-          ) : (
-            <Check aria-hidden="true" size={14} />
-          )}
-          {statusLabel}
-        </span>
-        <code>{result.command}</code>
-      </header>
-      <p>{result.message}</p>
-      {multiSelectDetails.length > 0 ? (
-        <div className="chat-interrupt-options chat-command-result__multi-select" aria-label="知识空间多选">
-          {multiSelectDetails.map((detail) => {
-            const checked = selectedSpaceIds.includes(detail.space_id);
-            return (
-              <button
-                aria-pressed={checked}
-                className={`chat-interrupt-option chat-command-result__multi-option ${checked ? "selected" : ""}`}
-                disabled={disabled || executingSuggestion !== null}
-                key={`${detail.label}-${detail.space_id}`}
-                onClick={() => toggleSelectedSpace(detail.space_id)}
-                type="button"
-              >
-                <input
-                  aria-hidden="true"
-                  checked={checked}
-                  disabled={disabled || executingSuggestion !== null}
-                  tabIndex={-1}
-                  type="checkbox"
-                  onChange={() => undefined}
-                />
-                <span className="chat-interrupt-option__mark" aria-hidden="true" />
-                <span className="chat-interrupt-option__body">
-                  <span>{detail.label}</span>
-                  <small>{String(detail.value ?? `ID ${detail.space_id}`)}</small>
-                </span>
-              </button>
-            );
-          })}
-          <div className="chat-interrupt-card__submit chat-command-result__multi-actions">
-            <button
-              disabled={
-                disabled ||
-                !onExecuteCommandSuggestion ||
-                executingSuggestion !== null ||
-                !multiSelectSubmitCommand
-              }
-              onClick={async () => {
-                if (!onExecuteCommandSuggestion || !multiSelectSubmitCommand || executingSuggestion !== null) {
-                  return;
-                }
-                setExecutingSuggestion(multiSelectSubmitCommand);
-                try {
-                  await onExecuteCommandSuggestion(multiSelectSubmitCommand);
-                } finally {
-                  setExecutingSuggestion(null);
-                }
-              }}
-              type="button"
-            >
-              {executingSuggestion === multiSelectSubmitCommand
-                ? "执行中..."
-                : `${knowledgeMountActionVerb(result)}所选 ${selectedSpaceIds.length || ""}`.trim()}
-            </button>
-          </div>
-        </div>
-      ) : details.length > 0 ? (
-        <dl>
-          {details.map((detail, index) => (
-            <div key={`${detail.label}-${index}`}>
-              <dt>{detail.label}</dt>
-              <dd>{String(detail.value ?? "")}</dd>
-            </div>
-          ))}
-        </dl>
-      ) : null}
-      {commandSuggestions.length > 0 ? (
-        <div className="chat-interrupt-options chat-command-result__choice-select" aria-label="可执行建议">
-          {commandSuggestions.map((suggestion, index) => (
-            <button
-              className="chat-interrupt-option chat-command-result__choice-option"
-              disabled={disabled || !onExecuteCommandSuggestion || executingSuggestion !== null}
-              key={suggestion}
-              onClick={async () => {
-                if (!onExecuteCommandSuggestion || executingSuggestion !== null) {
-                  return;
-                }
-                setExecutingSuggestion(suggestion);
-                try {
-                  await onExecuteCommandSuggestion(suggestion);
-                } finally {
-                  setExecutingSuggestion(null);
-                }
-              }}
-              type="button"
-            >
-              <input aria-hidden="true" checked={false} tabIndex={-1} type="radio" onChange={() => undefined} />
-              <span className="chat-interrupt-option__mark" aria-hidden="true" />
-              <span className="chat-interrupt-option__body">
-                <span>
-                  {executingSuggestion === suggestion
-                    ? "执行中..."
-                    : formatCommandChoiceLabel(result, suggestion, details[index])}
-                </span>
-                <small>{suggestion}</small>
-              </span>
-            </button>
-          ))}
-        </div>
-      ) : null}
-      {textSuggestions.length > 0 ? (
-        <ul>
-          {textSuggestions.map((suggestion) => (
-            <li key={suggestion}>{suggestion}</li>
-          ))}
-        </ul>
-      ) : null}
-      <footer>
-        <span>{result.scope}</span>
-        {result.target ? <span>{result.target}</span> : null}
-        {result.rollback_command ? <code>{result.rollback_command}</code> : null}
-      </footer>
-    </section>
-  );
-}
-
-function formatCommandSuggestionLabel(result: CommandResult, suggestion: string): string {
-  const normalized = suggestion.trim().replace(/\s+/g, " ");
-  const spaceName = extractKnowledgeSpaceNameFromCommand(normalized);
-  if (result.command_id === "mount.knowledge" && spaceName) {
-    return `挂载 ${spaceName}`;
-  }
-  if (result.command_id === "unmount.knowledge" && spaceName) {
-    return `卸载 ${spaceName}`;
-  }
-  return normalized;
-}
-
-function formatCommandChoiceLabel(
-  result: CommandResult,
-  suggestion: string,
-  detail?: { label: string; value: string; [key: string]: unknown },
-): string {
-  if (detail?.label) {
-    return detail.label;
-  }
-  return formatCommandSuggestionLabel(result, suggestion);
-}
-
-function resolveKnowledgeMountMultiSelectPrefix(result: CommandResult): string {
-  if (result.status !== "needs_input") {
-    return "";
-  }
-  if (result.command_id === "mount.knowledge") {
-    return "/mount knowledge";
-  }
-  if (result.command_id === "unmount.knowledge") {
-    return "/unmount knowledge";
-  }
-  return "";
-}
-
-function knowledgeMountActionVerb(result: CommandResult): string {
-  return result.command_id === "unmount.knowledge" ? "卸载" : "挂载";
-}
-
-function detailSpaceId(detail: { [key: string]: unknown }): number | null {
-  const raw = detail.space_id;
-  if (typeof raw === "number" && Number.isFinite(raw)) {
-    return raw;
-  }
-  if (typeof raw === "string" && /^\d+$/.test(raw)) {
-    return Number(raw);
-  }
-  return null;
-}
-
-function extractKnowledgeSpaceNameFromCommand(command: string): string {
-  const match = command.match(/^\/(?:unmount|umount|mount)\s+knowledge\s+(.+)$/i);
-  if (!match) {
-    return "";
-  }
-  return match[1].trim().replace(/^["'“‘`](.*)["'”’`]$/u, "$1");
-}
-
-function parseCommandResult(content: string): CommandResult | null {
-  const match = content.match(/```aimemo-command-result\s*([\s\S]*?)```/);
-  if (!match) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(match[1]) as CommandResult;
-    return parsed?.type === "command_result" && parsed.source === "command_router" ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-interface FollowupPanelTurn {
-  assistantMessage: DraftAssistantMessage | null;
-  fallbackAnswer?: string;
-  key: string;
-  question: string;
-  status: "pending" | "answered" | "failed";
-}
-
-interface FollowupPanelThread {
-  key: string;
-  originalText: string;
-  position: { start: number; end: number } | null;
-  segmentId: string;
-  turns: FollowupPanelTurn[];
-  status: "pending" | "answered" | "failed";
-}
-
-function buildFollowupPanelThreads(
-  sourceMessage: DraftAssistantMessage,
-  messages: DraftAssistantMessage[],
-): FollowupPanelThread[] {
-  const threads = new Map<string, FollowupPanelThread>();
-  const seenTurns = new Set<string>();
-
-  function ensureThread(input: {
-    originalText: string;
-    position: { start: number; end: number } | null;
-    segmentId: string;
-  }): FollowupPanelThread {
-    const existing = threads.get(input.segmentId);
-    if (existing) {
-      return existing;
-    }
-    const created: FollowupPanelThread = {
-      key: input.segmentId,
-      originalText: input.originalText,
-      position: input.position,
-      segmentId: input.segmentId,
-      turns: [],
-      status: "answered",
-    };
-    threads.set(input.segmentId, created);
-    return created;
-  }
-
-  for (const message of messages) {
-    if (message.role !== "user") {
-      continue;
-    }
-    const payload = parseSegmentFollowupPayload(message.content);
-    if (!payload || payload.source_message_id !== sourceMessage.id) {
-      continue;
-    }
-    const assistant = messages.find(
-      (candidate) => candidate.role === "assistant" && candidate.parent_id === message.id,
-    ) ?? null;
-    const segmentId = payload.segment_id ?? createSegmentId(payload.original_text);
-    const thread = ensureThread({
-      originalText: payload.original_text,
-      position: payload.position ?? null,
-      segmentId,
-    });
-    const turnKey = `${segmentId}::${normalizeText(payload.user_question)}`;
-    seenTurns.add(turnKey);
-    thread.turns.push({
-      assistantMessage: assistant,
-      key: `${message.id}-${assistant?.id ?? "pending"}`,
-      question: payload.user_question,
-      status: assistant?.status === "failed" ? "failed" : assistant ? "answered" : "pending",
-    });
-  }
-  for (const thread of sourceMessage.followupThreads ?? []) {
-    const panelThread = ensureThread({
-      originalText: thread.original_text,
-      position: thread.position,
-      segmentId: thread.segment_id,
-    });
-    for (const followup of thread.followups) {
-      const turnKey = `${thread.segment_id}::${normalizeText(followup.user_question)}`;
-      if (seenTurns.has(turnKey)) {
-        continue;
-      }
-      seenTurns.add(turnKey);
-      panelThread.turns.push({
-        assistantMessage: null,
-        fallbackAnswer: followup.assistant_answer,
-        key: followup.followup_id,
-        question: followup.user_question,
-        status: followup.status,
-      });
-    }
-  }
-  for (const thread of threads.values()) {
-    thread.status = thread.turns.some((turn) => turn.status === "pending")
-      ? "pending"
-      : thread.turns.some((turn) => turn.status === "failed")
-        ? "failed"
-        : "answered";
-  }
-  return [...threads.values()];
-}
-
-function SegmentFollowupAnswer({
-  showGraph = false,
-  thoughts,
-  turn,
-  onOpenGraph,
-}: {
-  showGraph?: boolean;
-  thoughts: ChatThought[];
-  turn: FollowupPanelTurn;
-  onOpenGraph?: (message: DraftAssistantMessage) => void;
-}) {
-  if (turn.assistantMessage) {
-    // 与主聊天保持一致：assistantMessage 已经存在但还没有任何可见内容时（segments
-    // 全空、thoughts 还没到、content 还为空），显示 Thinking 动画告诉用户 agent
-    // 正在思考——否则放大窗口和片段侧栏看上去就像“agent 没动”。
-    const followupMessage = turn.assistantMessage;
-    const isStreaming = followupMessage.isStreaming === true;
-    const effectiveThoughts = isStreaming
-      ? thoughts
-      : followupMessage.thoughts ?? [];
-    const hasVisibleWork = hasVisibleAssistantWork(
-      followupMessage.segments ?? [],
-      effectiveThoughts,
-      followupMessage.content,
-    );
-    const isWarmingUp = isStreaming && !hasVisibleWork;
-    return (
-      <div className="segment-followup-turn__assistant">
-        {isWarmingUp ? <TypingIndicator compact /> : null}
-        <AssistantMessageBody
-          message={followupMessage}
-          thoughts={effectiveThoughts}
-          isWarmingUp={isWarmingUp}
-        />
-        {showGraph && followupMessage.turn_id ? (
-          <Button
-            aria-label="查看这轮追问 graph"
-            onClick={() => onOpenGraph?.(followupMessage)}
-            size="icon"
-            title="查看这轮追问 graph"
-          >
-            <GitBranch aria-hidden="true" size={15} />
-          </Button>
-        ) : null}
-      </div>
-    );
-  }
-  if (turn.status === "pending") {
-    return <TypingIndicator compact />;
-  }
-  if (turn.fallbackAnswer) {
-    return <MarkdownMessage content={turn.fallbackAnswer} fallback="" />;
-  }
-  return <p className="segment-followup-panel__pending">这条追问还没有回复。</p>;
-}
-
-function SegmentFollowupThreadPreview({
-  thread,
-  thoughts,
-}: {
-  thread: FollowupPanelThread;
-  thoughts: ChatThought[];
-}) {
-  return (
-    <div className="segment-followup-thread-turns">
-      {thread.turns.map((turn, index) => (
-        <section className="segment-followup-turn" key={turn.key}>
-          <p className="segment-followup-turn__question">
-            <span>Q{index + 1}</span>
-            {turn.question}
-          </p>
-          <div className="segment-followup-turn__answer">
-            <SegmentFollowupAnswer thoughts={thoughts} turn={turn} />
-          </div>
-        </section>
-      ))}
-    </div>
-  );
-}
-
-function SegmentFollowupContinueComposer({
-  disabled,
-  onStop,
-  onSubmit,
-}: {
-  disabled?: boolean;
-  onStop?: () => void;
-  onSubmit: (question: string) => void;
-}) {
-  const [question, setQuestion] = useState("");
-
-  function submit() {
-    if (!question.trim() || disabled) {
-      return;
-    }
-    onSubmit(question);
-    setQuestion("");
-  }
-
-  return (
-    <div className="segment-followup-continue">
-      <textarea
-        disabled={disabled}
-        onChange={(event) => setQuestion(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-            event.preventDefault();
-            submit();
-          }
-        }}
-        placeholder="继续追问这个片段..."
-        value={question}
-      />
-      <button
-        aria-label={disabled ? "中断生成" : "继续追问"}
-        disabled={!disabled && !question.trim()}
-        onClick={disabled ? onStop : submit}
-        title={disabled ? "中断生成" : "继续追问"}
-        type="button"
-      >
-        {disabled ? <Square aria-hidden="true" size={13} /> : <Send aria-hidden="true" size={14} />}
-      </button>
-    </div>
-  );
-}
-
-function SegmentFollowupModal({
-  onClose,
-  onDeleteMessage,
-  onOpenGraph,
-  onStopGeneration,
-  onSubmitFollowup,
-  thread,
-  thoughts,
-}: {
-  onClose: () => void;
-  onDeleteMessage: (message: DraftAssistantMessage) => void;
-  onOpenGraph: (message: DraftAssistantMessage) => void;
-  onStopGeneration: () => void;
-  onSubmitFollowup: (question: string) => void;
-  thread: FollowupPanelThread;
-  thoughts: ChatThought[];
-}) {
-  const [turnMenu, setTurnMenu] = useState<{
-    anchor: { x: number; y: number };
-    message: DraftAssistantMessage;
-  } | null>(null);
-
-  // 与主聊天一致的自动下滑：流式追加内容时 sticky 在底部；用户主动上滑超过 96px
-  // 后停止跟随，新提一轮 followup 重新启用。bodyRef 负责监听滚动距离，endRef 是
-  // 滚动目标哨兵。
-  const bodyRef = useRef<HTMLDivElement | null>(null);
-  const endRef = useRef<HTMLDivElement | null>(null);
-  const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
-
-  const scrollAnchor = useMemo(() => {
-    const lastTurn = thread.turns[thread.turns.length - 1];
-    if (!lastTurn) {
-      return `${thread.turns.length}:empty`;
-    }
-    const msg = lastTurn.assistantMessage;
-    if (!msg) {
-      return `${thread.turns.length}:pending:${thoughts.length}`;
-    }
-    const segLen = (msg.segments ?? []).reduce(
-      (sum, segment) => sum + segment.text.length + segment.tools.length,
-      0,
-    );
-    return `${thread.turns.length}:${msg.id}:${msg.content.length}:${segLen}:${thoughts.length}`;
-  }, [thread.turns, thoughts.length]);
-
-  useEffect(() => {
-    if (!shouldAutoScroll) {
-      return;
-    }
-    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [scrollAnchor, shouldAutoScroll]);
-
-  // 用户在窗口里新提一轮追问时，turn count 增加；此时不论之前是否上滑，都应回到底部。
-  const prevTurnCountRef = useRef(thread.turns.length);
-  useEffect(() => {
-    if (thread.turns.length > prevTurnCountRef.current) {
-      setShouldAutoScroll(true);
-    }
-    prevTurnCountRef.current = thread.turns.length;
-  }, [thread.turns.length]);
-
-  const handleBodyScroll = () => {
-    const el = bodyRef.current;
-    if (!el) {
-      return;
-    }
-    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-    setShouldAutoScroll(distance < 96);
-  };
-
-  useEffect(() => {
-    if (!turnMenu) {
-      return;
-    }
-    function closeTurnMenu(event: PointerEvent) {
-      if (event.target instanceof HTMLElement && event.target.closest(".segment-followup-menu")) {
-        return;
-      }
-      setTurnMenu(null);
-    }
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setTurnMenu(null);
-      }
-    }
-    document.addEventListener("pointerdown", closeTurnMenu);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeTurnMenu);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [turnMenu]);
-
-  return (
-    <div className="segment-followup-modal-backdrop" role="presentation">
-      <section className="segment-followup-modal" role="dialog" aria-label="放大片段追问" aria-modal="true">
-        <header className="segment-followup-modal__header">
-          <div>
-            <span>片段追问</span>
-            <h3>{thread.turns[thread.turns.length - 1]?.question ?? "片段小会话"}</h3>
-          </div>
-          <Button aria-label="关闭放大窗口" onClick={onClose} size="icon" title="关闭">
-            <X aria-hidden="true" size={16} />
-          </Button>
-        </header>
-        <div className="segment-followup-modal__source">
-          <span>片段</span>
-          <q>{thread.originalText}</q>
-        </div>
-        <div className="segment-followup-modal__body" ref={bodyRef} onScroll={handleBodyScroll}>
-          <div className="segment-followup-modal__turns">
-            {thread.turns.map((turn, index) => (
-              <section
-                className="segment-followup-modal__turn"
-                key={turn.key}
-                onContextMenu={(event) => {
-                  if (!turn.assistantMessage || turn.assistantMessage.isStreaming === true) {
-                    return;
-                  }
-                  event.preventDefault();
-                  setTurnMenu({
-                    anchor: clampFloatingAnchor(
-                      { x: event.clientX + 8, y: event.clientY + 8 },
-                      { width: 132, height: 46 },
-                    ),
-                    message: turn.assistantMessage,
-                  });
-                }}
-              >
-                {turn.assistantMessage && turn.assistantMessage.isStreaming !== true ? (
-                  <button
-                    aria-label="删除这轮追问"
-                    className="segment-followup-modal__delete-turn"
-                    onClick={() => onDeleteMessage(turn.assistantMessage!)}
-                    title="删除这轮追问"
-                    type="button"
-                  >
-                    <Trash2 aria-hidden="true" size={14} />
-                  </button>
-                ) : null}
-                <p className="segment-followup-turn__question">
-                  <span>Q{index + 1}</span>
-                  {turn.question}
-                </p>
-                <div className="segment-followup-turn__answer">
-                  <SegmentFollowupAnswer
-                    onOpenGraph={onOpenGraph}
-                    showGraph
-                    thoughts={thoughts}
-                    turn={turn}
-                  />
-                </div>
-              </section>
-            ))}
-          </div>
-          <div ref={endRef} />
-        </div>
-        <SegmentFollowupContinueComposer
-          disabled={thread.status === "pending"}
-          onStop={onStopGeneration}
-          onSubmit={onSubmitFollowup}
-        />
-        {turnMenu ? (
-          <SegmentFollowupMenu
-            anchor={turnMenu.anchor}
-            canDelete
-            canFollowup={false}
-            onDelete={() => {
-              onDeleteMessage(turnMenu.message);
-              setTurnMenu(null);
-            }}
-            onOpen={() => undefined}
-          />
-        ) : null}
-      </section>
-    </div>
-  );
-}
-
-function followupStatusText(status: FollowupPanelThread["status"]): string {
-  if (status === "pending") {
-    return "生成中";
-  }
-  if (status === "failed") {
-    return "失败";
-  }
-  return "已回复";
-}
-
-function parseSegmentFollowupPayload(content: string): SegmentFollowupRequest | null {
-  try {
-    const payload = JSON.parse(content) as Partial<SegmentFollowupRequest> & { type?: string };
-    if (
-      payload.type !== "segment_followup" ||
-      typeof payload.source_message_id !== "number" ||
-      typeof payload.original_text !== "string" ||
-      typeof payload.user_question !== "string"
-    ) {
-      return null;
-    }
-    return {
-      source_message_id: payload.source_message_id,
-      segment_id: typeof payload.segment_id === "string" ? payload.segment_id : null,
-      original_text: payload.original_text,
-      user_question: payload.user_question,
-      position: payload.position ?? null,
-    };
-  } catch {
-    return null;
-  }
-}
-
 function clampFloatingAnchor(
   anchor: { x: number; y: number },
   size: { width: number; height: number },
@@ -1373,12 +510,80 @@ function clampFloatingAnchor(
   };
 }
 
+function selectionFollowupAnchor(
+  selection: Selection,
+  pointer: { x: number; y: number },
+  size: { width: number; height: number },
+): { x: number; y: number } {
+  const rect = selectionBoundingRect(selection);
+  if (!rect) {
+    return clampFloatingAnchor({ x: pointer.x + 18, y: pointer.y + 64 }, size);
+  }
+  const preferredY = rect.bottom + 54;
+  const canPlaceBelow = preferredY + size.height <= window.innerHeight - 12;
+  const y = canPlaceBelow ? preferredY : Math.max(12, rect.top - size.height - 54);
+  const x = rect.left + rect.width / 2 - size.width / 2 + 72;
+  return clampFloatingAnchor({ x, y }, size);
+}
+
+function selectionBoundingRect(selection: Selection): DOMRect | null {
+  if (selection.rangeCount === 0) {
+    return null;
+  }
+  const rects = Array.from({ length: selection.rangeCount }, (_, index) =>
+    selection.getRangeAt(index).getBoundingClientRect(),
+  ).filter((rect) => rect.width > 0 || rect.height > 0);
+  if (rects.length === 0) {
+    return null;
+  }
+  const left = Math.min(...rects.map((rect) => rect.left));
+  const top = Math.min(...rects.map((rect) => rect.top));
+  const right = Math.max(...rects.map((rect) => rect.right));
+  const bottom = Math.max(...rects.map((rect) => rect.bottom));
+  return new DOMRect(left, top, right - left, bottom - top);
+}
+
 function resolveTextPosition(content: string, selectedText: string): { start: number; end: number } | null {
   const start = normalizeText(content).indexOf(normalizeText(selectedText));
   if (start < 0) {
     return null;
   }
   return { start, end: start + selectedText.length };
+}
+
+function resolveSelectionTextPosition(
+  root: HTMLElement,
+  selection: Selection,
+): { start: number; end: number } | null {
+  if (selection.rangeCount === 0) {
+    return null;
+  }
+  const range = selection.getRangeAt(0);
+  if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) {
+    return null;
+  }
+
+  const textNodes = followupTextNodes(root);
+  let cursor = 0;
+  let start: number | null = null;
+  let end: number | null = null;
+  for (const textNode of textNodes) {
+    const text = textNode.textContent ?? "";
+    if (!text) {
+      continue;
+    }
+    if (range.startContainer === textNode) {
+      start = cursor + range.startOffset;
+    }
+    if (range.endContainer === textNode) {
+      end = cursor + range.endOffset;
+    }
+    cursor += text.length;
+  }
+  if (start === null || end === null || end <= start) {
+    return null;
+  }
+  return { start, end };
 }
 
 function selectionOverlapsFollowupThread(
@@ -1391,15 +596,131 @@ function selectionOverlapsFollowupThread(
     return false;
   }
   return (message.followupThreads ?? []).some((thread) => {
+    if (position && thread.position) {
+      return position.start < thread.position.end && position.end > thread.position.start;
+    }
     const marked = normalizeText(thread.original_text);
     if (marked.includes(selected) || selected.includes(marked)) {
       return true;
     }
-    if (!position || !thread.position) {
-      return false;
-    }
-    return position.start < thread.position.end && position.end > thread.position.start;
+    return false;
   });
+}
+
+function selectionIntersectsFollowupMark(selection: Selection, root: HTMLElement): boolean {
+  if (selection.rangeCount === 0) {
+    return false;
+  }
+  const range = selection.getRangeAt(0);
+  return Array.from(root.querySelectorAll(".segment-followup-mark")).some((mark) => range.intersectsNode(mark));
+}
+
+function closestElement(node: Node | null): Element | null {
+  if (!node) {
+    return null;
+  }
+  return node instanceof Element ? node : node.parentElement;
+}
+
+function selectionTouchesCode(selection: Selection): boolean {
+  return Boolean(
+    closestElement(selection.anchorNode)?.closest("[data-followup-code='true'], pre, code") ||
+      closestElement(selection.focusNode)?.closest("[data-followup-code='true'], pre, code"),
+  );
+}
+
+function ImagePreviewModal({
+  image,
+  onClose,
+}: {
+  image: { alt: string; name: string; src: string };
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
+  return (
+    <div className="image-preview-backdrop" onMouseDown={onClose} role="presentation">
+      <section
+        aria-label="图片预览"
+        aria-modal="true"
+        className="image-preview-modal"
+        onMouseDown={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <header>
+          <strong title={image.name}>{image.name}</strong>
+          <button aria-label="关闭图片预览" onClick={onClose} title="关闭" type="button">
+            <X aria-hidden="true" size={18} />
+          </button>
+        </header>
+        <div className="image-preview-modal__body">
+          <img alt={image.alt} src={image.src} />
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function followupTextNodes(root: HTMLElement): Text[] {
+  const nodes: Text[] = [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parent = node.parentElement;
+      if (!parent || !node.textContent) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      if (!node.textContent.trim()) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      if (
+        parent.closest(
+          [
+            "pre",
+            "code",
+            "button",
+            ".markdown-code-block__toolbar",
+            ".segment-followup-mark",
+            ".mermaid-viewer",
+            ".markdown-mermaid-error",
+          ].join(", "),
+        )
+      ) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  let node = walker.nextNode();
+  while (node) {
+    nodes.push(node as Text);
+    node = walker.nextNode();
+  }
+  return nodes;
+}
+
+function findMatchingFollowupThread(
+  message: DraftAssistantMessage,
+  originalText: string,
+  position: { start: number; end: number } | null,
+) {
+  const threads = message.followupThreads ?? [];
+  if (position) {
+    const byPosition = threads.find(
+      (thread) => thread.position && position.start < thread.position.end && position.end > thread.position.start,
+    );
+    if (byPosition) {
+      return byPosition;
+    }
+  }
+  return threads.find((thread) => normalizeText(thread.original_text) === normalizeText(originalText));
 }
 
 function hasMessageFollowups(message: DraftAssistantMessage): boolean {
@@ -1410,36 +731,6 @@ function normalizeText(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
-function createSegmentId(text: string): string {
-  let hash = 2166136261;
-  for (let index = 0; index < text.length; index += 1) {
-    hash ^= text.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return `seg-${(hash >>> 0).toString(16)}`;
-}
-
-function findEarliestThreadMatch(
-  text: string,
-  threads: SegmentFollowupThread[],
-): { index: number; thread: SegmentFollowupThread } | null {
-  let best: { index: number; thread: SegmentFollowupThread } | null = null;
-  for (const thread of threads) {
-    const index = text.indexOf(thread.original_text);
-    if (index < 0) {
-      continue;
-    }
-    if (
-      !best ||
-      index < best.index ||
-      (index === best.index && thread.original_text.length > best.thread.original_text.length)
-    ) {
-      best = { index, thread };
-    }
-  }
-  return best;
-}
-
 interface UserInputInterruptCardProps {
   disabled: boolean;
   message: DraftAssistantMessage;
@@ -1447,7 +738,7 @@ interface UserInputInterruptCardProps {
   onSubmit: (message: DraftAssistantMessage, answer: UserInputAnswer) => void;
 }
 
-function UserInputInterruptCard({
+export function UserInputInterruptCard({
   disabled,
   message,
   request,
@@ -1728,485 +1019,4 @@ function selectedAnswerFromQuestion(
     other_text: otherText,
     is_other: selectedIds.includes("other"),
   };
-}
-
-function TypingIndicator({
-  compact = false,
-  variant = "initial",
-}: {
-  compact?: boolean;
-  variant?: "initial" | "tail";
-}) {
-  return (
-    <div
-      className={[
-        "chat-typing-indicator",
-        compact ? "chat-typing-indicator--compact" : "",
-        variant === "tail" ? "chat-typing-indicator--tail" : "",
-      ].filter(Boolean).join(" ")}
-      aria-live="polite"
-      aria-label="正在生成回复"
-    >
-      <div className="chat-typing-indicator__header">
-        <PulseGlyph active />
-        <span className="chat-typing-indicator__label">
-          <span className="chat-typing-indicator__title">Thinking</span>
-          <span className="chat-typing-indicator__sep">·</span>
-          <VerbRotator />
-        </span>
-      </div>
-      <div className="chat-typing-indicator__dots" aria-hidden="true">
-        <span />
-        <span />
-        <span />
-      </div>
-    </div>
-  );
-}
-
-function StreamingMarkdown({
-  activeSegmentId,
-  content,
-  followupThreads,
-  onOpenSegment,
-  streaming,
-}: {
-  activeSegmentId?: string | null;
-  content: string;
-  followupThreads?: SegmentFollowupThread[];
-  onOpenSegment?: (segmentId: string) => void;
-  streaming: boolean;
-}) {
-  return (
-    <div className={`chat-answer-stream ${streaming ? "is-streaming" : ""}`}>
-      <MarkedMarkdownMessage
-        activeSegmentId={activeSegmentId}
-        content={content}
-        followupThreads={followupThreads}
-        onOpenSegment={onOpenSegment}
-      />
-      {streaming && content.length > 0 ? <span className="chat-stream-caret" aria-hidden="true" /> : null}
-    </div>
-  );
-}
-
-function MarkedMarkdownMessage({
-  activeSegmentId,
-  content,
-  followupThreads,
-  onOpenSegment,
-}: {
-  activeSegmentId?: string | null;
-  content: string;
-  followupThreads?: SegmentFollowupThread[];
-  onOpenSegment?: (segmentId: string) => void;
-}) {
-  const rootRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    const root = rootRef.current;
-    const threads = followupThreads?.filter((thread) => thread.original_text.trim()) ?? [];
-    if (!root) {
-      return;
-    }
-
-    root.querySelectorAll<HTMLButtonElement>(".segment-followup-mark").forEach((mark) => {
-      mark.replaceWith(document.createTextNode(mark.textContent ?? ""));
-    });
-
-    if (threads.length === 0) {
-      return;
-    }
-
-    const listeners: Array<{ element: HTMLButtonElement; handler: (event: MouseEvent) => void }> = [];
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode(node) {
-        const parent = node.parentElement;
-        if (!parent || !node.textContent?.trim()) {
-          return NodeFilter.FILTER_REJECT;
-        }
-        if (parent.closest("pre, code, button, .segment-followup-mark")) {
-          return NodeFilter.FILTER_REJECT;
-        }
-        return NodeFilter.FILTER_ACCEPT;
-      },
-    });
-    const nodes: Text[] = [];
-    let node = walker.nextNode();
-    while (node) {
-      nodes.push(node as Text);
-      node = walker.nextNode();
-    }
-
-    for (const textNode of nodes) {
-      let remaining = textNode.textContent ?? "";
-      const pieces: Array<string | SegmentFollowupThread> = [];
-      while (remaining) {
-        const match = findEarliestThreadMatch(remaining, threads);
-        if (!match) {
-          pieces.push(remaining);
-          break;
-        }
-        if (match.index > 0) {
-          pieces.push(remaining.slice(0, match.index));
-        }
-        pieces.push(match.thread);
-        remaining = remaining.slice(match.index + match.thread.original_text.length);
-      }
-      if (pieces.length <= 1) {
-        continue;
-      }
-      const fragment = document.createDocumentFragment();
-      for (const piece of pieces) {
-        if (typeof piece === "string") {
-          fragment.append(document.createTextNode(piece));
-          continue;
-        }
-        const button = document.createElement("button");
-        button.className = [
-          "segment-followup-mark",
-          activeSegmentId === piece.segment_id ? "is-active" : "",
-        ].filter(Boolean).join(" ");
-        button.dataset.segmentId = piece.segment_id;
-        button.type = "button";
-        button.textContent = piece.original_text;
-        button.title = "查看这个片段的追问";
-        const handler = (event: MouseEvent) => {
-          event.stopPropagation();
-          onOpenSegment?.(piece.segment_id);
-        };
-        button.addEventListener("click", handler);
-        listeners.push({ element: button, handler });
-        fragment.append(button);
-      }
-      textNode.replaceWith(fragment);
-    }
-
-    return () => {
-      for (const { element, handler } of listeners) {
-        element.removeEventListener("click", handler);
-      }
-    };
-  }, [activeSegmentId, content, followupThreads, onOpenSegment]);
-
-  return (
-    <div ref={rootRef}>
-      <MarkdownMessage content={content} fallback="" />
-    </div>
-  );
-}
-
-interface ChronologicalTimelineProps {
-  activeSegmentId?: string | null;
-  followupThreads?: SegmentFollowupThread[];
-  segments: MessageSegment[];
-  thoughtsByStep: Map<number, ChatThought[]>;
-  isStreaming: boolean;
-  onOpenSegment?: (segmentId: string) => void;
-  showWarmingUp: boolean;
-}
-
-/**
- * 串行化展示一条 assistant 消息：按 step_index 升序，
- * 每个 segment 顺序渲染 thought → text → tool cards。
- * 这样工具卡片紧贴产生它的那段叙述，避免“工具放最上、文字放最下”的割裂体验。
- */
-function ChronologicalTimeline({
-  activeSegmentId,
-  followupThreads,
-  segments,
-  thoughtsByStep,
-  isStreaming,
-  onOpenSegment,
-  showWarmingUp,
-}: ChronologicalTimelineProps) {
-  const lastIndex = segments.length - 1;
-  // 把所有未挂到 segment 的 thought（一般是 step_index=0 的全局/兜底 thought）放最前面。
-  const orphanThoughts = orphansBeforeSegments(thoughtsByStep, segments);
-  const showThinkingTail = isStreaming && !showWarmingUp && shouldShowThinkingTail(segments);
-  const items: TimelineItem[] = [];
-  if (showWarmingUp) {
-    items.push({
-      kind: "work",
-      key: "warming-up",
-      node: <TypingIndicator compact />,
-    });
-  }
-  if (orphanThoughts.length > 0) {
-    items.push({
-      kind: "work",
-      key: "orphan-thoughts",
-      node: <SegmentThoughts thoughts={orphanThoughts} />,
-    });
-  }
-
-  segments.forEach((segment, idx) => {
-    const isLast = idx === lastIndex;
-    const segmentStreaming = isStreaming && isLast && segment.tools.length === 0;
-    const stepThoughts = thoughtsByStep.get(segment.step_index) ?? [];
-
-    if (stepThoughts.length > 0) {
-      items.push({
-        kind: "work",
-        key: `step-${segment.step_index}-${idx}-thoughts`,
-        node: <SegmentThoughts thoughts={stepThoughts} />,
-      });
-    }
-
-    if (segment.text.length > 0) {
-      items.push({
-        kind: "answer",
-        key: `step-${segment.step_index}-${idx}-text`,
-        node: (
-          <div className="chat-segment" key={`step-${segment.step_index}-text`}>
-            <StreamingMarkdown
-              activeSegmentId={activeSegmentId}
-              content={segment.text}
-              followupThreads={followupThreads}
-              onOpenSegment={onOpenSegment}
-              streaming={segmentStreaming}
-            />
-          </div>
-        ),
-      });
-    }
-
-    if (segment.tools.length > 0) {
-      items.push({
-        kind: "work",
-        key: `step-${segment.step_index}-${idx}-tools`,
-        node: (
-          <div className="chat-segment" key={`step-${segment.step_index}-tools`}>
-            <div className="chat-segment__tools">
-              {segment.tools.map((tool) => (
-                <ToolCallCard
-                  key={tool.tool_call_id || `${tool.tool_name}-${segment.step_index}`}
-                  toolName={tool.tool_name}
-                  args={tool.arguments}
-                  summary={tool.result_summary || tool.message}
-                  status={toolCardStatus(tool)}
-                />
-              ))}
-            </div>
-          </div>
-        ),
-      });
-    }
-  });
-
-  if (showThinkingTail) {
-    items.push({
-      kind: "work",
-      key: "thinking-tail",
-      node: <TypingIndicator compact variant="tail" />,
-    });
-  }
-
-  return <div className="chat-segment-timeline">{renderTimelineItems(items, isStreaming)}</div>;
-}
-
-type TimelineItem = {
-  kind: "work" | "answer";
-  key: string;
-  node: ReactNode;
-};
-
-function renderTimelineItems(items: TimelineItem[], isStreaming: boolean) {
-  const rendered: ReactNode[] = [];
-  let workGroup: TimelineItem[] = [];
-
-  const flushWorkGroup = () => {
-    if (workGroup.length === 0) {
-      return;
-    }
-    const group = workGroup;
-    workGroup = [];
-    rendered.push(
-      <ToolProcessWindow isStreaming={isStreaming} key={`work-${group[0].key}`}>
-        {group.map((item) => (
-          <div className="chat-tool-process-window__item" key={item.key}>
-            {item.node}
-          </div>
-        ))}
-      </ToolProcessWindow>,
-    );
-  };
-
-  for (const item of items) {
-    if (item.kind === "work") {
-      workGroup.push(item);
-      continue;
-    }
-    flushWorkGroup();
-    rendered.push(<div key={item.key}>{item.node}</div>);
-  }
-  flushWorkGroup();
-  return rendered;
-}
-
-function ToolProcessWindow({
-  children,
-  isStreaming,
-}: {
-  children: ReactNode;
-  isStreaming: boolean;
-}) {
-  const bodyRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!isStreaming || !bodyRef.current) {
-      return;
-    }
-    bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
-  }, [children, isStreaming]);
-
-  return (
-    <section className="chat-tool-process-window" aria-label="工具调用过程">
-      <div className="chat-tool-process-window__body" ref={bodyRef}>
-        {children}
-      </div>
-    </section>
-  );
-}
-
-function hasVisibleAssistantWork(
-  segments: MessageSegment[],
-  thoughts: ChatThought[],
-  content: string,
-): boolean {
-  if (content.trim().length > 0) {
-    return true;
-  }
-  if (thoughts.some((thought) => thought.title.trim() || thought.summary.trim())) {
-    return true;
-  }
-  return segments.some(
-    (segment) => segment.text.trim().length > 0 || segment.tools.length > 0,
-  );
-}
-
-function shouldShowThinkingTail(segments: MessageSegment[]): boolean {
-  const lastSegment = segments.length > 0 ? segments[segments.length - 1] : undefined;
-  if (!lastSegment) {
-    return false;
-  }
-  // 最终回答 token 正在流出时，光标已经承担“正在生成”的反馈；这里避免重复动画。
-  if (lastSegment.text.trim().length > 0 && lastSegment.tools.length === 0) {
-    return false;
-  }
-  return true;
-}
-
-function orphansBeforeSegments(
-  thoughtsByStep: Map<number, ChatThought[]>,
-  segments: MessageSegment[],
-): ChatThought[] {
-  const segmentSteps = new Set(segments.map((segment) => segment.step_index));
-  const orphans: ChatThought[] = [];
-  for (const [step, list] of thoughtsByStep) {
-    if (!segmentSteps.has(step)) {
-      orphans.push(...list);
-    }
-  }
-  return orphans;
-}
-
-function toolCardStatus(tool: ToolInvocation): "completed" | "failed" | "running" {
-  // running 卡片的 ok/blocked 此时还没有真实意义（工具还没跑完），优先看 running 标志。
-  if (tool.running) {
-    return "running";
-  }
-  if (tool.blocked || !tool.ok) {
-    return "failed";
-  }
-  return "completed";
-}
-
-function SegmentThoughts({ thoughts }: { thoughts: ChatThought[] }) {
-  return (
-    <ul className="chat-segment-thoughts" aria-live="polite">
-      {thoughts.map((thought, index) => {
-        const status = normalizeStatus(thought.status);
-        return (
-          <li
-            className={`chat-segment-thoughts__item chat-segment-thoughts__item--${status}`}
-            key={`${thought.id}-${index}`}
-          >
-            <span className="chat-segment-thoughts__icon" aria-hidden="true">
-              {statusGlyph(status)}
-            </span>
-            <div className="chat-segment-thoughts__body">
-              <span className="chat-segment-thoughts__title">{thought.title}</span>
-              {thought.summary ? (
-                <span className="chat-segment-thoughts__summary"> {thought.summary}</span>
-              ) : null}
-            </div>
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
-
-type ThoughtStatus = "running" | "completed" | "failed" | "interrupted";
-
-function normalizeStatus(value: string | undefined): ThoughtStatus {
-  if (value === "running" || value === "completed" || value === "failed" || value === "interrupted") {
-    return value;
-  }
-  return "completed";
-}
-
-function statusGlyph(status: ThoughtStatus) {
-  switch (status) {
-    case "running":
-      return <PulseGlyph active />;
-    case "failed":
-      return <span className="chat-step-icon chat-step-icon--failed">✕</span>;
-    case "interrupted":
-      return <span className="chat-step-icon chat-step-icon--interrupted">⏸</span>;
-    case "completed":
-    default:
-      return <span className="chat-step-icon chat-step-icon--completed">✓</span>;
-  }
-}
-
-/**
- * 历史消息没有 segments（DB 落库的旧消息只有 thoughts 数组）时的折叠展示。
- * 新版 segments 直接内联展开，无需折叠。
- */
-function ThoughtRecap({ thoughts }: { thoughts: ChatThought[] }) {
-  if (thoughts.length === 0) {
-    return null;
-  }
-  return (
-    <details className="chat-thought-recap">
-      <summary>
-        <span className="chat-thought-mark" aria-hidden="true">
-          ∴
-        </span>
-        <span className="chat-thought-recap__label">查看思考过程</span>
-        <small>{thoughts.length} 个步骤</small>
-      </summary>
-      <ol className="chat-timeline">
-        {thoughts.map((thought, index) => {
-          const status = normalizeStatus(thought.status);
-          return (
-            <li
-              className={`chat-timeline__step chat-timeline__step--${status}`}
-              key={`${thought.id}-${index}`}
-            >
-              <span className="chat-timeline__node" aria-hidden="true">
-                {statusGlyph(status)}
-              </span>
-              <div className="chat-timeline__body">
-                <div className="chat-timeline__title">{thought.title}</div>
-                <p className="chat-timeline__summary">{thought.summary}</p>
-              </div>
-            </li>
-          );
-        })}
-      </ol>
-    </details>
-  );
 }

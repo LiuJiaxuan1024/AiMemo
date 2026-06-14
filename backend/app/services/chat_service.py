@@ -9,7 +9,6 @@ from time import perf_counter
 from fastapi import HTTPException, status
 from sqlmodel import Session, desc, select
 
-from app.agent.graphs.memory_chat.graph import stream_memory_chat_graph
 from app.core.config import settings
 from app.core.database import session_scope
 from app.models.chat_message import ChatMessage
@@ -484,6 +483,8 @@ def _run_turn_to_buffer(
     # 不应再次派发同一条卡片；同时也覆盖 stream_writer 失败时只能从 state 派发的情形。
     emitted_tool_call_ids: set[str] = set()
     last_runtime_status = "thinking" if runtime_scope == "elf" else ""
+
+    from app.agent.graphs.memory_chat.graph import stream_memory_chat_graph
 
     def mark_elf_runtime(status: str, **kwargs) -> None:
         nonlocal last_runtime_status

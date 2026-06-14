@@ -8,7 +8,10 @@ from app.schemas.conversation import (
     ChatMessageCreate,
     ChatMessageRead,
     ConversationCreate,
+    ConversationMultiExportRequest,
+    ConversationMultiExportSnapshot,
     ConversationExportRequest,
+    ConversationExportSnapshot,
     ConversationListItem,
     ConversationRead,
 )
@@ -25,7 +28,11 @@ from app.services.conversation_service import (
     list_conversations,
     list_messages,
 )
-from app.services.conversation_export_service import export_conversation_html
+from app.services.conversation_export_service import (
+    build_multi_conversation_export_snapshot,
+    build_conversation_export_snapshot,
+    export_conversation_html,
+)
 from app.services.knowledge_mount_service import (
     add_conversation_knowledge_mount,
     delete_conversation_knowledge_mount,
@@ -49,6 +56,14 @@ def create_conversation_api(
 @router.get("", response_model=list[ConversationListItem])
 def list_conversations_api(session: Session = Depends(get_session)) -> list[ConversationListItem]:
     return list_conversations(session)
+
+
+@router.post("/export/snapshots", response_model=ConversationMultiExportSnapshot)
+def export_conversation_snapshots_api(
+    payload: ConversationMultiExportRequest,
+    session: Session = Depends(get_session),
+) -> ConversationMultiExportSnapshot:
+    return build_multi_conversation_export_snapshot(session, payload)
 
 
 @router.get("/{conversation_id}", response_model=ConversationRead)
@@ -84,6 +99,15 @@ def export_conversation_api(
             )
         },
     )
+
+
+@router.post("/{conversation_id}/export/snapshot", response_model=ConversationExportSnapshot)
+def export_conversation_snapshot_api(
+    conversation_id: int,
+    payload: ConversationExportRequest,
+    session: Session = Depends(get_session),
+) -> ConversationExportSnapshot:
+    return build_conversation_export_snapshot(session, conversation_id, payload)
 
 
 @router.get("/{conversation_id}/knowledge-mounts", response_model=list[ConversationKnowledgeMountRead])

@@ -8,6 +8,8 @@ import rehypeKatex from "rehype-katex";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+import { MermaidGraphView } from "../../features/graph/MermaidGraphView";
+import { getCodeHighlighter } from "../editor/codeHighlighter";
 
 interface MarkdownViewProps {
   className?: string;
@@ -41,6 +43,45 @@ type CodeElementProps = {
   children?: ReactNode;
 };
 
+const supportedHighlightLanguages = new Set([
+  "bash",
+  "c",
+  "cpp",
+  "csharp",
+  "css",
+  "go",
+  "html",
+  "java",
+  "javascript",
+  "json",
+  "markdown",
+  "mermaid",
+  "python",
+  "rust",
+  "sql",
+  "text",
+  "typescript",
+  "xml",
+  "yaml",
+]);
+
+const highlightLanguageAliases: Record<string, string> = {
+  cxx: "cpp",
+  "c++": "cpp",
+  cc: "cpp",
+  cs: "csharp",
+  js: "javascript",
+  jsx: "javascript",
+  md: "markdown",
+  py: "python",
+  rs: "rust",
+  sh: "bash",
+  shell: "bash",
+  ts: "typescript",
+  tsx: "typescript",
+  yml: "yaml",
+};
+
 function reactNodeToText(node: ReactNode): string {
   if (typeof node === "string" || typeof node === "number") {
     return String(node);
@@ -68,6 +109,15 @@ function getCodeLanguage(children: ReactNode): string | null {
   return match?.[1] ?? null;
 }
 
+function resolveHighlightLanguage(language: string | null | undefined): string {
+  if (!language) {
+    return "text";
+  }
+  const normalized = language.toLowerCase();
+  const aliased = highlightLanguageAliases[normalized] ?? normalized;
+  return supportedHighlightLanguages.has(aliased) ? aliased : "text";
+}
+
 async function copyToClipboard(text: string) {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(text);
@@ -87,9 +137,12 @@ async function copyToClipboard(text: string) {
 
 function MarkdownPre({ children, ...props }: ComponentPropsWithoutRef<"pre">) {
   const [copied, setCopied] = useState(false);
+  const [highlightedHtml, setHighlightedHtml] = useState<string | null>(null);
   const resetTimerRef = useRef<number | null>(null);
   const codeText = reactNodeToText(children).replace(/\n$/, "");
   const language = getCodeLanguage(children);
+  const normalizedLanguage = language?.toLowerCase();
+  const highlightLanguage = resolveHighlightLanguage(language);
 
   useEffect(() => {
     return () => {
@@ -98,6 +151,35 @@ function MarkdownPre({ children, ...props }: ComponentPropsWithoutRef<"pre">) {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!codeText || normalizedLanguage === "mermaid") {
+      setHighlightedHtml(null);
+      return;
+    }
+
+    let cancelled = false;
+    setHighlightedHtml(null);
+    getCodeHighlighter()
+      .then((highlighter) => {
+        const html = highlighter.codeToHtml(codeText, {
+          lang: highlightLanguage,
+          theme: "github-dark",
+        });
+        if (!cancelled) {
+          setHighlightedHtml(html);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setHighlightedHtml(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [codeText, highlightLanguage, normalizedLanguage]);
 
   async function handleCopy() {
     if (!codeText) {
@@ -110,6 +192,39 @@ function MarkdownPre({ children, ...props }: ComponentPropsWithoutRef<"pre">) {
       window.clearTimeout(resetTimerRef.current);
     }
     resetTimerRef.current = window.setTimeout(() => setCopied(false), 1400);
+  }
+
+  if (normalizedLanguage === "mermaid") {
+    return (
+      <div className="markdown-code-block markdown-code-block--mermaid">
+        <div className="markdown-code-block__toolbar">
+          <span className="markdown-code-block__language">mermaid</span>
+          <button
+            type="button"
+            className={`markdown-code-copy ${copied ? "is-copied" : ""}`}
+            onClick={handleCopy}
+            title={copied ? "已复制" : "复制 Mermaid 源码"}
+            aria-label={copied ? "Mermaid 源码已复制" : "复制 Mermaid 源码"}
+            disabled={!codeText}
+          >
+            {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+          </button>
+        </div>
+        <MermaidGraphView
+          chart={codeText}
+          className="markdown-mermaid-svg"
+          errorClassName="markdown-mermaid-error"
+          renderKey={codeText}
+          themeVariables={{
+            primaryColor: "#f8fafc",
+            primaryBorderColor: "#cbd5e1",
+          }}
+        />
+        <pre className="markdown-mermaid-source" hidden aria-hidden="true">
+          <code className="language-mermaid">{codeText}</code>
+        </pre>
+      </div>
+    );
   }
 
   return (
@@ -127,7 +242,14 @@ function MarkdownPre({ children, ...props }: ComponentPropsWithoutRef<"pre">) {
           {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
         </button>
       </div>
-      <pre {...props}>{children}</pre>
+      {highlightedHtml ? (
+        <div
+          className="markdown-code-highlight"
+          dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+        />
+      ) : (
+        <pre {...props}>{children}</pre>
+      )}
     </div>
   );
 }
@@ -136,8 +258,22 @@ const markdownComponents: Components = {
   pre: MarkdownPre,
 };
 
+function normalizeLatexMathDelimiters(markdown: string) {
+  return markdown
+    .split(/(```[\s\S]*?```|~~~[\s\S]*?~~~)/g)
+    .map((part) => {
+      if (part.startsWith("```") || part.startsWith("~~~")) {
+        return part;
+      }
+      return part
+        .replace(/\\\[([\s\S]*?)\\\]/g, (_match, expression: string) => `$$\n${expression.trim()}\n$$`)
+        .replace(/\\\(([\s\S]*?)\\\)/g, (_match, expression: string) => `$${expression.trim()}$`);
+    })
+    .join("");
+}
+
 export function MarkdownView({ className = "", content, fallback = "" }: MarkdownViewProps) {
-  const value = content || fallback;
+  const value = normalizeLatexMathDelimiters(content || fallback);
 
   if (!value) {
     return null;

@@ -408,6 +408,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/ai_note.db"
     langgraph_checkpoint_path: str = "./data/langgraph_checkpoints.db"
     job_worker_enabled: bool = True
+    job_worker_concurrency: int = int(_config_value("jobs.worker_concurrency", 3))
     job_worker_poll_interval_seconds: float = 2.0
     job_running_timeout_seconds: int = 600
     job_reconciler_enabled: bool = True

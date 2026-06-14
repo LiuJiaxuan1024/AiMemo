@@ -11,9 +11,10 @@ image_asset_count
 image_asset_processed_count
 image_text_chunk_count
 image_asset_failed_count
+image_asset_warning_count
 ```
 
-这能让前端知道“有几张图片失败”，但不知道：
+这能让前端知道“有几张图片可自动重试失败 / 有几张图片需要人工关注”，但不知道：
 
 ```text
 哪一张图片失败
@@ -242,7 +243,8 @@ parse_document_file
 image_asset_count = count(all assets)
 image_asset_processed_count = count(completed + skipped)
 image_text_chunk_count = count(image chunks)
-image_asset_failed_count = count(failed)
+image_asset_failed_count = count(failed + retryable=true)
+image_asset_warning_count = count(failed + retryable=false)
 ```
 
 ## 定向重试流程
@@ -575,4 +577,3 @@ parser 或 chunk 策略变化后的全量修复。
 ```
 
 它不应继续被称为“重试图片”，否则用户会误以为只重试失败图片。
-

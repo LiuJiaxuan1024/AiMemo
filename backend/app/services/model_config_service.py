@@ -8,9 +8,18 @@ from urllib.parse import urlparse
 
 from sqlmodel import Session
 
-from app.agent.model import AGENT_CHAT_MODEL, PLANNER_CHAT_MODEL, reset_agent_models
 from app.core.config import get_project_config_value, settings
 from app.services.runtime_config_service import set_persistent_runtime_config
+
+
+AGENT_CHAT_MODEL = "qwen3.5-plus"
+PLANNER_CHAT_MODEL = "qwen-turbo"
+
+
+def reset_agent_models() -> None:
+    from app.agent.model import reset_agent_models as reset_models
+
+    reset_models()
 
 
 @dataclass(frozen=True)

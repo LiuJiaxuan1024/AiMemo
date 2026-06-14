@@ -42,6 +42,7 @@ class KnowledgeDocument(SQLModel, table=True):
     image_asset_processed_count: int = Field(default=0)
     image_text_chunk_count: int = Field(default=0)
     image_asset_failed_count: int = Field(default=0)
+    image_asset_warning_count: int = Field(default=0)
     token_count: int = Field(default=0)
     error_code: str | None = Field(default=None, max_length=80)
     error_message: str | None = None

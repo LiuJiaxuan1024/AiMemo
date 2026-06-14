@@ -9,6 +9,10 @@ class JobRead(BaseModel):
     graph_name: str | None
     thread_id: str | None
     dedupe_key: str | None
+    lane: str
+    lock_key: str | None
+    concurrency_policy: str
+    resource_weight: int
     status: str
     payload: dict
     priority: int

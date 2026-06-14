@@ -39,6 +39,72 @@ def test_claim_next_job_marks_running(session):
     assert job.status == JobStatus.RUNNING.value
     assert job.locked_by == "worker:test"
     assert job.attempts == 1
+    assert job.lane == "note_light"
+    assert job.lock_key == "note:1"
+    assert job.concurrency_policy == "shared"
+
+
+def test_claim_next_job_skips_locked_resource_and_claims_other_lane(session):
+    first = enqueue_job(
+        session,
+        job_type=JobType.NOTE_METADATA.value,
+        payload={"note_id": 1},
+        priority=10,
+    )
+    blocked = enqueue_job(
+        session,
+        job_type=JobType.NOTE_METADATA.value,
+        payload={"note_id": 1},
+        priority=9,
+        dedupe_key="note_metadata:note:1:second",
+    )
+    runnable = enqueue_job(
+        session,
+        job_type=JobType.NOTE_METADATA.value,
+        payload={"note_id": 2},
+        priority=1,
+    )
+    session.commit()
+
+    claimed_first = claim_next_job(session, worker_id="worker:test", max_running=3)
+    claimed_second = claim_next_job(session, worker_id="worker:test", max_running=3)
+
+    assert claimed_first is not None
+    assert claimed_first.id == first.id
+    assert blocked.id is not None
+    assert claimed_second is not None
+    assert claimed_second.id == runnable.id
+
+
+def test_claim_next_job_respects_lane_concurrency(session):
+    enqueue_job(
+        session,
+        job_type=JobType.NOTE_EMBEDDING.value,
+        payload={"note_id": 1},
+        priority=10,
+    )
+    blocked_embedding = enqueue_job(
+        session,
+        job_type=JobType.NOTE_EMBEDDING.value,
+        payload={"note_id": 2},
+        priority=9,
+    )
+    metadata = enqueue_job(
+        session,
+        job_type=JobType.NOTE_METADATA.value,
+        payload={"note_id": 3},
+        priority=1,
+    )
+    session.commit()
+
+    claimed_first = claim_next_job(session, worker_id="worker:test", max_running=3)
+    claimed_second = claim_next_job(session, worker_id="worker:test", max_running=3)
+
+    assert claimed_first is not None
+    assert claimed_first.lane == "embedding"
+    assert blocked_embedding.id is not None
+    assert claimed_second is not None
+    assert claimed_second.id == metadata.id
 
 
 def test_recover_stale_running_jobs(session):

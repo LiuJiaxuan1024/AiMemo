@@ -203,7 +203,8 @@ export function KnowledgePage() {
   });
 
   const retryFailedImageAssetsMutation = useMutation({
-    mutationFn: (documentId: number) => retryKnowledgeDocumentFailedImages(documentId, { onlyRetryable: true, maxAssets: 20 }),
+    mutationFn: ({ documentId, onlyRetryable }: { documentId: number; onlyRetryable: boolean }) =>
+      retryKnowledgeDocumentFailedImages(documentId, { onlyRetryable, maxAssets: 20 }),
     onSuccess: async (response) => {
       setSelectedDocumentId(response.document.id);
       setSearchResults([]);
@@ -212,11 +213,21 @@ export function KnowledgePage() {
       await queryClient.invalidateQueries({ queryKey: ["knowledge", "image-assets", response.document.id] });
       await queryClient.invalidateQueries({ queryKey: ["background_tasks"] });
     },
-    onError: (caught) => setError(errorMessage(caught, "重试失败图片失败")),
+    onError: async (caught, variables) => {
+      await queryClient.invalidateQueries({ queryKey: ["knowledge"] });
+      await queryClient.invalidateQueries({ queryKey: ["knowledge", "image-assets", variables.documentId] });
+      const parsed = apiErrorDetail(caught);
+      setError(
+        parsed?.code === "KNOWLEDGE_IMAGE_ASSET_NO_RETRYABLE_FAILURES"
+          ? "当前没有可自动重试的失败图片，可能刚才的重试已经成功，或剩余失败项属于不可自动重试。已刷新图片明细。"
+          : errorMessage(caught, "重试失败图片失败"),
+      );
+    },
   });
 
   const retrySingleImageAssetMutation = useMutation({
-    mutationFn: (imageAssetId: number) => retryKnowledgeImageAsset(imageAssetId, { onlyRetryable: true }),
+    mutationFn: ({ imageAssetId, onlyRetryable }: { imageAssetId: number; onlyRetryable: boolean }) =>
+      retryKnowledgeImageAsset(imageAssetId, { onlyRetryable }),
     onSuccess: async (response) => {
       setSelectedDocumentId(response.document.id);
       setSearchResults([]);
@@ -376,28 +387,63 @@ export function KnowledgePage() {
     retryDocumentProcessingMutation.mutate(document.id);
   }
 
-  function handleRetryFailedImages(document: KnowledgeDocument) {
+  async function handleRetryFailedImages(document: KnowledgeDocument, options: { force?: boolean } = {}) {
+    let assets = selectedDocument?.id === document.id ? imageAssets : [];
+    if (document.image_asset_count > 0 && assets.length === 0) {
+      try {
+        assets = await queryClient.fetchQuery({
+          queryKey: ["knowledge", "image-assets", document.id],
+          queryFn: () => listKnowledgeImageAssets(document.id),
+        });
+      } catch {
+        assets = [];
+      }
+    }
+    const retryableFailedCount = retryableFailedImageAssets(assets).length;
+    const warningCount = nonRetryableFailedImageAssets(assets).length || document.image_asset_warning_count;
+    const failedCount = assets.filter((asset) => asset.status === "failed").length || document.image_asset_failed_count + document.image_asset_warning_count;
+    if (!options.force && document.image_asset_failed_count > 0 && assets.length > 0 && retryableFailedCount === 0) {
+      setError("当前没有可自动重试的失败图片；剩余失败项可能需要手动检查或重新处理整份文档。");
+      await queryClient.invalidateQueries({ queryKey: ["knowledge"] });
+      await queryClient.invalidateQueries({ queryKey: ["knowledge", "image-assets", document.id] });
+      return;
+    }
+    const confirmed = window.confirm(
+      options.force
+        ? [
+            `确认强制重试“${document.title}”中剩余的失败图片吗？`,
+            warningCount > 0
+              ? `本次最多会重试 ${Math.min(warningCount, 20)} 张不可自动重试的警告图片。`
+              : failedCount > 0
+                ? `本次最多会重试 ${Math.min(failedCount, 20)} 张仍处于失败状态的图片。`
+                : "系统会检查当前失败图片。",
+            "这会重新调用图片转文本模型，但仍不会重跑已成功图片或整份文档正文 chunk。",
+          ].join("\n")
+        : [
+            `确认重试“${document.title}”中的失败图片吗？`,
+            retryableFailedCount > 0 ? `本次将重试 ${retryableFailedCount} 张可自动重试的失败图片。` : "系统会检查当前可自动重试的失败图片。",
+            "不会重跑已成功图片，也不会重建整份文档正文 chunk。",
+          ].join("\n"),
+    );
+    if (!confirmed) {
+      return;
+    }
+    retryFailedImageAssetsMutation.mutate({ documentId: document.id, onlyRetryable: !options.force });
+  }
+
+  function handleRetryImageAsset(imageAsset: KnowledgeImageAsset, options: { force?: boolean } = {}) {
+    const label = imageAsset.location_label || imageAsset.asset_id;
     const confirmed = window.confirm(
       [
-        `确认重试“${document.title}”中的失败图片吗？`,
-        "系统只会重新处理当前失败且可自动重试的图片，不会重跑已成功图片，也不会重建整份文档正文 chunk。",
+        options.force ? "确认强制重试这张图片吗？" : "确认重试这张图片吗？",
+        label,
+        options.force ? "这会重新调用图片转文本模型，适合手动处理不可自动重试的失败图片。" : "系统只会删除并重建这张图片对应的图片 chunk。",
       ].join("\n"),
     );
     if (!confirmed) {
       return;
     }
-    retryFailedImageAssetsMutation.mutate(document.id);
-  }
-
-  function handleRetryImageAsset(imageAsset: KnowledgeImageAsset) {
-    const label = imageAsset.location_label || imageAsset.asset_id;
-    const confirmed = window.confirm(
-      [`确认重试这张图片吗？`, label, "系统只会删除并重建这张图片对应的图片 chunk。"].join("\n"),
-    );
-    if (!confirmed) {
-      return;
-    }
-    retrySingleImageAssetMutation.mutate(imageAsset.id);
+    retrySingleImageAssetMutation.mutate({ imageAssetId: imageAsset.id, onlyRetryable: !options.force });
   }
 
   const requestError = spacesQuery.error ?? documentsQuery.error ?? chunksQuery.error ?? imageAssetsQuery.error;
@@ -539,7 +585,7 @@ export function KnowledgePage() {
             isRetrying={retryDocumentProcessingMutation.isPending}
             isRetryingImages={retryFailedImageAssetsMutation.isPending}
             onDelete={handleDeleteDocument}
-            onRetryFailedImages={handleRetryFailedImages}
+            onRetryFailedImages={(document, options) => void handleRetryFailedImages(document, options)}
             onRetryProcessing={handleRetryDocumentProcessing}
             onSelect={setSelectedDocumentId}
             selectedDocument={selectedDocument}
@@ -566,7 +612,7 @@ export function KnowledgePage() {
               isLoadingImageAssets={imageAssetsQuery.isFetching}
               isRetryingImageAsset={retrySingleImageAssetMutation.isPending}
               isRetryingImages={retryFailedImageAssetsMutation.isPending}
-              onRetryFailedImages={handleRetryFailedImages}
+              onRetryFailedImages={(document, options) => void handleRetryFailedImages(document, options)}
               onRetryImageAsset={handleRetryImageAsset}
             />
           )}
@@ -648,7 +694,7 @@ function DocumentList({
   isRetrying: boolean;
   isRetryingImages: boolean;
   onDelete: (document: KnowledgeDocument) => void;
-  onRetryFailedImages: (document: KnowledgeDocument) => void;
+  onRetryFailedImages: (document: KnowledgeDocument, options?: { force?: boolean }) => void;
   onRetryProcessing: (document: KnowledgeDocument) => void;
   onSelect: (documentId: number) => void;
   selectedDocument: KnowledgeDocument | null;
@@ -663,9 +709,9 @@ function DocumentList({
   }
   return (
     <div className="knowledge-document-list">
-      {documents.map((document) => (
+      {documents.map((document, index) => (
         <article
-          className={`knowledge-document-card ${selectedDocument?.id === document.id ? "selected" : ""}`}
+          className={`knowledge-document-card ${selectedDocument?.id === document.id ? "selected" : ""}${index === 0 ? " menu-opens-down" : ""}`}
           key={document.id}
         >
           <button
@@ -689,6 +735,7 @@ function DocumentList({
                   图片 {document.image_asset_processed_count}/{document.image_asset_count}
                   {document.image_text_chunk_count > 0 ? ` · ${document.image_text_chunk_count} chunks` : ""}
                   {document.image_asset_failed_count > 0 ? ` · 失败 ${document.image_asset_failed_count}` : ""}
+                  {document.image_asset_warning_count > 0 ? ` · 警告 ${document.image_asset_warning_count}` : ""}
                 </small>
               </span>
             ) : null}
@@ -729,7 +776,25 @@ function DocumentList({
                         重试失败图片
                       </button>
                     ) : null}
-                    {document.status === "failed" || document.image_asset_failed_count > 0 ? (
+                    {document.image_asset_warning_count > 0 ? (
+                      <button
+                        className="knowledge-inline-action"
+                        disabled={isRetryingImages}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (isRetryingImages) {
+                            return;
+                          }
+                          setOpenMenuDocumentId(null);
+                          onRetryFailedImages(document, { force: true });
+                        }}
+                        type="button"
+                      >
+                        <RefreshCw aria-hidden="true" size={14} />
+                        强制重试警告图片
+                      </button>
+                    ) : null}
+                    {document.status === "failed" || document.image_asset_failed_count > 0 || document.image_asset_warning_count > 0 ? (
                       <button
                         className="knowledge-inline-action"
                         disabled={isRetrying}
@@ -792,8 +857,8 @@ function DocumentDetail({
   isLoadingImageAssets: boolean;
   isRetryingImageAsset: boolean;
   isRetryingImages: boolean;
-  onRetryFailedImages: (document: KnowledgeDocument) => void;
-  onRetryImageAsset: (imageAsset: KnowledgeImageAsset) => void;
+  onRetryFailedImages: (document: KnowledgeDocument, options?: { force?: boolean }) => void;
+  onRetryImageAsset: (imageAsset: KnowledgeImageAsset, options?: { force?: boolean }) => void;
 }) {
   const [chunkKindFilter, setChunkKindFilter] = useState<ChunkKind | "all">("all");
   if (!document) {
@@ -826,7 +891,7 @@ function DocumentDetail({
         </span>
         <span>
           <strong>{document.image_asset_count ? `${document.image_asset_processed_count}/${document.image_asset_count}` : "0"}</strong>
-          <small>images</small>
+          <small>{document.image_asset_warning_count > 0 ? `images · 警告 ${document.image_asset_warning_count}` : "images"}</small>
         </span>
         <span>
           <strong>{document.image_text_chunk_count}</strong>
@@ -898,13 +963,15 @@ function ImageAssetPanel({
   isLoading: boolean;
   isRetryingImageAsset: boolean;
   isRetryingImages: boolean;
-  onRetryFailedImages: (document: KnowledgeDocument) => void;
-  onRetryImageAsset: (imageAsset: KnowledgeImageAsset) => void;
+  onRetryFailedImages: (document: KnowledgeDocument, options?: { force?: boolean }) => void;
+  onRetryImageAsset: (imageAsset: KnowledgeImageAsset, options?: { force?: boolean }) => void;
 }) {
   if (document.image_asset_count <= 0) {
     return null;
   }
   const failedAssets = imageAssets.filter((asset) => asset.status === "failed");
+  const retryableFailedAssets = retryableFailedImageAssets(imageAssets);
+  const nonRetryableFailedAssets = nonRetryableFailedImageAssets(imageAssets);
   return (
     <section className="knowledge-image-assets">
       <header className="knowledge-image-assets__header">
@@ -912,39 +979,52 @@ function ImageAssetPanel({
           <ImageIcon aria-hidden="true" size={15} />
           图片明细
         </span>
-        {document.image_asset_failed_count > 0 ? (
+        {retryableFailedAssets.length > 0 ? (
           <Button disabled={isRetryingImages} onClick={() => onRetryFailedImages(document)} size="sm" variant="secondary">
             <RefreshCw aria-hidden="true" size={14} />
-            重试失败图片
+            重试失败图片 · {retryableFailedAssets.length}
+          </Button>
+        ) : null}
+        {nonRetryableFailedAssets.length > 0 ? (
+          <Button disabled={isRetryingImages} onClick={() => onRetryFailedImages(document, { force: true })} size="sm" variant="secondary">
+            <RefreshCw aria-hidden="true" size={14} />
+            强制重试 · {nonRetryableFailedAssets.length}
           </Button>
         ) : null}
       </header>
       {isLoading && imageAssets.length === 0 ? <div className="module-loading">正在读取图片明细...</div> : null}
       {!isLoading && imageAssets.length === 0 ? <EmptyState>图片明细会在文档处理后显示。</EmptyState> : null}
-      {failedAssets.length > 0 ? (
-        <div className="knowledge-image-assets__notice">失败图片只会定向重试，不会重跑已成功图片或整份文档正文。</div>
+      {retryableFailedAssets.length > 0 ? (
+        <div className="knowledge-image-assets__notice">可重试失败图片只会定向重试，不会重跑已成功图片或整份文档正文。</div>
+      ) : null}
+      {failedAssets.length > 0 && retryableFailedAssets.length === 0 ? (
+        <div className="knowledge-image-assets__notice muted">当前没有可自动重试的失败图片；剩余项已标为警告，通常是空图、低质量、接口参数不合法或模型未返回可检索文本。</div>
+      ) : null}
+      {nonRetryableFailedAssets.length > 0 && retryableFailedAssets.length > 0 ? (
+        <div className="knowledge-image-assets__notice muted">另有 {nonRetryableFailedAssets.length} 张图片已标为警告，不计入可自动重试失败数。</div>
       ) : null}
       {imageAssets.length > 0 ? (
         <div className="knowledge-image-assets__list">
           {imageAssets.map((asset) => (
-            <article className={`knowledge-image-asset-row ${asset.status}`} key={asset.id}>
+            <article className={`knowledge-image-asset-row ${imageAssetRowClass(asset)}`} key={asset.id}>
               <div className="knowledge-image-asset-row__main">
                 <strong>{imageAssetLabel(asset)}</strong>
                 <small>{imageAssetMeta(asset)}</small>
                 {asset.error_message ? <span>{asset.error_code ? `${asset.error_code}: ` : ""}{asset.error_message}</span> : null}
               </div>
               <div className="knowledge-image-asset-row__side">
-                <Badge tone={imageAssetStatusTone(asset.status)}>{imageAssetStatusLabel(asset.status)}</Badge>
+                <Badge tone={imageAssetStatusTone(asset)}>{imageAssetStatusLabel(asset)}</Badge>
                 <small>{asset.chunk_ids.length} chunk · {asset.attempt_count} 次</small>
                 {asset.status === "failed" || asset.status === "skipped" ? (
                   <button
                     className="knowledge-inline-action"
-                    disabled={isRetryingImageAsset || (asset.status === "failed" && !asset.retryable)}
-                    onClick={() => onRetryImageAsset(asset)}
+                    disabled={isRetryingImageAsset}
+                    onClick={() => onRetryImageAsset(asset, { force: asset.status === "failed" && !asset.retryable })}
+                    title={asset.status === "failed" && !asset.retryable ? "这张图片不是可自动重试错误，点击后会强制重新调用图片转文本模型" : undefined}
                     type="button"
                   >
                     <RefreshCw aria-hidden="true" size={14} />
-                    单张重试
+                    {asset.status === "failed" && !asset.retryable ? "强制重试" : "单张重试"}
                   </button>
                 ) : null}
               </div>
@@ -976,12 +1056,20 @@ function imageAssetMeta(asset: KnowledgeImageAsset): string {
   return parts.join(" · ");
 }
 
-function imageAssetStatusTone(status: string): "neutral" | "info" | "success" | "warning" | "danger" {
+function imageAssetRowClass(asset: KnowledgeImageAsset): string {
+  if (asset.status === "failed" && !asset.retryable) {
+    return "warning";
+  }
+  return asset.status;
+}
+
+function imageAssetStatusTone(asset: KnowledgeImageAsset): "neutral" | "info" | "success" | "warning" | "danger" {
+  const status = asset.status;
   if (status === "completed") {
     return "success";
   }
   if (status === "failed") {
-    return "danger";
+    return asset.retryable ? "danger" : "warning";
   }
   if (status === "pending" || status === "processing") {
     return "warning";
@@ -992,7 +1080,11 @@ function imageAssetStatusTone(status: string): "neutral" | "info" | "success" | 
   return "info";
 }
 
-function imageAssetStatusLabel(status: string): string {
+function imageAssetStatusLabel(asset: KnowledgeImageAsset): string {
+  const status = asset.status;
+  if (status === "failed" && !asset.retryable) {
+    return "警告";
+  }
   const labels: Record<string, string> = {
     completed: "完成",
     failed: "失败",
@@ -1002,6 +1094,14 @@ function imageAssetStatusLabel(status: string): string {
     stale: "过期",
   };
   return labels[status] ?? status;
+}
+
+function retryableFailedImageAssets(assets: KnowledgeImageAsset[]): KnowledgeImageAsset[] {
+  return assets.filter((asset) => asset.status === "failed" && asset.retryable);
+}
+
+function nonRetryableFailedImageAssets(assets: KnowledgeImageAsset[]): KnowledgeImageAsset[] {
+  return assets.filter((asset) => asset.status === "failed" && !asset.retryable);
 }
 
 function formatBytes(value: number): string {
@@ -1179,8 +1279,35 @@ function statusLabel(status: string) {
 }
 
 function errorMessage(error: unknown, fallback: string): string {
+  const detail = apiErrorDetail(error);
+  if (detail?.message) {
+    return detail.message;
+  }
   if (error instanceof Error) {
     return error.message;
   }
   return fallback;
+}
+
+function apiErrorDetail(error: unknown): { code?: string; message?: string } | null {
+  if (!(error instanceof Error)) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(error.message) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const detail = (parsed as { detail?: unknown }).detail;
+    if (!detail || typeof detail !== "object" || Array.isArray(detail)) {
+      return null;
+    }
+    const record = detail as { code?: unknown; message?: unknown };
+    return {
+      code: typeof record.code === "string" ? record.code : undefined,
+      message: typeof record.message === "string" ? record.message : undefined,
+    };
+  } catch {
+    return null;
+  }
 }

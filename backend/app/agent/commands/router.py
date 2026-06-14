@@ -7,7 +7,6 @@ from sqlmodel import Session, select
 from app.agent.commands.registry import get_command_by_input
 from app.agent.commands.result_codec import serialize_command_result
 from app.agent.commands.schemas import CommandExecuteResponse, CommandResult
-from app.agent.model import AGENT_CHAT_MODEL
 from app.core.config import settings
 from app.models.knowledge import KnowledgeSpace
 from app.models.voice_profile import VoiceProfile
@@ -20,6 +19,7 @@ from app.services.knowledge_mount_service import (
     list_conversation_knowledge_mounts,
 )
 from app.services.model_config_service import (
+    AGENT_CHAT_MODEL,
     agent_chat_provider_specs,
     current_agent_chat_config,
     current_agent_chat_model,

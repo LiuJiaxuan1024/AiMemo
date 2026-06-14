@@ -20,6 +20,7 @@ from app.models.note import Note
 from app.models.note_chunk import NoteChunk
 from app.models.runtime_config import RuntimeConfig
 from app.models.sync_state import SyncState
+from app.models.sync_metadata import SyncConflict, SyncDevice, SyncItem
 from app.models.voice_profile import VoiceProfile
 
 __all__ = [
@@ -44,5 +45,8 @@ __all__ = [
     "NoteChunk",
     "RuntimeConfig",
     "SyncState",
+    "SyncConflict",
+    "SyncDevice",
+    "SyncItem",
     "VoiceProfile",
 ]

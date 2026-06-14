@@ -31,6 +31,7 @@ export function ChatComposer({
   onStop,
   onSubmit,
 }: ChatComposerProps) {
+  const formRef = useRef<HTMLFormElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [selectedCommandIndex, setSelectedCommandIndex] = useState<number | null>(null);
   const canSubmit = input.trim().length > 0 || attachments.length > 0;
@@ -47,13 +48,6 @@ export function ChatComposer({
     setSelectedCommandIndex(null);
   }, [commandQuery]);
 
-  function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>) {
-    const files = Array.from(event.clipboardData.files ?? []);
-    if (files.length > 0) {
-      onAddFiles(files);
-    }
-  }
-
   function fillCommand(command: CommandSchema) {
     if (command.visibility.state !== "enabled") {
       return;
@@ -62,7 +56,7 @@ export function ChatComposer({
     setSelectedCommandIndex(null);
   }
 
-  function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+  function handleKeyDown(event: KeyboardEvent<HTMLElement>) {
     if (shouldShowCommandBoard && visibleCommands.length > 0) {
       if (event.key === "ArrowDown") {
         event.preventDefault();
@@ -97,12 +91,21 @@ export function ChatComposer({
       if (isSending || isUploading) {
         return;
       }
-      event.currentTarget.form?.requestSubmit();
+      formRef.current?.requestSubmit();
     }
   }
 
+  function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const files = Array.from(event.clipboardData.files ?? []);
+    if (files.length === 0) {
+      return;
+    }
+    event.preventDefault();
+    onAddFiles(files);
+  }
+
   return (
-    <form className="chat-input-bar" onSubmit={onSubmit}>
+    <form className="chat-input-bar" onSubmit={onSubmit} ref={formRef}>
       {shouldShowCommandBoard && visibleCommands.length > 0 ? (
         <div className="chat-command-board" role="listbox">
           {visibleCommands.map((command, index) => (
@@ -152,10 +155,11 @@ export function ChatComposer({
           </div>
         ) : null}
         <TextareaAutosize
-          aria-label="发送消息"
-          maxRows={6}
+          className="chat-plain-input"
+          disabled={isSending}
+          maxRows={8}
           minRows={1}
-          onChange={(event) => onInputChange(event.target.value)}
+          onChange={(event) => onInputChange(event.currentTarget.value)}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           placeholder="问问你的笔记、计划、偏好，或直接粘贴图片..."

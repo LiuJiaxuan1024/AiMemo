@@ -47,6 +47,7 @@ class KnowledgeDocumentRead(BaseModel):
     image_asset_processed_count: int
     image_text_chunk_count: int
     image_asset_failed_count: int
+    image_asset_warning_count: int = 0
     token_count: int
     error_code: str | None
     error_message: str | None

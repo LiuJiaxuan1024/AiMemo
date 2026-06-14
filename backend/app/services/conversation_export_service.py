@@ -12,14 +12,27 @@ import re
 from fastapi import HTTPException, status
 from sqlmodel import Session, col, select
 
+from app.core.config import settings
 from app.models.chat_attachment import ChatAttachment
 from app.models.chat_message import ChatMessage
 from app.models.chat_turn import ChatTurn
 from app.models.conversation import Conversation
-from app.schemas.conversation import ConversationExportRequest
+from app.schemas.conversation import (
+    ConversationExportAttachment,
+    ConversationExportConversation,
+    ConversationExportFollowupThread,
+    ConversationExportFollowupTurn,
+    ConversationExportGraphSnapshot,
+    ConversationExportMessage,
+    ConversationMultiExportRequest,
+    ConversationMultiExportSnapshot,
+    ConversationExportRequest,
+    ConversationExportSnapshot,
+)
 
 
-MAX_EMBEDDED_IMAGE_BYTES = 3 * 1024 * 1024
+MAX_EMBEDDED_IMAGE_BYTES = settings.attachments_image_max_mb * 1024 * 1024
+EXPORT_GRAPHS_ENABLED = False
 
 
 @dataclass(frozen=True)
@@ -34,6 +47,7 @@ class FollowupTurn:
 class FollowupThread:
     segment_id: str
     original_text: str
+    position: dict[str, int] | None
     turns: list[FollowupTurn]
 
 
@@ -42,6 +56,17 @@ def export_conversation_html(
     conversation_id: int,
     payload: ConversationExportRequest,
 ) -> tuple[str, str]:
+    snapshot = build_conversation_export_snapshot(session, conversation_id, payload)
+    title = snapshot.conversation.title
+    html = _render_export_html(snapshot)
+    return html, f"{_safe_filename(title)}-chat-export.html"
+
+
+def build_conversation_export_snapshot(
+    session: Session,
+    conversation_id: int,
+    payload: ConversationExportRequest,
+) -> ConversationExportSnapshot:
     conversation = session.get(Conversation, conversation_id)
     if conversation is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
@@ -109,27 +134,59 @@ def export_conversation_html(
         conversation_id=conversation_id,
         message_ids=attachment_message_ids,
     )
+    include_graphs = bool(payload.include_graphs and EXPORT_GRAPHS_ENABLED)
     graphs_by_assistant_id = (
         _load_graphs_by_assistant_message_id(
             session,
             conversation_id=conversation_id,
             assistant_message_ids=assistant_ids_for_graphs,
         )
-        if payload.include_graphs
+        if include_graphs
         else {}
     )
 
+    exported_at = datetime.now().astimezone().isoformat(timespec="seconds")
     title = conversation.title.strip() or f"对话 {conversation.id}"
-    html = _render_export_html(
+    return _build_export_snapshot(
         conversation=conversation,
         title=title,
+        exported_at=exported_at,
         messages=main_messages,
         attachments_by_message_id=attachments_by_message_id,
         followups_by_source=followups_by_source,
         graphs_by_assistant_id=graphs_by_assistant_id,
-        include_graphs=payload.include_graphs,
+        include_graphs=include_graphs,
     )
-    return html, f"{_safe_filename(title)}-chat-export.html"
+
+
+def build_multi_conversation_export_snapshot(
+    session: Session,
+    payload: ConversationMultiExportRequest,
+) -> ConversationMultiExportSnapshot:
+    conversation_ids = _unique_positive_ids(payload.conversation_ids)
+    if not conversation_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请选择要导出的对话。")
+    if len(conversation_ids) > 50:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="一次最多导出 50 个对话。")
+
+    snapshots: list[ConversationExportSnapshot] = []
+    for conversation_id in conversation_ids:
+        snapshots.append(
+            build_conversation_export_snapshot(
+                session,
+                conversation_id,
+                ConversationExportRequest(
+                    include_all=True,
+                    include_followups=payload.include_followups,
+                    include_graphs=payload.include_graphs,
+                    message_ids=[],
+                ),
+            )
+        )
+    return ConversationMultiExportSnapshot(
+        exported_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+        conversations=snapshots,
+    )
 
 
 def _build_followup_threads(
@@ -159,6 +216,7 @@ def _build_followup_threads(
             thread = FollowupThread(
                 segment_id=segment_id,
                 original_text=str(payload["original_text"]),
+                position=_normalize_position(payload.get("position")),
                 turns=[],
             )
             threads[segment_id] = thread
@@ -175,6 +233,18 @@ def _build_followup_threads(
         source_message_id: list(threads.values())
         for source_message_id, threads in grouped.items()
     }
+
+
+def _unique_positive_ids(values: list[int]) -> list[int]:
+    seen: set[int] = set()
+    result: list[int] = []
+    for raw_value in values:
+        value = int(raw_value)
+        if value <= 0 or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def _load_attachments_by_message_id(
@@ -219,37 +289,16 @@ def _load_graphs_by_assistant_message_id(
     }
 
 
-def _render_export_html(
-    *,
-    conversation: Conversation,
-    title: str,
-    messages: list[ChatMessage],
-    attachments_by_message_id: dict[int, list[ChatAttachment]],
-    followups_by_source: dict[int, list[FollowupThread]],
-    graphs_by_assistant_id: dict[int, ChatTurn],
-    include_graphs: bool,
-) -> str:
-    exported_at = datetime.now().astimezone().isoformat(timespec="seconds")
-    export_data = _build_export_data(
-        conversation=conversation,
-        title=title,
-        exported_at=exported_at,
-        messages=messages,
-        followups_by_source=followups_by_source,
-        graphs_by_assistant_id=graphs_by_assistant_id,
-        include_graphs=include_graphs,
-    )
+def _render_export_html(snapshot: ConversationExportSnapshot) -> str:
+    title = snapshot.conversation.title
     body = "\n".join(
         _render_message(
             message,
-            attachments=attachments_by_message_id.get(int(message.id or 0), []),
-            followup_threads=followups_by_source.get(int(message.id or 0), []),
-            graphs_by_assistant_id=graphs_by_assistant_id,
-            include_graphs=include_graphs,
+            graphs=snapshot.graphs,
         )
-        for message in messages
+        for message in snapshot.messages
     )
-    script = _render_export_scripts(export_data)
+    script = _render_export_scripts(snapshot)
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -264,12 +313,12 @@ def _render_export_html(
       <div>
         <p class="kicker">AiMemo Chat Export</p>
         <h1>{escape(title)}</h1>
-        <p>{escape(conversation.summary or "导出的对话片段")}</p>
+        <p>{escape(snapshot.conversation.summary or "导出的对话片段")}</p>
       </div>
       <dl>
-        <div><dt>消息</dt><dd>{len(messages)}</dd></div>
-        <div><dt>导出时间</dt><dd>{escape(exported_at)}</dd></div>
-        <div><dt>会话</dt><dd>#{conversation.id or 0}</dd></div>
+        <div><dt>消息</dt><dd>{len(snapshot.messages)}</dd></div>
+        <div><dt>导出时间</dt><dd>{escape(snapshot.conversation.exported_at)}</dd></div>
+        <div><dt>会话</dt><dd>#{snapshot.conversation.id}</dd></div>
       </dl>
     </header>
     <section class="timeline" aria-label="对话内容">
@@ -278,40 +327,32 @@ def _render_export_html(
   </main>
   <aside class="segment-followup-panel export-followup-panel" id="followup-panel" aria-label="片段追问侧栏" hidden></aside>
   <div id="followup-modal-root"></div>
-  <div id="graph-drawer-root"></div>
   {script}
 </body>
 </html>"""
 
 
 def _render_message(
-    message: ChatMessage,
+    message: ConversationExportMessage,
     *,
-    attachments: list[ChatAttachment],
-    followup_threads: list[FollowupThread],
-    graphs_by_assistant_id: dict[int, ChatTurn],
-    include_graphs: bool,
+    graphs: dict[str, ConversationExportGraphSnapshot],
 ) -> str:
-    message_id = int(message.id or 0)
     role_label = "用户" if message.role == "user" else "AiMemo" if message.role == "assistant" else message.role
-    content = _render_markdown(message.content)
-    attachments_html = _render_attachments(attachments)
-    graph = graphs_by_assistant_id.get(message_id)
+    attachments_html = _render_attachments(message.attachments)
     action_html = _render_message_actions(
         message,
-        followup_count=sum(len(thread.turns) for thread in followup_threads),
-        graph=graph if include_graphs else None,
+        followup_count=sum(len(thread.turns) for thread in message.followup_threads),
     )
-    followup_attr = f' data-followup-message-id="{message_id}"' if followup_threads else ""
+    followup_attr = f' data-followup-message-id="{message.id}"' if message.followup_threads else ""
     return f"""
-<article class="message message-{escape(message.role)}" id="message-{message_id}">
+<article class="message message-{escape(message.role)}" id="message-{message.id}">
   <div class="message-frame">
     <div class="message-meta">
       <span>{escape(role_label)}</span>
-      <time>{escape(_format_time(message.created_at))}</time>
+      <time>{escape(message.created_at)}</time>
     </div>
     <div class="bubble">
-      <div class="markdown"{followup_attr}>{content}</div>
+      <div class="markdown"{followup_attr}>{message.content_html}</div>
       {attachments_html}
     </div>
   </div>
@@ -320,99 +361,134 @@ def _render_message(
 
 
 def _render_message_actions(
-    message: ChatMessage,
+    message: ConversationExportMessage,
     *,
     followup_count: int,
-    graph: ChatTurn | None,
 ) -> str:
     if message.role != "assistant":
         return ""
-    message_id = int(message.id or 0)
-    graph_id = int(graph.id or 0) if graph and graph.id is not None else 0
-    graph_disabled = " disabled" if graph_id <= 0 else ""
     return f"""
 <div class="message-actions" aria-label="消息操作">
-  <button class="message-action message-action--followups" data-open-followups data-message-id="{message_id}" type="button" title="查看片段追问">
+  <button class="message-action message-action--followups" data-open-followups data-message-id="{message.id}" type="button" title="查看片段追问">
     <span aria-hidden="true">?</span>
     <em>{followup_count}</em>
-  </button>
-  <button class="message-action message-action--graph" data-open-graph data-graph-id="{graph_id}" type="button" title="查看本轮 graph"{graph_disabled}>
-    <span aria-hidden="true">G</span>
   </button>
 </div>"""
 
 
-def _build_export_data(
+def _build_export_snapshot(
     *,
     conversation: Conversation,
     title: str,
     exported_at: str,
     messages: list[ChatMessage],
+    attachments_by_message_id: dict[int, list[ChatAttachment]],
     followups_by_source: dict[int, list[FollowupThread]],
     graphs_by_assistant_id: dict[int, ChatTurn],
     include_graphs: bool,
-) -> dict:
+) -> ConversationExportSnapshot:
     graph_turns = {
         int(turn.id or 0): turn
         for turn in graphs_by_assistant_id.values()
         if include_graphs and turn.id is not None
     }
-    return {
-        "conversation": {
-            "id": conversation.id or 0,
-            "title": title,
-            "summary": conversation.summary or "导出的对话片段",
-            "thread_id": conversation.langgraph_thread_id,
-            "exported_at": exported_at,
-        },
-        "messages": [
-            {
-                "id": int(message.id or 0),
-                "role": message.role,
-                "created_at": _format_time(message.created_at),
-                "graph_id": int(graphs_by_assistant_id[int(message.id or 0)].id or 0)
-                if int(message.id or 0) in graphs_by_assistant_id
-                else None,
-            }
+    graphs = {
+        str(graph_id): _graph_payload(turn)
+        for graph_id, turn in graph_turns.items()
+    }
+    return ConversationExportSnapshot(
+        conversation=ConversationExportConversation(
+            id=conversation.id or 0,
+            title=title,
+            summary=conversation.summary or "导出的对话片段",
+            langgraph_thread_id=conversation.langgraph_thread_id,
+            exported_at=exported_at,
+        ),
+        messages=[
+            _message_payload(
+                message,
+                attachments=attachments_by_message_id.get(int(message.id or 0), []),
+                followup_threads=followups_by_source.get(int(message.id or 0), []),
+                graphs_by_assistant_id=graphs_by_assistant_id,
+            )
             for message in messages
         ],
-        "followups": {
-            str(source_id): [_followup_thread_payload(thread, graphs_by_assistant_id) for thread in threads]
-            for source_id, threads in followups_by_source.items()
-        },
-        "graphs": {
-            str(graph_id): _graph_payload(turn)
-            for graph_id, turn in graph_turns.items()
-        },
-    }
+        graphs=graphs,
+    )
+
+
+def _message_payload(
+    message: ChatMessage,
+    *,
+    attachments: list[ChatAttachment],
+    followup_threads: list[FollowupThread],
+    graphs_by_assistant_id: dict[int, ChatTurn],
+) -> ConversationExportMessage:
+    message_id = int(message.id or 0)
+    graph = graphs_by_assistant_id.get(message_id)
+    return ConversationExportMessage(
+        id=message_id,
+        role=message.role,
+        content=message.content,
+        content_html=_render_markdown(message.content),
+        created_at=_format_time(message.created_at),
+        status=message.status,
+        token_count=message.token_count,
+        attachments=[_attachment_payload(attachment) for attachment in attachments],
+        turn_id=int(graph.id) if graph and graph.id is not None else None,
+        graph_id=str(graph.id) if graph and graph.id is not None else None,
+        followup_threads=[
+            _followup_thread_payload(thread, graphs_by_assistant_id)
+            for thread in followup_threads
+        ],
+    )
+
+
+def _attachment_payload(attachment: ChatAttachment) -> ConversationExportAttachment:
+    attachment_id = attachment.id or 0
+    return ConversationExportAttachment(
+        id=attachment_id,
+        kind=attachment.kind,
+        original_name=attachment.original_name,
+        mime_type=attachment.mime_type,
+        size_bytes=attachment.size_bytes,
+        width=attachment.width,
+        height=attachment.height,
+        status=attachment.status,
+        url=f"/api/conversations/{attachment.conversation_id}/attachments/{attachment_id}/content"
+        if attachment_id
+        else "",
+        data_uri=_attachment_image_data_uri(attachment) if attachment.kind == "image" else None,
+    )
 
 
 def _followup_thread_payload(
     thread: FollowupThread,
     graphs_by_assistant_id: dict[int, ChatTurn],
-) -> dict:
+) -> ConversationExportFollowupThread:
     turns = []
     for turn in thread.turns:
         assistant_id = int(turn.assistant.id or 0) if turn.assistant and turn.assistant.id is not None else None
         graph = graphs_by_assistant_id.get(assistant_id or 0)
+        answer = turn.assistant.content if turn.assistant is not None else ""
         turns.append(
-            {
-                "question": turn.question,
-                "assistant_message_id": assistant_id,
-                "answer_html": _render_markdown(turn.assistant.content)
-                if turn.assistant is not None and turn.assistant.content.strip()
-                else "",
-                "timestamp": _format_time(turn.timestamp),
-                "status": turn.status,
-                "graph_id": int(graph.id or 0) if graph and graph.id is not None else None,
-            }
+            ConversationExportFollowupTurn(
+                question=turn.question,
+                answer=answer,
+                answer_html=_render_markdown(answer) if answer.strip() else "",
+                assistant_message_id=assistant_id,
+                timestamp=_format_time(turn.timestamp),
+                status=turn.status,
+                graph_id=str(graph.id) if graph and graph.id is not None else None,
+            )
         )
-    return {
-        "segment_id": thread.segment_id,
-        "original_text": thread.original_text,
-        "status": _followup_thread_status(thread),
-        "turns": turns,
-    }
+    return ConversationExportFollowupThread(
+        segment_id=thread.segment_id,
+        original_text=thread.original_text,
+        position=thread.position,
+        status=_followup_thread_status(thread),
+        turns=turns,
+    )
 
 
 def _followup_thread_status(thread: FollowupThread) -> str:
@@ -424,26 +500,26 @@ def _followup_thread_status(thread: FollowupThread) -> str:
     return "answered" if statuses else "pending"
 
 
-def _graph_payload(turn: ChatTurn) -> dict:
+def _graph_payload(turn: ChatTurn) -> ConversationExportGraphSnapshot:
     node_statuses = _decode_json_object(turn.node_statuses)
     debug_payload = _decode_json_object(turn.debug_payload)
-    return {
-        "turn_id": int(turn.id or 0),
-        "conversation_id": turn.conversation_id,
-        "user_message_id": turn.user_message_id,
-        "assistant_message_id": turn.assistant_message_id,
-        "thread_id": turn.thread_id,
-        "checkpoint_id": turn.checkpoint_id,
-        "status": turn.status,
-        "node_statuses": node_statuses,
-        "mermaid": _graph_mermaid(node_statuses),
-        "subgraphs": {},
-        "context_layers": _decode_json_list(turn.context_layers),
-        "retrieved_chunks": _decode_json_list(turn.retrieved_chunks),
-        "debug_payload": debug_payload,
-        "state_history": _state_history_placeholder(turn),
-        "error": turn.error,
-    }
+    return ConversationExportGraphSnapshot(
+        turn_id=int(turn.id or 0),
+        conversation_id=turn.conversation_id,
+        user_message_id=turn.user_message_id,
+        assistant_message_id=turn.assistant_message_id,
+        thread_id=turn.thread_id,
+        checkpoint_id=turn.checkpoint_id,
+        status=turn.status,
+        node_statuses=node_statuses,
+        mermaid=_graph_mermaid(node_statuses),
+        subgraphs={},
+        context_layers=_decode_json_list(turn.context_layers),
+        retrieved_chunks=_decode_json_list(turn.retrieved_chunks),
+        debug_payload=debug_payload,
+        state_history=_state_history_placeholder(turn),
+        error=turn.error,
+    )
 
 
 def _graph_mermaid(node_statuses: dict) -> str:
@@ -504,9 +580,9 @@ def _state_history_placeholder(turn: ChatTurn) -> dict:
     }
 
 
-def _render_export_scripts(export_data: dict) -> str:
+def _render_export_scripts(snapshot: ConversationExportSnapshot) -> str:
     return f"""
-<script type="application/json" id="aimemo-export-data">{_json_script(export_data)}</script>
+<script type="application/json" id="aimemo-export-data">{_json_script(snapshot.model_dump(mode="json"))}</script>
 <script>{_EXPORT_JS}</script>"""
 
 
@@ -519,7 +595,7 @@ def _json_script(value: dict) -> str:
     )
 
 
-def _render_attachments(attachments: list[ChatAttachment]) -> str:
+def _render_attachments(attachments: list[ConversationExportAttachment]) -> str:
     if not attachments:
         return ""
     items = []
@@ -527,10 +603,9 @@ def _render_attachments(attachments: list[ChatAttachment]) -> str:
         label = escape(attachment.original_name or "attachment")
         size = escape(_format_size(attachment.size_bytes))
         if attachment.kind == "image":
-            data_uri = _attachment_image_data_uri(attachment)
-            if data_uri:
+            if attachment.data_uri:
                 items.append(
-                    f"<figure class=\"attachment attachment-image\"><img alt=\"{label}\" src=\"{data_uri}\" /><figcaption>{label} · {size}</figcaption></figure>"
+                    f"<figure class=\"attachment attachment-image\"><img alt=\"{label}\" src=\"{attachment.data_uri}\" /><figcaption>{label} · {size}</figcaption></figure>"
                 )
                 continue
         items.append(
@@ -562,6 +637,7 @@ def _render_markdown(value: str) -> str:
     list_items: list[str] = []
     ordered_items: list[str] = []
     in_code = False
+    code_language = ""
     code_lines: list[str] = []
 
     def flush_paragraph() -> None:
@@ -584,13 +660,15 @@ def _render_markdown(value: str) -> str:
         stripped = line.strip()
         if stripped.startswith("```"):
             if in_code:
-                html_parts.append(f"<pre><code>{escape(chr(10).join(code_lines))}</code></pre>")
+                html_parts.append(_render_export_code_block(chr(10).join(code_lines), code_language))
                 code_lines.clear()
+                code_language = ""
                 in_code = False
             else:
                 flush_paragraph()
                 flush_lists()
                 in_code = True
+                code_language = stripped[3:].strip()
             continue
         if in_code:
             code_lines.append(line)
@@ -627,10 +705,22 @@ def _render_markdown(value: str) -> str:
         paragraph.append(line)
 
     if in_code:
-        html_parts.append(f"<pre><code>{escape(chr(10).join(code_lines))}</code></pre>")
+        html_parts.append(_render_export_code_block(chr(10).join(code_lines), code_language))
     flush_paragraph()
     flush_lists()
     return "".join(html_parts) or "<p></p>"
+
+
+def _render_export_code_block(code: str, language: str) -> str:
+    normalized_language = re.sub(r"[^a-zA-Z0-9_+#.-]+", "", language).strip() or "code"
+    return (
+        '<div class="markdown-code-block">'
+        '<div class="markdown-code-block__toolbar">'
+        f'<span class="markdown-code-block__language">{escape(normalized_language)}</span>'
+        "</div>"
+        f'<pre><code class="language-{escape(normalized_language)}">{escape(code)}</code></pre>'
+        "</div>"
+    )
 
 
 def _inline_markdown(value: str) -> str:
@@ -655,6 +745,18 @@ def _parse_segment_followup_payload(content: str) -> dict | None:
     ):
         return None
     return payload
+
+
+def _normalize_position(value: object) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    start = value.get("start")
+    end = value.get("end")
+    if not isinstance(start, int) or not isinstance(end, int):
+        return None
+    if start < 0 or end < start:
+        return None
+    return {"start": start, "end": end}
 
 
 def _decode_json_object(value: str | None) -> dict:
@@ -1399,164 +1501,7 @@ _EXPORT_CSS += """
   margin: 0;
   padding: 10px 12px;
 }
-.chat-debug-workspace {
-  background: #f5f7fb;
-  bottom: 0;
-  border: 1px solid #dfe6f0;
-  border-bottom: 0;
-  border-radius: 16px 16px 0 0;
-  box-shadow: 0 -22px 70px rgba(15, 23, 42, 0.26);
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  height: min(82vh, 860px);
-  left: 16px;
-  position: fixed;
-  right: 16px;
-  z-index: 120;
-  animation: chat-debug-drawer-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
-}
-.chat-debug-workspace-header {
-  align-items: center;
-  background: #ffffff;
-  border-bottom: 1px solid #e1e6ef;
-  display: grid;
-  gap: 18px;
-  grid-template-columns: minmax(220px, 1fr) auto auto;
-  padding: 12px 20px;
-}
-.chat-debug-workspace-title h2 {
-  font-size: 15px;
-  font-weight: 650;
-  margin: 0;
-}
-.chat-debug-workspace-title p {
-  color: #667085;
-  display: flex;
-  flex-wrap: wrap;
-  font-size: 12px;
-  gap: 10px;
-  margin: 4px 0 0;
-}
-.chat-debug-status {
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 650;
-  padding: 1px 8px;
-}
-.chat-debug-status-completed,
-.chat-debug-status-succeeded,
-.chat-debug-status-ok { background: #dcfce7; color: #166534; }
-.chat-debug-status-running,
-.chat-debug-status-pending { background: #fef3c7; color: #92400e; }
-.chat-debug-status-failed,
-.chat-debug-status-error { background: #fee2e2; color: #991b1b; }
-.chat-debug-workspace-tabs {
-  background: #f1f4fb;
-  border: 1px solid #e1e6ef;
-  border-radius: 10px;
-  display: inline-flex;
-  gap: 4px;
-  padding: 4px;
-}
-.chat-debug-workspace-tabs button {
-  align-items: center;
-  background: transparent;
-  border: 0;
-  border-radius: 7px;
-  color: #475467;
-  cursor: pointer;
-  display: inline-flex;
-  font: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  gap: 6px;
-  min-height: 30px;
-  padding: 0 12px;
-}
-.chat-debug-workspace-tabs button.is-active {
-  background: #ffffff;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
-  color: #101828;
-}
-.chat-debug-workspace-body {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-  padding: 16px 20px 20px;
-}
-.chat-debug-graph-tab {
-  display: grid;
-  gap: 16px;
-  grid-template-columns: minmax(0, 1.5fr) minmax(280px, 0.85fr);
-  min-height: 0;
-  overflow: hidden;
-}
-.chat-debug-graph-canvas,
-.chat-debug-graph-aside,
-.chat-debug-panel-card {
-  background: #ffffff;
-  border: 1px solid #e1e6ef;
-  border-radius: 12px;
-  min-height: 0;
-  overflow: auto;
-  padding: 12px;
-}
-.export-graph-flow {
-  display: grid;
-  gap: 8px;
-}
-.export-graph-node {
-  align-items: center;
-  background: #f8fafc;
-  border: 1.5px solid #e2e8f0;
-  border-radius: 10px;
-  color: #1e293b;
-  cursor: pointer;
-  display: grid;
-  gap: 8px;
-  grid-template-columns: minmax(0, 1fr) auto;
-  min-height: 42px;
-  padding: 8px 10px;
-  text-align: left;
-}
-.export-graph-node:hover,
-.export-graph-node.is-active {
-  border-color: #7c9cff;
-  box-shadow: 0 0 0 2px rgba(124, 156, 255, 0.16);
-}
-.export-graph-node em {
-  border-radius: 999px;
-  font-size: 11px;
-  font-style: normal;
-  font-weight: 700;
-  padding: 2px 8px;
-}
-.export-graph-node.status-succeeded em,
-.export-graph-node.status-completed em { background: #dcfce7; color: #166534; }
-.export-graph-node.status-running em,
-.export-graph-node.status-pending em { background: #fef3c7; color: #92400e; }
-.export-graph-node.status-failed em { background: #fee2e2; color: #991b1b; }
-.export-graph-node.status-skipped em { background: #fffbeb; color: #92400e; }
-.chat-debug-aside-section {
-  border: 1px solid #e1e6ef;
-  border-radius: 10px;
-  display: grid;
-  gap: 10px;
-  padding: 12px;
-}
-.chat-debug-aside-section header {
-  align-items: center;
-  display: flex;
-  justify-content: space-between;
-}
-.chat-debug-aside-section h4 {
-  font-size: 13px;
-  margin: 0;
-}
-.export-code,
-.chat-debug-aside-section pre,
-.chat-debug-context-card pre {
+.export-code {
   background: #0f172a;
   border-radius: 8px;
   color: #e2e8f0;
@@ -1570,113 +1515,6 @@ _EXPORT_CSS += """
   white-space: pre-wrap;
   word-break: break-word;
 }
-.chat-debug-empty {
-  align-items: center;
-  color: #667085;
-  display: flex;
-  justify-content: center;
-  min-height: 180px;
-  text-align: center;
-}
-.chat-debug-context-tab,
-.chat-debug-performance-tab,
-.chat-debug-checkpoints-tab {
-  display: grid;
-  gap: 10px;
-  min-height: 0;
-  overflow: auto;
-  padding-right: 4px;
-}
-.chat-debug-context-card,
-.chat-evidence-card {
-  background: #ffffff;
-  border: 1px solid #e1e6ef;
-  border-radius: 10px;
-  padding: 10px 12px;
-}
-.chat-debug-context-card summary {
-  align-items: center;
-  cursor: pointer;
-  display: flex;
-  font-size: 13px;
-  gap: 10px;
-}
-.chat-debug-context-level {
-  border-radius: 6px;
-  display: inline-block;
-  font-size: 11px;
-  font-weight: 700;
-  min-width: 42px;
-  padding: 2px 8px;
-  text-align: center;
-}
-.chat-debug-context-level-0 { background: #dcfce7; color: #166534; }
-.chat-debug-context-level-1 { background: #fef3c7; color: #78350f; }
-.chat-debug-context-level-2 { background: #ede9fe; color: #4c1d95; }
-.chat-debug-context-level-3 { background: #d1fae5; color: #065f46; }
-.chat-debug-context-level-4 { background: #fce7f3; color: #831843; }
-.chat-debug-performance-summary {
-  display: grid;
-  gap: 10px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-.chat-debug-performance-summary div {
-  background: #ffffff;
-  border: 1px solid #e1e6ef;
-  border-radius: 10px;
-  display: grid;
-  gap: 4px;
-  padding: 12px;
-}
-.chat-debug-performance-summary span {
-  color: #64748b;
-  font-size: 12px;
-}
-.chat-debug-performance-summary strong {
-  color: #101828;
-  font-size: 18px;
-}
-.chat-debug-performance-table {
-  background: #ffffff;
-  border-collapse: collapse;
-  border-radius: 10px;
-  overflow: hidden;
-  width: 100%;
-}
-.chat-debug-performance-table th,
-.chat-debug-performance-table td {
-  border-bottom: 1px solid #edf2f7;
-  font-size: 12px;
-  padding: 8px 10px;
-  text-align: left;
-}
-.chat-debug-json-tree {
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  color: #1e293b;
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 11.5px;
-  max-height: 420px;
-  overflow: auto;
-  padding: 8px;
-}
-.chat-debug-json-tree details {
-  margin: 2px 0;
-}
-.chat-debug-json-tree summary {
-  cursor: pointer;
-}
-.chat-debug-json-key {
-  color: #475569;
-  font-weight: 700;
-}
-.chat-debug-json-string {
-  color: #047857;
-}
-.chat-debug-json-scalar {
-  color: #7c3aed;
-}
 @keyframes segment-followup-modal-fade {
   from { opacity: 0; }
   to { opacity: 1; }
@@ -1688,24 +1526,6 @@ _EXPORT_CSS += """
 @keyframes segment-followup-panel-in {
   from { opacity: 0; transform: translateX(14px); }
   to { opacity: 1; transform: translateX(0); }
-}
-@keyframes chat-debug-drawer-in {
-  from { opacity: 0; transform: translateY(34px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-@media (max-width: 900px) {
-  .chat-debug-workspace-header {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .chat-debug-workspace-tabs {
-    overflow-x: auto;
-  }
-  .chat-debug-graph-tab {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .chat-debug-performance-summary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 @media (max-width: 760px) {
   .message,
@@ -1736,12 +1556,8 @@ _EXPORT_JS = r"""
   const DATA = dataNode ? JSON.parse(dataNode.textContent || "{}") : {};
   const followupPanel = document.getElementById("followup-panel");
   const followupModalRoot = document.getElementById("followup-modal-root");
-  const graphDrawerRoot = document.getElementById("graph-drawer-root");
   let activeFollowupMessageId = null;
   let activeFollowupSegmentId = null;
-  let activeGraphId = null;
-  let activeGraphTab = "graph";
-  let activeGraphNode = null;
 
   function escapeHtml(value) {
     return String(value ?? "")
@@ -1758,12 +1574,12 @@ _EXPORT_JS = r"""
     return "已回复";
   }
 
-  function graphStatusClass(status) {
-    return `chat-debug-status chat-debug-status-${String(status || "pending")}`;
+  function messageById(messageId) {
+    return (DATA.messages || []).find((message) => Number(message.id) === Number(messageId)) || null;
   }
 
   function messageFollowups(messageId) {
-    return DATA.followups?.[String(messageId)] || [];
+    return messageById(messageId)?.followup_threads || [];
   }
 
   function findThread(messageId, segmentId) {
@@ -1906,7 +1722,6 @@ _EXPORT_JS = r"""
         <div class="segment-followup-turn__answer">
           <div class="segment-followup-turn__assistant">
             <div class="markdown">${turn.answer_html || `<p class="segment-followup-panel__pending">这条追问还没有回复。</p>`}</div>
-            ${showGraph && turn.graph_id ? `<button class="export-icon-button" data-open-graph data-graph-id="${turn.graph_id}" type="button" title="查看这轮追问 graph">G</button>` : ""}
           </div>
         </div>
       </section>`).join("")}</div>`;
@@ -1942,177 +1757,6 @@ _EXPORT_JS = r"""
     if (followupModalRoot) followupModalRoot.innerHTML = "";
   }
 
-  function openGraphDrawer(graphId) {
-    if (!graphDrawerRoot || !graphId || !DATA.graphs?.[String(graphId)]) return;
-    activeGraphId = String(graphId);
-    activeGraphTab = "graph";
-    activeGraphNode = null;
-    renderGraphDrawer();
-  }
-
-  function closeGraphDrawer() {
-    activeGraphId = null;
-    activeGraphNode = null;
-    if (graphDrawerRoot) graphDrawerRoot.innerHTML = "";
-  }
-
-  function renderGraphDrawer() {
-    const graph = DATA.graphs?.[activeGraphId];
-    if (!graphDrawerRoot || !graph) return;
-    graphDrawerRoot.innerHTML = `
-      <section class="chat-debug-workspace" role="dialog" aria-label="Graph 调试工作台" aria-modal="true">
-        <header class="chat-debug-workspace-header">
-          <div class="chat-debug-workspace-title">
-            <h2>Graph 调试工作台</h2>
-            <p>
-              <span>turn #${escapeHtml(graph.turn_id)}</span>
-              <span class="${graphStatusClass(graph.status)}">${escapeHtml(graph.status)}</span>
-              ${graph.thread_id ? `<span>thread ${escapeHtml(graph.thread_id)}</span>` : ""}
-            </p>
-          </div>
-          <nav class="chat-debug-workspace-tabs" role="tablist">
-            ${renderGraphTabButton("graph", "图结构")}
-            ${renderGraphTabButton("checkpoints", `Checkpoint 对比${graph.state_history?.states?.length ? ` · ${graph.state_history.states.length}` : ""}`)}
-            ${renderGraphTabButton("context", "上下文金字塔")}
-            ${renderGraphTabButton("performance", "性能 / 证据")}
-          </nav>
-          <button class="export-icon-button" data-close-graph type="button">收起</button>
-        </header>
-        <div class="chat-debug-workspace-body">${renderGraphTab(graph)}</div>
-      </section>`;
-  }
-
-  function renderGraphTabButton(tab, label) {
-    return `<button class="${activeGraphTab === tab ? "is-active" : ""}" data-graph-tab="${tab}" role="tab" type="button">${escapeHtml(label)}</button>`;
-  }
-
-  function renderGraphTab(graph) {
-    if (activeGraphTab === "context") return renderContextTab(graph);
-    if (activeGraphTab === "performance") return renderPerformanceTab(graph);
-    if (activeGraphTab === "checkpoints") return renderCheckpointsTab(graph);
-    return renderGraphStructureTab(graph);
-  }
-
-  function renderGraphStructureTab(graph) {
-    const entries = Object.entries(graph.node_statuses || {});
-    const selectedPayload = activeGraphNode
-      ? graph.debug_payload?.nodes?.[activeGraphNode] || null
-      : null;
-    return `
-      <div class="chat-debug-graph-tab">
-        <div class="chat-debug-graph-canvas">
-          <div class="export-graph-flow">
-            ${entries.map(([node, status]) => `
-              <button class="export-graph-node status-${escapeHtml(status)} ${activeGraphNode === node ? "is-active" : ""}" data-graph-node="${escapeHtml(node)}" type="button">
-                <strong>${escapeHtml(node)}</strong>
-                <em>${escapeHtml(status)}</em>
-              </button>`).join("") || `<p class="chat-debug-empty">暂无节点状态。</p>`}
-          </div>
-        </div>
-        <aside class="chat-debug-graph-aside">
-          ${activeGraphNode ? `
-            <section class="chat-debug-aside-section">
-              <header>
-                <h4>节点 state：${escapeHtml(activeGraphNode)}</h4>
-                <button class="export-icon-button" data-clear-graph-node type="button">×</button>
-              </header>
-              ${renderJsonTree(selectedPayload || {})}
-            </section>` : `<p class="chat-debug-empty">点击 graph 中的节点查看 state。</p>`}
-          <section class="chat-debug-aside-section">
-            <header><h4>Mermaid 源码</h4></header>
-            <pre>${escapeHtml(graph.mermaid || "graph TD")}</pre>
-          </section>
-        </aside>
-      </div>`;
-  }
-
-  function renderContextTab(graph) {
-    const layers = graph.context_layers || [];
-    if (!layers.length) return `<p class="chat-debug-empty">暂无上下文记录。</p>`;
-    return `<div class="chat-debug-context-tab">${layers.map((layer) => `
-      <details class="chat-debug-context-card" open>
-        <summary>
-          <span class="chat-debug-context-level chat-debug-context-level-${String(layer.level ?? 0).replace(".", "-")}">L${escapeHtml(layer.level ?? 0)}</span>
-          <strong>${escapeHtml(layer.name || "context")}</strong>
-          <small>${escapeHtml(layer.used_tokens ?? 0)} tokens${layer.budget_tokens ? ` / ${escapeHtml(layer.budget_tokens)}` : ""}</small>
-        </summary>
-        <pre>${escapeHtml(layer.content || layer.note || "空")}</pre>
-      </details>`).join("")}</div>`;
-  }
-
-  function renderPerformanceTab(graph) {
-    const summary = graph.debug_payload?.summary || {};
-    const nodes = Object.entries(graph.debug_payload?.nodes || {});
-    const chunks = graph.retrieved_chunks || [];
-    return `
-      <div class="chat-debug-performance-tab">
-        <section class="chat-debug-performance-summary">
-          <div><span>首 token</span><strong>${formatMs(summary.first_answer_token_ms)}</strong></div>
-          <div><span>最后 token</span><strong>${formatMs(summary.last_answer_token_ms)}</strong></div>
-          <div><span>token 事件</span><strong>${escapeHtml(summary.answer_token_events ?? 0)}</strong></div>
-          <div><span>检索数</span><strong>${escapeHtml(summary.retrieved_count ?? chunks.length)}</strong></div>
-        </section>
-        ${nodes.length ? `
-          <table class="chat-debug-performance-table">
-            <thead><tr><th>节点</th><th>状态</th><th>开始</th><th>完成</th><th>耗时</th></tr></thead>
-            <tbody>${nodes.map(([node, payload]) => `
-              <tr>
-                <td>${escapeHtml(node)}</td>
-                <td>${escapeHtml(payload.status || "-")}</td>
-                <td>${formatMs(payload.started_ms)}</td>
-                <td>${formatMs(payload.completed_ms)}</td>
-                <td>${formatMs(payload.duration_ms)}</td>
-              </tr>`).join("")}</tbody>
-          </table>` : ""}
-        <h4>检索证据</h4>
-        ${chunks.length ? chunks.map((chunk) => `
-          <article class="chat-evidence-card">
-            <strong>${escapeHtml(chunk.note_title || chunk.document_title || "检索证据")}</strong>
-            <small>chunk #${escapeHtml(chunk.chunk_index ?? "-")} · score ${escapeHtml(formatScore(chunk.score))}</small>
-            <p>${escapeHtml(chunk.content || "")}</p>
-          </article>`).join("") : `<p class="chat-debug-empty">本轮没有可展示的检索结果。</p>`}
-      </div>`;
-  }
-
-  function renderCheckpointsTab(graph) {
-    const history = graph.state_history || {};
-    const states = history.states || [];
-    if (!states.length) {
-      return `<div class="chat-debug-checkpoints-tab"><p class="chat-debug-empty">${escapeHtml(history.export_note || "导出文件未包含 checkpoint history。")}</p></div>`;
-    }
-    return `<div class="chat-debug-checkpoints-tab">${renderJsonTree(states)}</div>`;
-  }
-
-  function renderJsonTree(value, label = "root", depth = 0) {
-    if (value === null) return `<span class="chat-debug-json-scalar">null</span>`;
-    if (Array.isArray(value)) {
-      return `<div class="chat-debug-json-tree"><details ${depth < 1 ? "open" : ""}><summary><span class="chat-debug-json-key">${escapeHtml(label)}</span>: Array · ${value.length}</summary>${value.map((item, index) => renderJsonTreeInner(item, String(index), depth + 1)).join("")}</details></div>`;
-    }
-    if (typeof value === "object") {
-      const entries = Object.entries(value || {});
-      return `<div class="chat-debug-json-tree"><details ${depth < 1 ? "open" : ""}><summary><span class="chat-debug-json-key">${escapeHtml(label)}</span>: Object · ${entries.length} keys</summary>${entries.map(([key, item]) => renderJsonTreeInner(item, key, depth + 1)).join("")}</details></div>`;
-    }
-    return `<span class="chat-debug-json-scalar">${escapeHtml(String(value))}</span>`;
-  }
-
-  function renderJsonTreeInner(value, label, depth) {
-    if (value && typeof value === "object") {
-      const entries = Array.isArray(value) ? value.map((item, index) => [String(index), item]) : Object.entries(value);
-      return `<details ${depth < 2 ? "open" : ""} style="margin-left:${depth * 12}px"><summary><span class="chat-debug-json-key">${escapeHtml(label)}</span>: ${Array.isArray(value) ? `Array · ${value.length}` : `Object · ${entries.length} keys`}</summary>${entries.map(([key, item]) => renderJsonTreeInner(item, key, depth + 1)).join("")}</details>`;
-    }
-    const className = typeof value === "string" ? "chat-debug-json-string" : "chat-debug-json-scalar";
-    return `<div style="margin-left:${depth * 12}px"><span class="chat-debug-json-key">${escapeHtml(label)}:</span> <span class="${className}">${escapeHtml(JSON.stringify(value))}</span></div>`;
-  }
-
-  function formatMs(value) {
-    if (typeof value !== "number") return "-";
-    return value >= 1000 ? `${(value / 1000).toFixed(2)}s` : `${value}ms`;
-  }
-
-  function formatScore(value) {
-    return typeof value === "number" ? value.toFixed(3) : "-";
-  }
-
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target : null;
     if (!target) return;
@@ -2144,45 +1788,17 @@ _EXPORT_JS = r"""
         target === closeFollowupModalTarget;
       const isCloseButton = closeFollowupModalTarget.tagName === "BUTTON";
       if (!isBackdropClick && !isCloseButton) {
-        // Clicks inside the modal body should keep bubbling to inner controls,
-        // such as the graph button attached to a follow-up answer.
+        // Clicks inside the modal body should keep bubbling to inner controls.
       } else {
         closeFollowupModal();
         return;
       }
-    }
-    const graphButton = target.closest("[data-open-graph]");
-    if (graphButton) {
-      openGraphDrawer(graphButton.dataset.graphId);
-      return;
-    }
-    const closeGraph = target.closest("[data-close-graph]");
-    if (closeGraph) {
-      closeGraphDrawer();
-      return;
-    }
-    const graphTab = target.closest("[data-graph-tab]");
-    if (graphTab) {
-      activeGraphTab = graphTab.dataset.graphTab || "graph";
-      renderGraphDrawer();
-      return;
-    }
-    const graphNode = target.closest("[data-graph-node]");
-    if (graphNode) {
-      activeGraphNode = graphNode.dataset.graphNode || null;
-      renderGraphDrawer();
-      return;
-    }
-    if (target.closest("[data-clear-graph-node]")) {
-      activeGraphNode = null;
-      renderGraphDrawer();
     }
   });
 
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     closeFollowupModal();
-    closeGraphDrawer();
     closeFollowupPanel();
   });
 

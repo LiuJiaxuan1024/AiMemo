@@ -14,6 +14,10 @@ class Job(SQLModel, table=True):
     graph_name: str | None = Field(default=None, index=True, max_length=120)
     thread_id: str | None = Field(default=None, index=True, max_length=120)
     dedupe_key: str | None = Field(default=None, index=True, max_length=200)
+    lane: str = Field(default="default", index=True, max_length=80)
+    lock_key: str | None = Field(default=None, index=True, max_length=240)
+    concurrency_policy: str = Field(default="exclusive", index=True, max_length=24)
+    resource_weight: int = Field(default=1)
     status: str = Field(default="pending", index=True, max_length=24)
     payload: str = "{}"
     priority: int = Field(default=0, index=True)

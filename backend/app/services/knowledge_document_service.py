@@ -40,11 +40,17 @@ def list_knowledge_documents(session: Session, space_id: int) -> list[KnowledgeD
         )
         .order_by(KnowledgeDocument.created_at, KnowledgeDocument.id)
     ).all()
+    for document in documents:
+        _refresh_image_asset_stats_if_present(session, document)
+    session.flush()
     return [to_document_read(document) for document in documents]
 
 
 def get_knowledge_document(session: Session, document_id: int) -> KnowledgeDocumentRead:
-    return to_document_read(get_document_or_404(session, document_id))
+    document = get_document_or_404(session, document_id)
+    _refresh_image_asset_stats_if_present(session, document)
+    session.flush()
+    return to_document_read(document)
 
 
 def delete_knowledge_document(session: Session, document_id: int) -> KnowledgeDocumentRead:
@@ -83,6 +89,7 @@ def delete_knowledge_document(session: Session, document_id: int) -> KnowledgeDo
     document.image_asset_processed_count = 0
     document.image_text_chunk_count = 0
     document.image_asset_failed_count = 0
+    document.image_asset_warning_count = 0
     document.token_count = 0
     document.updated_at = utc_now()
     session.add(document)
@@ -273,6 +280,7 @@ def to_document_read(document: KnowledgeDocument) -> KnowledgeDocumentRead:
         image_asset_processed_count=document.image_asset_processed_count,
         image_text_chunk_count=document.image_text_chunk_count,
         image_asset_failed_count=document.image_asset_failed_count,
+        image_asset_warning_count=document.image_asset_warning_count,
         token_count=document.token_count,
         error_code=document.error_code,
         error_message=document.error_message,
@@ -314,6 +322,14 @@ def to_chunk_read(chunk: KnowledgeChunk) -> KnowledgeChunkRead:
         created_at=chunk.created_at,
         updated_at=chunk.updated_at,
     )
+
+
+def _refresh_image_asset_stats_if_present(session: Session, document: KnowledgeDocument) -> None:
+    if document.id is None or document.image_asset_count <= 0:
+        return
+    from app.services.knowledge_image_asset_service import update_document_image_asset_stats
+
+    update_document_image_asset_stats(session, document)
 
 
 def _document_storage_path(space_id: int, document_id: int, filename: str) -> Path:

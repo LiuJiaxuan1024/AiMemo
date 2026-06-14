@@ -1,4 +1,11 @@
-import type { CloudSyncRunResult, CloudSyncStatus } from "./types";
+import type {
+  CloudSyncBackup,
+  CloudSyncBackupCreateResult,
+  CloudSyncConflict,
+  CloudSyncDomainStatus,
+  CloudSyncRunResult,
+  CloudSyncStatus,
+} from "./types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -33,4 +40,31 @@ export function pushCloudSync(): Promise<CloudSyncRunResult> {
 
 export function runCloudSync(): Promise<CloudSyncRunResult> {
   return request<CloudSyncRunResult>("/api/cloud-sync/sync", { method: "POST" });
+}
+
+export function listCloudSyncDomains(): Promise<CloudSyncDomainStatus[]> {
+  return request<CloudSyncDomainStatus[]>("/api/cloud-sync/domains");
+}
+
+export function syncCloudSyncDomain(domain: string): Promise<CloudSyncRunResult> {
+  return request<CloudSyncRunResult>(`/api/cloud-sync/domains/${encodeURIComponent(domain)}/sync`, { method: "POST" });
+}
+
+export function listCloudSyncConflicts(): Promise<CloudSyncConflict[]> {
+  return request<CloudSyncConflict[]>("/api/cloud-sync/conflicts");
+}
+
+export function resolveCloudSyncConflict(conflictId: number): Promise<CloudSyncConflict> {
+  return request<CloudSyncConflict>(`/api/cloud-sync/conflicts/${conflictId}/resolve`, {
+    method: "POST",
+    body: JSON.stringify({ resolution: "keep_both" }),
+  });
+}
+
+export function listCloudSyncBackups(): Promise<CloudSyncBackup[]> {
+  return request<CloudSyncBackup[]>("/api/cloud-sync/backups");
+}
+
+export function createCloudSyncBackup(): Promise<CloudSyncBackupCreateResult> {
+  return request<CloudSyncBackupCreateResult>("/api/cloud-sync/backups", { method: "POST" });
 }

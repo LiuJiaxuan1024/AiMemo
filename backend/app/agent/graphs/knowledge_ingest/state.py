@@ -29,5 +29,6 @@ class KnowledgeIngestGraphState(TypedDict, total=False):
     image_asset_processed_count: int
     image_text_chunk_count: int
     image_asset_failed_count: int
+    image_asset_warning_count: int
     stored_chunks: list[StoredKnowledgeChunkPayload]
     embeddings: list[list[float]]

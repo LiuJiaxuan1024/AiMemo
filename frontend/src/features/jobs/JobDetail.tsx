@@ -51,6 +51,12 @@ export function JobDetail({ job, isDeleting = false, isRetrying = false, onDelet
         <strong>#{job.id}</strong>
         <span>Graph</span>
         <strong>{job.graph_name ?? "-"}</strong>
+        <span>Lane</span>
+        <strong>{job.lane}</strong>
+        <span>Lock</span>
+        <strong>{job.lock_key ?? "-"}</strong>
+        <span>并发</span>
+        <strong>{job.concurrency_policy}</strong>
         <span>尝试</span>
         <strong>
           {job.attempts}/{job.max_attempts}

@@ -29,6 +29,7 @@ export interface KnowledgeDocument {
   image_asset_processed_count: number;
   image_text_chunk_count: number;
   image_asset_failed_count: number;
+  image_asset_warning_count: number;
   token_count: number;
   error_code: string | null;
   error_message: string | null;

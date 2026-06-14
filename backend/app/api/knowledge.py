@@ -40,6 +40,7 @@ from app.services.knowledge_image_asset_service import (
     enqueue_retry_failed_image_assets,
     enqueue_retry_image_asset,
     list_document_image_assets,
+    update_document_image_asset_stats,
 )
 from app.services.knowledge_ocr_service import get_knowledge_ocr_status, install_knowledge_ocr
 from app.services.knowledge_search_service import KnowledgeSearchResult, search_knowledge
@@ -187,8 +188,13 @@ def list_knowledge_document_image_assets_api(
     document_id: int,
     session: Session = Depends(get_session),
 ) -> list[KnowledgeImageAssetRead]:
-    get_knowledge_document(session, document_id)
-    return [_to_image_asset_read(session, image_asset) for image_asset in list_document_image_assets(session, document_id)]
+    from app.services.knowledge_document_service import get_document_or_404
+
+    document = get_document_or_404(session, document_id)
+    image_assets = list_document_image_assets(session, document_id)
+    update_document_image_asset_stats(session, document)
+    session.commit()
+    return [_to_image_asset_read(session, image_asset) for image_asset in image_assets]
 
 
 @router.post(
@@ -211,6 +217,8 @@ def retry_failed_knowledge_document_image_assets_api(
         backfill_document_image_assets(session, document)
         session.commit()
         session.refresh(document)
+    update_document_image_asset_stats(session, document)
+    session.flush()
     job, queued_count = enqueue_retry_failed_image_assets(
         session,
         document,

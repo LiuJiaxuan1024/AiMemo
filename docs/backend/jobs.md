@@ -2,6 +2,10 @@
 
 Ai 记使用 SQLite `jobs` 表作为本地持久化任务队列。
 
+当前实现是受控并发 worker：全局 runner 数由 `jobs.worker_concurrency` 控制，
+同类任务再通过 `lane` 限流，同一业务对象通过 `lock_key` 互斥。完整设计见
+[后台 Job 并发调度设计](./job-concurrency-design.md)。
+
 ## 职责边界
 
 ```text
@@ -47,6 +51,10 @@ job
   graph_name
   thread_id
   dedupe_key
+  lane
+  lock_key
+  concurrency_policy
+  resource_weight
   status
   payload
   priority
@@ -75,6 +83,42 @@ running -> pending
 - `completed`: 执行完成。
 - `failed`: 超过最大重试次数或不可恢复。
 - `canceled`: 保留状态，后续用于取消任务。
+
+## 并发调度
+
+worker 会启动一个轻量调度循环，并在不超过 `jobs.worker_concurrency` 的前提下并发执行多个 runner。
+默认全局并发为 3。
+
+任务领取时不会简单拿第一条 pending job，而是按优先级扫描可运行候选：
+
+```text
+pending + run_after <= now
+  -> lane 未达到并发上限
+  -> lock_key 没有被 running job 占用
+  -> concurrency_policy 允许与同 lane 任务共存
+  -> running
+```
+
+核心字段：
+
+- `lane`: 任务资源通道，用于限制同类任务最大并发，例如 `knowledge_ingest`、`knowledge_retry`。
+- `lock_key`: 业务对象互斥锁，例如 `document:6`、`note:1`、`conversation:20`。
+- `concurrency_policy`: `shared` 表示可与同 lane 的不同对象并行，`exclusive` 表示同 lane 串行。
+- `resource_weight`: 预留的资源权重字段，当前默认 1。
+
+默认 lane 上限：
+
+```text
+note_light = 2
+embedding = 1
+knowledge_ingest = 1
+knowledge_retry = 2
+conversation_maintenance = 1
+cloud_sync = 1
+default = 1
+```
+
+因此，不同文档的失败图片重试可以并行；同一文档的导入、重试、重建索引会因为 `lock_key=document:{id}` 串行。
 
 ## 恢复策略
 

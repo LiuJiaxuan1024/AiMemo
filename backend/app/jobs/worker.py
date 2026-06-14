@@ -2,6 +2,7 @@ import logging
 import threading
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
+import time
 from uuid import uuid4
 
 from sqlmodel import Session
@@ -31,15 +32,19 @@ class JobWorker:
         handlers: Mapping[str, JobHandler],
         poll_interval_seconds: float,
         running_timeout_seconds: int,
+        max_concurrency: int = 1,
         worker_id: str | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.handlers = handlers
         self.poll_interval_seconds = poll_interval_seconds
         self.running_timeout_seconds = running_timeout_seconds
+        self.max_concurrency = max(1, int(max_concurrency))
         self.worker_id = worker_id or f"worker:{uuid4()}"
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._runner_threads: set[threading.Thread] = set()
+        self._runner_lock = threading.Lock()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -51,24 +56,54 @@ class JobWorker:
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5)
+        deadline = time.monotonic() + 5
+        for runner in self._snapshot_runner_threads():
+            remaining = max(0.0, deadline - time.monotonic())
+            runner.join(timeout=remaining)
 
     def run_forever(self) -> None:
         while not self._stop_event.is_set():
-            handled = self.run_once()
-            if not handled:
+            self._discard_finished_runners()
+            started = False
+            while not self._stop_event.is_set() and self._active_runner_count() < self.max_concurrency:
+                job = self._claim_one_job()
+                if job is None:
+                    break
+                self._start_runner(job)
+                started = True
+            if not started:
                 self._stop_event.wait(self.poll_interval_seconds)
 
     def run_once(self) -> bool:
+        job = self._claim_one_job()
+        if job is None:
+            return False
+        self._execute_job(job)
+        return True
+
+    def _claim_one_job(self):
         with self.session_factory() as session:
             # 领取任务前先做恢复扫描，让中断过的 running job 能重新变成可领取状态。
             recover_stale_running_jobs(
                 session,
                 timeout_seconds=self.running_timeout_seconds,
             )
-            job = claim_next_job(session, worker_id=self.worker_id)
-            if job is None:
-                return False
+            return claim_next_job(session, worker_id=self.worker_id, max_running=self.max_concurrency)
 
+    def _start_runner(self, job) -> None:
+        runner = threading.Thread(target=self._run_and_unregister, args=(job,), daemon=True)
+        with self._runner_lock:
+            self._runner_threads.add(runner)
+        runner.start()
+
+    def _run_and_unregister(self, job) -> None:
+        try:
+            self._execute_job(job)
+        finally:
+            with self._runner_lock:
+                self._runner_threads.discard(threading.current_thread())
+
+    def _execute_job(self, job) -> None:
         handler = self.handlers.get(job.type)
         if handler is None:
             with self.session_factory() as session:
@@ -76,7 +111,7 @@ class JobWorker:
                 if attached_job:
                     fail_job(session, attached_job, f"No handler registered for job type {job.type}.")
             _emit_job_failed_event(job.id or 0, job.type, f"No handler registered for job type {job.type}.")
-            return True
+            return
 
         try:
             # handler 执行真正的工作。对于 graph-backed job，它会根据 job.thread_id
@@ -95,7 +130,18 @@ class JobWorker:
                 if attached_job:
                     complete_job(session, attached_job)
             _emit_job_completed_event(job.id or 0, job.type)
-        return True
+
+    def _active_runner_count(self) -> int:
+        with self._runner_lock:
+            return sum(1 for runner in self._runner_threads if runner.is_alive())
+
+    def _snapshot_runner_threads(self) -> list[threading.Thread]:
+        with self._runner_lock:
+            return list(self._runner_threads)
+
+    def _discard_finished_runners(self) -> None:
+        with self._runner_lock:
+            self._runner_threads = {runner for runner in self._runner_threads if runner.is_alive()}
 
 
 _worker: JobWorker | None = None
@@ -116,6 +162,7 @@ def start_job_worker() -> None:
         handlers=handlers,
         poll_interval_seconds=settings.job_worker_poll_interval_seconds,
         running_timeout_seconds=settings.job_running_timeout_seconds,
+        max_concurrency=settings.job_worker_concurrency,
     )
     _worker.start()
 

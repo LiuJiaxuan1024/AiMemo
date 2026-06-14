@@ -354,15 +354,23 @@ def replace_document_image_chunk_links(
 
 def image_asset_stats(session: Session, document_id: int) -> dict[str, int]:
     rows = session.exec(
-        select(KnowledgeImageAsset.status, func.count(KnowledgeImageAsset.id))
+        select(KnowledgeImageAsset.status, KnowledgeImageAsset.retryable, func.count(KnowledgeImageAsset.id))
         .where(KnowledgeImageAsset.document_id == document_id)
-        .group_by(KnowledgeImageAsset.status)
+        .group_by(KnowledgeImageAsset.status, KnowledgeImageAsset.retryable)
     ).all()
-    counts = {str(status): int(count) for status, count in rows}
+    counts: dict[tuple[str, bool], int] = {
+        (str(status), bool(retryable)): int(count)
+        for status, retryable, count in rows
+    }
+    completed_count = counts.get((IMAGE_ASSET_COMPLETED, False), 0) + counts.get((IMAGE_ASSET_COMPLETED, True), 0)
+    skipped_count = counts.get((IMAGE_ASSET_SKIPPED, False), 0) + counts.get((IMAGE_ASSET_SKIPPED, True), 0)
+    retryable_failed_count = counts.get((IMAGE_ASSET_FAILED, True), 0)
+    warning_count = counts.get((IMAGE_ASSET_FAILED, False), 0)
     return {
         "image_asset_count": sum(counts.values()),
-        "image_asset_processed_count": counts.get(IMAGE_ASSET_COMPLETED, 0) + counts.get(IMAGE_ASSET_SKIPPED, 0),
-        "image_asset_failed_count": counts.get(IMAGE_ASSET_FAILED, 0),
+        "image_asset_processed_count": completed_count + skipped_count + warning_count,
+        "image_asset_failed_count": retryable_failed_count,
+        "image_asset_warning_count": warning_count,
     }
 
 
@@ -370,9 +378,14 @@ def update_document_image_asset_stats(session: Session, document: KnowledgeDocum
     if document.id is None:
         return
     stats = image_asset_stats(session, document.id)
+    if stats["image_asset_count"] <= 0 and document.image_asset_count > 0:
+        # Legacy documents may have aggregate image counters but no detail rows yet.
+        # Keep those counters until backfill_document_image_assets can reconstruct rows.
+        return
     document.image_asset_count = stats["image_asset_count"]
     document.image_asset_processed_count = stats["image_asset_processed_count"]
     document.image_asset_failed_count = stats["image_asset_failed_count"]
+    document.image_asset_warning_count = stats["image_asset_warning_count"]
     document.updated_at = utc_now()
     session.add(document)
 

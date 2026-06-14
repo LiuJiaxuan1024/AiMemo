@@ -10,6 +10,7 @@ def test_app_registers_search_routes():
     assert "/api/conversations" in paths
     assert "/api/conversations/{conversation_id}/messages" in paths
     assert "/api/conversations/{conversation_id}/export" in paths
+    assert "/api/conversations/{conversation_id}/export/snapshot" in paths
     assert "/api/conversations/{conversation_id}/chat" in paths
     delete_route = next(
         (

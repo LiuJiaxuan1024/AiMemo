@@ -159,7 +159,11 @@ export function JobDrawer() {
                 onRetry={handleRetry}
               />
               <Suspense fallback={<EmptyState>正在加载 graph 渲染器...</EmptyState>}>
-                <JobGraphView graph={graphQuery.data ?? null} isLoading={graphQuery.isFetching} />
+                <JobGraphView
+                  graph={graphQuery.data ?? null}
+                  isLoading={graphQuery.isLoading}
+                  isRefreshing={graphQuery.isFetching && !graphQuery.isLoading}
+                />
               </Suspense>
             </div>
           </div>

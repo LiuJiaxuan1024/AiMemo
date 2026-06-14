@@ -38,7 +38,7 @@ def get_job_graph(session: Session, job_id: int) -> JobGraphRead:
             detail="Job has no graph",
         )
 
-    graph_view = get_job_graph_view(job)
+    graph_view = get_job_graph_view(job, session=session)
     return JobGraphRead(
         job_id=job.id or 0,
         graph_name=job.graph_name,
@@ -98,6 +98,10 @@ def _to_job_read(job: Job) -> JobRead:
         graph_name=job.graph_name,
         thread_id=job.thread_id,
         dedupe_key=job.dedupe_key,
+        lane=job.lane,
+        lock_key=job.lock_key,
+        concurrency_policy=job.concurrency_policy,
+        resource_weight=job.resource_weight,
         status=job.status,
         payload=decode_payload(job.payload),
         priority=job.priority,

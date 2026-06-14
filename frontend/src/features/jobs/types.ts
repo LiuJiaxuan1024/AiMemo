@@ -4,6 +4,10 @@ export interface Job {
   graph_name: string | null;
   thread_id: string | null;
   dedupe_key: string | null;
+  lane: string;
+  lock_key: string | null;
+  concurrency_policy: string;
+  resource_weight: number;
   status: string;
   payload: Record<string, unknown>;
   priority: number;

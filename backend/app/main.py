@@ -1,4 +1,8 @@
+import os
 import threading
+import time
+from collections.abc import Callable
+from typing import TypeVar
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,54 +32,83 @@ from app.local_operator.background_command import pool as background_shell_pool
 
 
 _agent_model_warmup_thread: threading.Thread | None = None
+_T = TypeVar("_T")
+
+
+def _startup_profile_enabled() -> bool:
+    return os.getenv("AIMEMO_PROFILE_STARTUP", "").lower() in {"1", "true", "yes", "on"}
+
+
+def _profile_step(label: str, action: Callable[[], _T]) -> _T:
+    if not _startup_profile_enabled():
+        return action()
+
+    started = time.perf_counter()
+    print(f"[backend-startup] begin {label}", flush=True)
+    try:
+        return action()
+    finally:
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        print(f"[backend-startup] end {label} ({elapsed_ms:.1f} ms)", flush=True)
 
 
 def create_app() -> FastAPI:
+    create_started = time.perf_counter()
     app = FastAPI(title="Ai Ji API", version="0.1.0")
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.resolved_cors_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+    _profile_step(
+        "add CORS middleware",
+        lambda: app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.resolved_cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        ),
     )
 
-    app.include_router(health_router, prefix="/api")
-    app.include_router(app_config_router, prefix="/api")
-    app.include_router(attachments_router, prefix="/api")
-    app.include_router(conversations_router, prefix="/api")
-    app.include_router(chat_router, prefix="/api")
-    app.include_router(cloud_sync_router, prefix="/api")
-    app.include_router(commands_router, prefix="/api")
-    app.include_router(elf_router, prefix="/api")
-    app.include_router(elf_voice_router, prefix="/api")
-    app.include_router(notes_router, prefix="/api")
-    app.include_router(knowledge_router, prefix="/api")
-    app.include_router(memories_router, prefix="/api")
-    app.include_router(jobs_router, prefix="/api")
-    app.include_router(search_router, prefix="/api")
-    app.include_router(background_tasks_router, prefix="/api")
-    app.include_router(voice_profiles_router, prefix="/api")
-    mount_frontend_app(app)
+    for label, router in [
+        ("health router", health_router),
+        ("app_config router", app_config_router),
+        ("attachments router", attachments_router),
+        ("conversations router", conversations_router),
+        ("chat router", chat_router),
+        ("cloud_sync router", cloud_sync_router),
+        ("commands router", commands_router),
+        ("elf router", elf_router),
+        ("elf_voice router", elf_voice_router),
+        ("notes router", notes_router),
+        ("knowledge router", knowledge_router),
+        ("memories router", memories_router),
+        ("jobs router", jobs_router),
+        ("search router", search_router),
+        ("background_tasks router", background_tasks_router),
+        ("voice_profiles router", voice_profiles_router),
+    ]:
+        _profile_step(f"include {label}", lambda router=router: app.include_router(router, prefix="/api"))
+    _profile_step("mount frontend app", lambda: mount_frontend_app(app))
+    if _startup_profile_enabled():
+        elapsed_ms = (time.perf_counter() - create_started) * 1000
+        print(f"[backend-startup] create_app completed ({elapsed_ms:.1f} ms)", flush=True)
 
     @app.on_event("startup")
     def on_startup() -> None:
-        create_db_and_tables()
+        startup_started = time.perf_counter()
+        _profile_step("create_db_and_tables", create_db_and_tables)
         if settings.agent_model_warmup_enabled:
             from app.agent.model import warmup_agent_models
 
-            warmup_agent_models()
+            _profile_step("agent model warmup", warmup_agent_models)
         elif settings.agent_model_background_warmup_enabled:
-            _start_agent_model_background_warmup()
+            _profile_step("start background agent model warmup", _start_agent_model_background_warmup)
         if settings.job_reconciler_enabled:
-            run_job_reconcile_once()
-            start_job_reconciler()
-        start_job_worker()
+            _profile_step("run job reconcile once", run_job_reconcile_once)
+            _profile_step("start job reconciler", start_job_reconciler)
+        _profile_step("start job worker", start_job_worker)
         # 找回上次后端运行留下的后台进程：还活着的 re-register 到内存池，
         # 已退出的标记为 orphaned。让 UI 重启后仍能看到这些任务。
         try:
-            stats = background_shell_pool.adopt_persisted_tasks()
+            stats = _profile_step("adopt persisted background tasks", background_shell_pool.adopt_persisted_tasks)
             print(f"[background_shell] adopted {stats.get('adopted', 0)}, orphaned {stats.get('orphaned', 0)}")
         except Exception as exc:
             print(f"[background_shell] adopt skipped: {exc}")
@@ -83,7 +116,7 @@ def create_app() -> FastAPI:
         # 避免列表里长期堆着 exited / killed / orphaned 的历史记录。仍在跑的任务不动。
         if settings.background_task_cleanup_on_startup:
             try:
-                cleanup = background_shell_pool.cleanup_finished_tasks()
+                cleanup = _profile_step("cleanup finished background tasks", background_shell_pool.cleanup_finished_tasks)
                 print(
                     "[background_shell] cleaned "
                     f"{cleanup.get('removed', 0)} finished tasks, "
@@ -91,6 +124,9 @@ def create_app() -> FastAPI:
                 )
             except Exception as exc:
                 print(f"[background_shell] cleanup skipped: {exc}")
+        if _startup_profile_enabled():
+            elapsed_ms = (time.perf_counter() - startup_started) * 1000
+            print(f"[backend-startup] FastAPI startup completed ({elapsed_ms:.1f} ms)", flush=True)
 
     @app.on_event("shutdown")
     def on_shutdown() -> None:

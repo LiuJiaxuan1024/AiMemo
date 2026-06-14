@@ -8,7 +8,8 @@ import {
   deleteConversation,
   deleteMessageBranch,
   executeCommand,
-  exportConversationHtml,
+  exportConversationSnapshot,
+  exportConversationSnapshots,
   getTurnGraph,
   listActiveTurns,
   listCommands,
@@ -25,7 +26,8 @@ import {
 import { ChatComposer } from "./ChatComposer";
 import { ConversationList } from "./ConversationList";
 import { KnowledgeMountControl } from "./KnowledgeMountControl";
-import { MessageList, SegmentFollowupPanel } from "./MessageList";
+import { MessageList } from "./MessageList";
+import { SegmentFollowupPanel } from "../chat_view/SegmentFollowupPanel";
 import {
   emitChatAnswerStartedElfEvent,
   emitChatDoneElfEvent,
@@ -67,6 +69,7 @@ export function ChatWindow() {
   const [activeFollowupSegmentId, setActiveFollowupSegmentId] = useState<string | null>(null);
   const [isExportMode, setIsExportMode] = useState(false);
   const [selectedExportMessageIds, setSelectedExportMessageIds] = useState<Set<number>>(() => new Set());
+  const [selectedExportConversationIds, setSelectedExportConversationIds] = useState<Set<number>>(() => new Set());
   const [isExportingConversation, setIsExportingConversation] = useState(false);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const messageListRef = useRef<HTMLDivElement | null>(null);
@@ -177,6 +180,7 @@ export function ChatWindow() {
   useEffect(() => {
     setIsExportMode(false);
     setSelectedExportMessageIds(new Set());
+    setSelectedExportConversationIds(activeConversationId ? new Set([activeConversationId]) : new Set());
   }, [activeConversationId]);
 
   const updateAutoScrollIntent = useCallback(() => {
@@ -901,11 +905,29 @@ export function ChatWindow() {
     setIsExportMode((current) => {
       if (current) {
         setSelectedExportMessageIds(new Set());
+        setSelectedExportConversationIds(activeConversationId ? new Set([activeConversationId]) : new Set());
       } else {
         setSelectedExportMessageIds(new Set(exportableMessageIds));
+        setSelectedExportConversationIds(activeConversationId ? new Set([activeConversationId]) : new Set());
       }
       return !current;
     });
+  }
+
+  function toggleExportConversation(conversationId: number) {
+    setSelectedExportConversationIds((current) => {
+      const next = new Set(current);
+      if (next.has(conversationId)) {
+        next.delete(conversationId);
+      } else {
+        next.add(conversationId);
+      }
+      return next;
+    });
+  }
+
+  function selectAllExportConversations() {
+    setSelectedExportConversationIds(new Set(conversations.map((conversation) => conversation.id)));
   }
 
   function toggleExportMessage(messageId: number) {
@@ -935,23 +957,43 @@ export function ChatWindow() {
     if (!activeConversationId) {
       return;
     }
+    const conversationIds = Array.from(selectedExportConversationIds);
+    const isConversationSetExport =
+      conversationIds.length > 0 && (conversationIds.length !== 1 || conversationIds[0] !== activeConversationId);
     const messageIds = Array.from(selectedExportMessageIds);
-    if (!includeAll && messageIds.length === 0) {
+    if (!isConversationSetExport && !includeAll && messageIds.length === 0) {
       setError(activeConversationId, "请选择要导出的消息，或使用“导出全部”。");
+      return;
+    }
+    if (isConversationSetExport && conversationIds.length === 0) {
+      setError(activeConversationId, "请选择要导出的对话。");
       return;
     }
     setIsExportingConversation(true);
     setError(activeConversationId, "");
     try {
-      const { blob, filename } = await exportConversationHtml(activeConversationId, {
-        messageIds,
-        includeAll,
-        includeFollowups: true,
-        includeGraphs: true,
-      });
+      const snapshot = isConversationSetExport
+        ? await exportConversationSnapshots(conversationIds, {
+            includeFollowups: true,
+            includeGraphs: false,
+          })
+        : await exportConversationSnapshot(activeConversationId, {
+            messageIds,
+            includeAll,
+            includeFollowups: true,
+            includeGraphs: false,
+          });
+      const {
+        buildConversationExportHtml,
+        conversationExportFilename,
+      } = await import("../chat_view/exportHtmlRenderer");
+      const html = await buildConversationExportHtml(snapshot);
+      const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+      const filename = conversationExportFilename(snapshot);
       downloadBlob(blob, filename);
       setIsExportMode(false);
       setSelectedExportMessageIds(new Set());
+      setSelectedExportConversationIds(activeConversationId ? new Set([activeConversationId]) : new Set());
     } catch (currentError) {
       setError(
         activeConversationId,
@@ -978,9 +1020,12 @@ export function ChatWindow() {
       <ConversationList
         activeConversationId={activeConversationId}
         conversations={conversations}
+        exportMode={isExportMode}
         onDeleteConversation={handleDeleteConversation}
+        onToggleExportConversation={toggleExportConversation}
         onNewConversation={handleNewConversation}
         onSelectConversation={handleSelectConversation}
+        selectedExportConversationIds={selectedExportConversationIds}
       />
 
       <section className={`chat-main ${isExportMode ? "chat-main--exporting" : ""}`}>
@@ -1012,6 +1057,7 @@ export function ChatWindow() {
         {isExportMode ? (
           <div className="chat-export-toolbar" role="toolbar" aria-label="导出对话">
             <span>{selectedExportMessageIds.size} / {exportableMessageIds.length} 已选</span>
+            <span>{selectedExportConversationIds.size} 个对话</span>
             <button onClick={selectAllExportMessages} type="button">
               <CheckSquare aria-hidden="true" size={15} />
               全选
@@ -1035,6 +1081,22 @@ export function ChatWindow() {
             >
               <Download aria-hidden="true" size={15} />
               导出全部
+            </button>
+            <button
+              disabled={conversations.length === 0 || isExportingConversation}
+              onClick={selectAllExportConversations}
+              type="button"
+            >
+              <CheckSquare aria-hidden="true" size={15} />
+              全部对话
+            </button>
+            <button
+              disabled={selectedExportConversationIds.size <= 1 || isExportingConversation}
+              onClick={() => void handleExportConversation(true)}
+              type="button"
+            >
+              <Download aria-hidden="true" size={15} />
+              导出多对话
             </button>
           </div>
         ) : null}
@@ -1072,6 +1134,7 @@ export function ChatWindow() {
               onDeleteMessage={handleDeleteMessage}
               onOpenSegment={setActiveFollowupSegmentId}
               onSegmentFollowup={handleSegmentFollowup}
+              onSubmitUserInput={handleUserInputAnswer}
               onStopGeneration={handleStopGeneration}
               sourceMessage={activeFollowupSource}
               thoughts={thoughts}
