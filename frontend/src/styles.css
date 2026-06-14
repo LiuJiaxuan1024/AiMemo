@@ -6471,7 +6471,7 @@ textarea {
 .workshop-page {
   display: grid;
   gap: 16px;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
 }
 
 .workshop-subnav {
@@ -6504,6 +6504,30 @@ textarea {
   background: #ffffff;
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
   color: #101828;
+}
+
+.workshop-content {
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  padding-right: 4px;
+  scrollbar-color: rgba(128, 92, 57, 0.28) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.workshop-content::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+
+.workshop-content::-webkit-scrollbar-thumb {
+  background: rgba(128, 92, 57, 0.26);
+  border-radius: 999px;
+}
+
+.workshop-content > * {
+  min-height: 0;
 }
 
 .workshop-error-slot {

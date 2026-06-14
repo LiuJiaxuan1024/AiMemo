@@ -34,7 +34,9 @@ export function WorkshopPage() {
         </NavLink>
       </nav>
 
-      <Outlet />
+      <div className="workshop-content">
+        <Outlet />
+      </div>
     </section>
   );
 }
