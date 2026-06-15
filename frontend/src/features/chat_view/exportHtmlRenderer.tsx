@@ -1,4 +1,5 @@
 import { renderToStaticMarkup } from "react-dom/server";
+import katexCss from "katex/dist/katex.min.css?inline";
 
 import { getCodeHighlighter, supportedCodeBlockLanguages } from "../../shared/editor/codeHighlighter";
 import { ExportConversationView } from "./ExportConversationView";
@@ -20,7 +21,8 @@ export async function buildConversationExportHtml(snapshot: ExportRenderableSnap
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>${escapeHtml(title)} - AiMemo 对话导出</title>
-  <style>${EXPORT_VIEW_CSS}</style>
+  <style>${katexCss}
+${EXPORT_VIEW_CSS}</style>
 </head>
 <body>
   <div id="root">${markup}</div>

@@ -275,12 +275,7 @@ function ExportFollowups({
                 </div>
                 <div className="segment-followup-turn__answer">
                   <span>回答 · {turn.timestamp}</span>
-                  <div
-                    className="markdown-message"
-                    dangerouslySetInnerHTML={{
-                      __html: turn.answer_html || escapeHtml(turn.answer || "暂无回答"),
-                    }}
-                  />
+                  <MarkdownView content={turn.answer} fallback="暂无回答" />
                 </div>
               </article>
             ))}
@@ -370,13 +365,4 @@ function formatAttachmentSize(sizeBytes: number): string {
 
 function formatExportDate(value: string): string {
   return value.replace("T", " ").slice(0, 16) || value;
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }
