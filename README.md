@@ -28,6 +28,10 @@ Local Operator
 Voice Studio
   精灵语音能力与声线工坊。
   当前采用阿里百炼 / DashScope 远程 ASR、TTS 和 Voice Design，不再默认下载或部署本地语音模型。
+
+Cloud Sync
+  本地优先的数据同步能力。
+  当前通过阿里云 OSS 保存笔记、对话、长期记忆、配置和知识库等 domain 的云端副本，并提供同步工坊。
 ```
 
 换句话说：
@@ -63,6 +67,7 @@ Memo 知库：知识空间、文档导入、chunk 预览和知库内检索
 Memory Chat Graph 对话
 流式回答输出
 片段追问 / 局部追问
+对话导出 HTML，包含消息树、片段追问、Markdown、KaTeX 数学公式和 Mermaid 图
 消息分段展示、工具调用链展示、对话中断和消息分支删除
 上下文金字塔构建
 长期记忆提取、启用、停用和编辑
@@ -71,6 +76,8 @@ LangGraph checkpoint 持久化
 任务 graph 可视化
 Graph 调试工作台 checkpoint history / state diff
 Local Operator 本地读写文件、短时命令执行和后台服务任务
+Web Search 工具：支持 Tavily / 阿里云百炼搜索 Provider，用于需要最新信息的对话
+阿里云 OSS 云同步：笔记、对话、长期记忆、配置和知识库分域 push / pull / sync
 前端 Markdown 渲染和基础调试面板
 ```
 
@@ -112,8 +119,10 @@ backend/
     jobs/        本地任务队列、worker、reconciler
     local_operator/ 本地文件 / 命令工具、权限策略和审计
     models/      SQLModel 数据模型
+    providers/   外部 Provider 适配，例如 web_search
     rag/         chunking、hash、vector store、search
     services/    业务服务层
+    storage/     本地 mock / 阿里云 OSS 对象存储 Provider
   tests/         后端测试
 
 frontend/
@@ -122,6 +131,8 @@ frontend/
     pages/       memo/chat/workshop 页面
     features/
       chat/      对话窗口、stream、graph 调试
+      chat_view/ 对话导出页面和 HTML 导出渲染
+      cloud_sync/ 云同步工坊面板
       elf/       精灵助手
       jobs/      精灵工坊和任务可视化
       memories/  长期记忆管理
@@ -174,6 +185,27 @@ DASHSCOPE_API_KEY=你的百炼 API Key
 ```
 
 该 Key 同时用于默认聊天/embedding/语音能力，以及知识库图片转文本的 `qwen-vl-ocr`。如果没有配置，知识库仍会处理正文、表格等可解析文本，但图片内容不会生成可检索文本 chunk。
+
+如果需要启用阿里云 OSS 云同步，还需要配置 OSS 访问参数。AccessKey Secret 只应放在 `.env` 或系统环境变量中，不要写进 `config.json5` 或文档：
+
+```text
+STORAGE_PROVIDER=aliyun_oss
+STORAGE_SYNC_ENABLED=true
+STORAGE_SYNC_USER_ID=aimemo
+STORAGE_ALIYUN_BUCKET=你的 Bucket
+STORAGE_ALIYUN_ENDPOINT=https://oss-cn-beijing.aliyuncs.com
+ALIYUN_ACCESS_KEY_ID=你的 AccessKey ID
+ALIYUN_ACCESS_KEY_SECRET=你的 AccessKey Secret
+```
+
+如果需要 Web Search 工具，可按 Provider 配置搜索服务密钥：
+
+```text
+WEB_SEARCH_PROVIDER=tavily
+TAVILY_API_KEY=你的 Tavily API Key
+```
+
+或使用阿里云百炼搜索 Provider，具体字段以 `config.json5` 和 [Web Search 工具设计草案](./docs/agent/web-search-tool-design.md) 为准。
 
 仓库根目录的 `config.json5` 保存可提交的项目级开关。常用项：
 
@@ -404,8 +436,10 @@ http://127.0.0.1:5173/app/workshop/voice
 笔记摘要 / 标签生成
 笔记进入向量化任务
 进入工坊查看后台任务状态
+进入工坊同步页查看云同步状态并执行 pull / push / sync
 进入知库导入 PDF / PPTX / DOCX / Markdown / TXT 并查看 chunk 预览
 进入语音工坊创建 / 试听 / 激活声线
+导出对话 HTML，检查 Markdown、数学公式、Mermaid 图和片段追问弹窗
 精灵或对话窗口可以基于记忆回答问题
 ```
 
@@ -488,6 +522,8 @@ JOB_WORKER_ENABLED=true
 
 当前默认使用阿里百炼 DashScope 的 OpenAI-compatible API。用户需要自行提供 API Key。
 
+云同步和 Web Search 是可选能力。启用云同步时建议先在 `app/workshop/sync` 查看远端版本、待上传数量和冲突数量，再执行手动同步；真实 OSS 联调会产生云端读写请求。Web Search 仅在配置 Provider 和密钥后可用。
+
 `.env` 可以放在仓库根目录；后端从 `backend/` 目录启动时也会读取根目录配置。
 
 ## 测试与构建
@@ -516,6 +552,9 @@ npm run build
 - [架构概览](./docs/architecture/overview.md)
 - [流程图](./docs/architecture/flows.md)
 - [Memo 知库模块设计](./docs/architecture/knowledge-base-module.md)
+- [阿里云 OSS 云存储使用规划](./docs/backend/aliyun-oss-storage-plan.md)
+- [云存储模块设计](./docs/backend/cloud-storage-module-design.md)
+- [AiMemo 全域云存储规划](./docs/backend/aimemo-full-cloud-storage-plan.md)
 - [从本地 OCR 切换到 qwen-vl-ocr](./docs/backend/qwen-vl-ocr-migration.md)
 - [Memo Elf 桌面化架构](./docs/desktop/memo-elf-desktop-architecture.md)
 - [外置精灵聊天](./docs/desktop/elf-external-chat.md)
@@ -523,6 +562,7 @@ npm run build
 - [语音工坊第一版设计](./docs/desktop/voice-workshop-design.md)
 - [Memory Chat Graph](./docs/agent/memory-chat-graph.md)
 - [Memory Chat Graph 设计草案](./docs/agent/memory-chat-graph-design.md)
+- [Web Search 工具设计草案](./docs/agent/web-search-tool-design.md)
 - [Local Operator Agent](./docs/agent/local-operator-agent.md)
 - [前后台任务边界](./docs/agent/background-vs-foreground.md)
 - [本地任务系统](./docs/backend/jobs.md)
