@@ -1,6 +1,6 @@
 import { FormEvent, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { CheckSquare, Download, Square, X } from "lucide-react";
+import { CheckSquare, Download, PanelLeftClose, PanelLeftOpen, Square, X } from "lucide-react";
 
 import {
   cancelTurn,
@@ -71,6 +71,7 @@ export function ChatWindow() {
   const [selectedExportMessageIds, setSelectedExportMessageIds] = useState<Set<number>>(() => new Set());
   const [selectedExportConversationIds, setSelectedExportConversationIds] = useState<Set<number>>(() => new Set());
   const [isExportingConversation, setIsExportingConversation] = useState(false);
+  const [isConversationDrawerOpen, setIsConversationDrawerOpen] = useState(false);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -209,6 +210,19 @@ export function ChatWindow() {
   useEffect(() => {
     composerAttachmentsRef.current = composerAttachments;
   }, [composerAttachments]);
+
+  useEffect(() => {
+    if (!isConversationDrawerOpen) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsConversationDrawerOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isConversationDrawerOpen]);
 
   useEffect(() => {
     const graph = selectedGraphRef.current;
@@ -370,6 +384,7 @@ export function ChatWindow() {
     const conversation = await createConversation();
     setConversations((current) => [conversation, ...current]);
     setActiveConversation(conversation);
+    setIsConversationDrawerOpen(false);
     setShouldAutoScroll(true);
     streamingStore.patch(conversation.id, { loaded: true });
     await refreshKnowledgeMounts(conversation.id);
@@ -378,6 +393,7 @@ export function ChatWindow() {
 
   async function handleSelectConversation(conversation: Conversation) {
     setActiveConversation(conversation);
+    setIsConversationDrawerOpen(false);
     setShouldAutoScroll(true);
     setSelectedGraph(null);
     // 切到正在 streaming 的会话不会重新拉 listMessages，view 已经包含最新 messages；
@@ -1027,6 +1043,45 @@ export function ChatWindow() {
         onSelectConversation={handleSelectConversation}
         selectedExportConversationIds={selectedExportConversationIds}
       />
+
+      <button
+        aria-label={isConversationDrawerOpen ? "收起对话列表" : "打开对话列表"}
+        className={`chat-sidebar-toggle ${isConversationDrawerOpen ? "is-open" : ""}`}
+        onClick={() => setIsConversationDrawerOpen((current) => !current)}
+        title={isConversationDrawerOpen ? "收起对话列表" : "打开对话列表"}
+        type="button"
+      >
+        {isConversationDrawerOpen ? (
+          <PanelLeftClose aria-hidden="true" size={18} />
+        ) : (
+          <PanelLeftOpen aria-hidden="true" size={18} />
+        )}
+      </button>
+
+      <div
+        aria-hidden={!isConversationDrawerOpen}
+        className={`chat-sidebar-drawer ${isConversationDrawerOpen ? "is-open" : ""}`}
+        role="presentation"
+      >
+        <button
+          aria-label="关闭对话列表"
+          className="chat-sidebar-drawer__scrim"
+          onClick={() => setIsConversationDrawerOpen(false)}
+          tabIndex={isConversationDrawerOpen ? 0 : -1}
+          type="button"
+        />
+        <ConversationList
+          activeConversationId={activeConversationId}
+          className="chat-sidebar--drawer"
+          conversations={conversations}
+          exportMode={isExportMode}
+          onDeleteConversation={handleDeleteConversation}
+          onToggleExportConversation={toggleExportConversation}
+          onNewConversation={handleNewConversation}
+          onSelectConversation={handleSelectConversation}
+          selectedExportConversationIds={selectedExportConversationIds}
+        />
+      </div>
 
       <section className={`chat-main ${isExportMode ? "chat-main--exporting" : ""}`}>
         <header className="chat-main-header">

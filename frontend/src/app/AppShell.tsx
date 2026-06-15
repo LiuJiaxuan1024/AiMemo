@@ -37,7 +37,7 @@ export function AppShell() {
               key={item.key}
             >
               {ROUTE_ICONS[item.key]}
-              {item.label}
+              <span className="module-nav-label">{item.label}</span>
             </NavLink>
           ))}
         </div>

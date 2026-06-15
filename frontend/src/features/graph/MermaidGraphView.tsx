@@ -41,6 +41,24 @@ export function MermaidGraphView({
     originX: 0,
     originY: 0,
   });
+  const touchPointsRef = useRef(new Map<number, { x: number; y: number }>());
+  const pinchStateRef = useRef<{
+    active: boolean;
+    startDistance: number;
+    startCenterX: number;
+    startCenterY: number;
+    startScale: number;
+    startX: number;
+    startY: number;
+  }>({
+    active: false,
+    startDistance: 0,
+    startCenterX: 0,
+    startCenterY: 0,
+    startScale: 1,
+    startX: 0,
+    startY: 0,
+  });
   const [svg, setSvg] = useState("");
   const [error, setError] = useState("");
   const [viewport, setViewport] = useState({ scale: 1, x: 0, y: 0 });
@@ -192,8 +210,17 @@ export function MermaidGraphView({
       return;
     }
 
+    if (event.pointerType === "touch") {
+      touchPointsRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (touchPointsRef.current.size >= 2) {
+        startPinchGesture();
+        dragStateRef.current.isDragging = false;
+        setIsDragging(false);
+      }
+    }
+
     dragStateRef.current = {
-      isDragging: true,
+      isDragging: event.pointerType !== "touch" || touchPointsRef.current.size < 2,
       hasMoved: false,
       pointerId: event.pointerId,
       targetNodeId: findClickedNodeId(event.target, nodeIds),
@@ -209,10 +236,19 @@ export function MermaidGraphView({
     } catch {
       // Some Linux browser/SVG combinations fail pointer capture. Window listeners still handle dragging.
     }
-    setIsDragging(true);
+    setIsDragging(dragStateRef.current.isDragging);
   }
 
   function handlePointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.pointerType === "touch" && touchPointsRef.current.has(event.pointerId)) {
+      touchPointsRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (pinchStateRef.current.active && updatePinchGesture()) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+    }
+
     const dragState = dragStateRef.current;
     if (!dragState.isDragging || dragState.pointerId !== event.pointerId) {
       return;
@@ -224,6 +260,13 @@ export function MermaidGraphView({
   }
 
   function handlePointerUp(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.pointerType === "touch") {
+      touchPointsRef.current.delete(event.pointerId);
+      if (touchPointsRef.current.size < 2) {
+        pinchStateRef.current.active = false;
+      }
+    }
+
     const dragState = dragStateRef.current;
     if (dragState.pointerId === event.pointerId) {
       event.preventDefault();
@@ -235,6 +278,50 @@ export function MermaidGraphView({
         // Pointer capture may not have been established.
       }
     }
+  }
+
+  function startPinchGesture() {
+    const surface = surfaceRef.current;
+    const points = Array.from(touchPointsRef.current.values()).slice(0, 2);
+    if (!surface || points.length < 2) {
+      return;
+    }
+    const rect = surface.getBoundingClientRect();
+    const center = midpoint(points[0], points[1]);
+    pinchStateRef.current = {
+      active: true,
+      startDistance: Math.max(1, distanceBetween(points[0], points[1])),
+      startCenterX: center.x - rect.left,
+      startCenterY: center.y - rect.top,
+      startScale: viewport.scale,
+      startX: viewport.x,
+      startY: viewport.y,
+    };
+  }
+
+  function updatePinchGesture() {
+    const surface = surfaceRef.current;
+    const points = Array.from(touchPointsRef.current.values()).slice(0, 2);
+    const pinch = pinchStateRef.current;
+    if (!surface || !pinch.active || points.length < 2) {
+      return false;
+    }
+    const rect = surface.getBoundingClientRect();
+    const center = midpoint(points[0], points[1]);
+    const currentCenterX = center.x - rect.left;
+    const currentCenterY = center.y - rect.top;
+    const nextScale = clamp(
+      pinch.startScale * (distanceBetween(points[0], points[1]) / pinch.startDistance),
+      MIN_SCALE,
+      MAX_SCALE,
+    );
+    const factor = nextScale / pinch.startScale;
+    setViewport({
+      scale: nextScale,
+      x: currentCenterX - (pinch.startCenterX - pinch.startX) * factor,
+      y: currentCenterY - (pinch.startCenterY - pinch.startY) * factor,
+    });
+    return true;
   }
 
   function handleDoubleClick(event: MouseEvent<HTMLDivElement>) {
@@ -361,6 +448,17 @@ function normalizeMermaidNodeText(value: string) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function distanceBetween(left: { x: number; y: number }, right: { x: number; y: number }) {
+  return Math.hypot(left.x - right.x, left.y - right.y);
+}
+
+function midpoint(left: { x: number; y: number }, right: { x: number; y: number }) {
+  return {
+    x: (left.x + right.x) / 2,
+    y: (left.y + right.y) / 2,
+  };
 }
 
 function stableHash(value: string) {

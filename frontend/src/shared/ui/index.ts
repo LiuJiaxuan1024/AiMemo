@@ -1,5 +1,6 @@
 export { Badge } from "./Badge";
 export { Button } from "./Button";
+export { CompactMarkdown } from "./CompactMarkdown";
 export { EmptyState } from "./EmptyState";
 export { MarkdownView } from "./MarkdownView";
 export { PanelHeader } from "./PanelHeader";

@@ -65,10 +65,16 @@ warn_linux_file_watch_limit() {
     cat >&2 <<EOF
 Warning: Linux file watch limits look low for Vite + Tauri dev.
 Current: fs.inotify.max_user_watches=$max_watches, fs.inotify.max_user_instances=$max_instances
-If startup fails with ENOSPC / OS file watch limit reached, run:
+AiMemo will start the Vite frontend with polling file watchers on Linux by default
+to avoid ENOSPC / OS file watch limit failures.
+
+For lower CPU usage with native file watchers, raise the limits and start with:
+  AIMEMO_FRONTEND_WATCH_MODE=native aimemo restart
+
+Temporary limit update:
   sudo sysctl -w fs.inotify.max_user_watches=524288 fs.inotify.max_user_instances=1024
 
-To make it persistent:
+Persistent limit update:
   printf 'fs.inotify.max_user_watches=524288\nfs.inotify.max_user_instances=1024\n' | sudo tee /etc/sysctl.d/99-aimemo-dev.conf
   sudo sysctl --system
 

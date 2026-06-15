@@ -11,7 +11,8 @@ export async function buildConversationExportHtml(snapshot: ExportRenderableSnap
   const staticMarkup = renderToStaticMarkup(<ExportConversationView snapshot={safeSnapshot} />);
   const mermaidMarkup = await renderExportMermaidBlocks(staticMarkup);
   const copyableMarkup = ensureExportCodeCopyButtons(mermaidMarkup);
-  const markup = await highlightExportCodeBlocks(copyableMarkup);
+  const highlightedMarkup = await highlightExportCodeBlocks(copyableMarkup);
+  const markup = ensureExportCodeScrollContainers(highlightedMarkup);
   const title = exportDocumentTitle(safeSnapshot);
   return `<!doctype html>
 <html lang="zh-CN">
@@ -65,6 +66,31 @@ async function highlightExportCodeBlocks(markup: string): Promise<string> {
       // 保留原始 pre/code，导出仍然可读。
     }
   }
+  return template.innerHTML;
+}
+
+function ensureExportCodeScrollContainers(markup: string): string {
+  if (typeof document === "undefined") {
+    return markup;
+  }
+  const template = document.createElement("template");
+  template.innerHTML = markup;
+  template.content.querySelectorAll<HTMLElement>(".markdown-code-block").forEach((block) => {
+    if (block.classList.contains("markdown-code-block--mermaid")) {
+      return;
+    }
+    if (block.querySelector(":scope > .markdown-code-scroll")) {
+      return;
+    }
+    const scroll = document.createElement("div");
+    scroll.className = "markdown-code-scroll";
+    const toolbar = block.querySelector(":scope > .markdown-code-block__toolbar");
+    const movableChildren = Array.from(block.children).filter((child) => child !== toolbar);
+    for (const child of movableChildren) {
+      scroll.appendChild(child);
+    }
+    block.appendChild(scroll);
+  });
   return template.innerHTML;
 }
 
@@ -569,8 +595,11 @@ const EXPORT_INTERACTION_JS = String.raw`
     backdrop.innerHTML = [
       '<section class="aimemo-export-modal" role="dialog" aria-modal="true" aria-label="导出详情">',
       '  <header class="aimemo-export-modal__header">',
-      '    <h2></h2>',
-      '    <button type="button" aria-label="关闭">关闭</button>',
+      '    <div>',
+      '      <h2></h2>',
+      '      <p>当前回复中的局部讨论</p>',
+      '    </div>',
+      '    <button type="button" aria-label="关闭"><span aria-hidden="true">&times;</span></button>',
       '  </header>',
       '  <div class="aimemo-export-modal__body"></div>',
       '</section>'
@@ -634,6 +663,14 @@ const EXPORT_INTERACTION_JS = String.raw`
     document.body.classList.remove("aimemo-export-modal-open");
   }
 
+  function toggleConversationSidebar() {
+    document.body.classList.toggle("aimemo-export-sidebar-open");
+  }
+
+  function closeConversationSidebar() {
+    document.body.classList.remove("aimemo-export-sidebar-open");
+  }
+
   function selectConversation(conversationId) {
     if (!conversationId) {
       return;
@@ -651,6 +688,7 @@ const EXPORT_INTERACTION_JS = String.raw`
     if (main) {
       main.scrollTop = 0;
     }
+    closeConversationSidebar();
     closeModal();
   }
 
@@ -699,6 +737,13 @@ const EXPORT_INTERACTION_JS = String.raw`
         startY: 0,
         originX: baseViewBox.x,
         originY: baseViewBox.y
+      };
+      var touchPointers = {};
+      var pinch = {
+        active: false,
+        startDistance: 1,
+        startPoint: null,
+        startScale: 1
       };
 
       function readSvgViewBox(currentSvg) {
@@ -759,6 +804,64 @@ const EXPORT_INTERACTION_JS = String.raw`
         renderViewport();
       }
 
+      function activeTouchPoints() {
+        return Object.keys(touchPointers).map(function (pointerId) {
+          return touchPointers[pointerId];
+        });
+      }
+
+      function distanceBetween(left, right) {
+        return Math.hypot(left.x - right.x, left.y - right.y);
+      }
+
+      function midpoint(left, right) {
+        return {
+          x: (left.x + right.x) / 2,
+          y: (left.y + right.y) / 2
+        };
+      }
+
+      function startPinchGesture() {
+        var points = activeTouchPoints().slice(0, 2);
+        if (points.length < 2) {
+          return;
+        }
+        var center = midpoint(points[0], points[1]);
+        pinch = {
+          active: true,
+          startDistance: Math.max(1, distanceBetween(points[0], points[1])),
+          startPoint: pointToSvg(center.x, center.y),
+          startScale: viewport.scale
+        };
+        drag.active = false;
+        surface.classList.remove("is-dragging");
+      }
+
+      function updatePinchGesture() {
+        var points = activeTouchPoints().slice(0, 2);
+        if (!pinch.active || !pinch.startPoint || points.length < 2) {
+          return false;
+        }
+        var center = midpoint(points[0], points[1]);
+        var nextScale = clampNumber(
+          pinch.startScale * (distanceBetween(points[0], points[1]) / pinch.startDistance),
+          mermaidMinScale,
+          mermaidMaxScale
+        );
+        var currentPoint = pointToSvg(center.x, center.y);
+        var nextWidth = baseViewBox.width / nextScale;
+        var nextHeight = baseViewBox.height / nextScale;
+        viewport = {
+          scale: nextScale,
+          x: pinch.startPoint.x - nextWidth * currentPoint.ratioX,
+          y: pinch.startPoint.y - nextHeight * currentPoint.ratioY,
+          width: nextWidth,
+          height: nextHeight
+        };
+        renderViewport();
+        return true;
+      }
+
       surface.addEventListener("wheel", function (event) {
         event.preventDefault();
         event.stopPropagation();
@@ -769,8 +872,14 @@ const EXPORT_INTERACTION_JS = String.raw`
         if (event.button !== 0) {
           return;
         }
+        if (event.pointerType === "touch") {
+          touchPointers[event.pointerId] = { x: event.clientX, y: event.clientY };
+          if (activeTouchPoints().length >= 2) {
+            startPinchGesture();
+          }
+        }
         drag = {
-          active: true,
+          active: event.pointerType !== "touch" || activeTouchPoints().length < 2,
           moved: false,
           pointerId: event.pointerId,
           startX: event.clientX,
@@ -789,6 +898,14 @@ const EXPORT_INTERACTION_JS = String.raw`
       });
 
       surface.addEventListener("pointermove", function (event) {
+        if (event.pointerType === "touch" && touchPointers[event.pointerId]) {
+          touchPointers[event.pointerId] = { x: event.clientX, y: event.clientY };
+          if (updatePinchGesture()) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }
+        }
         if (!drag.active || drag.pointerId !== event.pointerId) {
           return;
         }
@@ -808,7 +925,15 @@ const EXPORT_INTERACTION_JS = String.raw`
       });
 
       function finishPointer(event) {
+        if (event.pointerType === "touch") {
+          delete touchPointers[event.pointerId];
+          if (activeTouchPoints().length < 2) {
+            pinch.active = false;
+          }
+        }
         if (!drag.active || drag.pointerId !== event.pointerId) {
+          event.preventDefault();
+          event.stopPropagation();
           return;
         }
         surface.classList.remove("is-dragging");
@@ -931,6 +1056,18 @@ const EXPORT_INTERACTION_JS = String.raw`
   }
 
   document.addEventListener("click", function (event) {
+    var toggleSidebarButton = closestElement(event.target, "[data-export-toggle-sidebar]");
+    if (toggleSidebarButton) {
+      event.preventDefault();
+      toggleConversationSidebar();
+      return;
+    }
+    var closeSidebarButton = closestElement(event.target, "[data-export-close-sidebar]");
+    if (closeSidebarButton) {
+      event.preventDefault();
+      closeConversationSidebar();
+      return;
+    }
     var copyButton = closestElement(event.target, ".markdown-code-copy");
     if (copyButton) {
       event.preventDefault();
@@ -958,16 +1095,12 @@ const EXPORT_INTERACTION_JS = String.raw`
       );
       return;
     }
-    var followupButton = closestElement(event.target, "[data-export-open-followups]");
-    if (followupButton) {
-      event.preventDefault();
-      var messageId = followupButton.getAttribute("data-export-open-followups");
-      openModal("片段追问", document.getElementById("followups-" + messageId));
-      return;
-    }
   });
 
   document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") {
+      closeConversationSidebar();
+    }
     var conversationButton = closestElement(event.target, "[data-export-select-conversation]");
     if (conversationButton && (event.key === "Enter" || event.key === " ")) {
       event.preventDefault();
@@ -1181,6 +1314,7 @@ a { color: inherit; }
   min-width: 0;
   overflow: visible;
   padding: var(--space-4);
+  position: relative;
 }
 .chat-sidebar,
 .chat-main {
@@ -1197,7 +1331,10 @@ a { color: inherit; }
   display: grid;
   gap: var(--space-3);
   grid-template-rows: auto minmax(0, 1fr);
+  max-height: calc(100vh - 104px);
   padding: var(--space-4);
+  position: sticky;
+  top: 84px;
 }
 .chat-sidebar header,
 .chat-main-header {
@@ -1214,6 +1351,74 @@ a { color: inherit; }
   font-weight: 650;
   letter-spacing: 0.02em;
   margin: 0;
+}
+.chat-sidebar-toggle {
+  align-items: center;
+  background: rgba(255, 252, 244, 0.96);
+  border: 1px solid rgba(127, 92, 61, 0.22);
+  color: var(--color-brand-700);
+  cursor: pointer;
+  justify-content: center;
+}
+.chat-sidebar-toggle {
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  box-shadow: var(--shadow-md);
+  display: none;
+  height: 44px;
+  left: 0;
+  padding: 0;
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 30px;
+  z-index: 30;
+}
+.aimemo-export-sidebar-scrim {
+  display: none;
+}
+.chat-sidebar-toggle:hover,
+.chat-sidebar-toggle:focus-visible {
+  background: var(--color-brand-50);
+  color: var(--color-brand-ink);
+  outline: none;
+}
+.aimemo-export-sidebar-icon-close {
+  display: none;
+}
+body.aimemo-export-sidebar-open .aimemo-export-sidebar-toggle {
+  background: var(--color-brand-500);
+  color: var(--color-text-on-brand);
+}
+body.aimemo-export-sidebar-open .aimemo-export-sidebar-icon-open {
+  display: none;
+}
+body.aimemo-export-sidebar-open .aimemo-export-sidebar-icon-close {
+  display: block;
+}
+.compact-markdown {
+  min-width: 0;
+}
+.compact-markdown__block,
+.compact-markdown__list,
+.compact-markdown__item {
+  display: inline;
+}
+.compact-markdown__item + .compact-markdown__item::before {
+  content: " · ";
+}
+.compact-markdown code {
+  background: rgba(127, 92, 61, 0.1);
+  border-radius: 4px;
+  font-size: 0.92em;
+  padding: 0 3px;
+}
+.compact-markdown strong {
+  color: var(--color-text-strong);
+  font-weight: 800;
+}
+.compact-markdown__link {
+  color: var(--color-brand-700);
+  font-weight: 700;
 }
 .chat-main-header p {
   color: var(--color-text-muted);
@@ -1336,11 +1541,16 @@ a { color: inherit; }
 .chat-main {
   display: grid;
   gap: var(--space-3);
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto auto auto;
+  overflow: visible;
   padding: var(--space-5);
 }
 .aimemo-export-conversation {
-  display: contents;
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
 }
 .aimemo-export-conversation[hidden] {
   display: none;
@@ -1349,12 +1559,26 @@ a { color: inherit; }
   border-bottom: 1px solid var(--color-divider);
   padding-bottom: var(--space-3);
 }
-.aimemo-export-hero__title {
+.aimemo-export-hero {
+  align-items: flex-start;
+  flex-direction: column;
+  justify-content: flex-start;
+  max-width: 100%;
   min-width: 0;
+  width: 100%;
+}
+.aimemo-export-hero__title {
+  max-width: 100%;
+  min-width: 0;
+  width: 100%;
 }
 .aimemo-export-summary {
   color: var(--color-text-muted);
   margin-top: var(--space-2);
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  width: 100%;
 }
 .aimemo-export-summary summary {
   cursor: pointer;
@@ -1362,19 +1586,72 @@ a { color: inherit; }
   font-weight: 800;
   width: fit-content;
 }
-.aimemo-export-summary p {
+.aimemo-export-summary-body {
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+.aimemo-export-summary[open] .aimemo-export-summary-body {
+  animation: aimemo-export-summary-reveal 220ms cubic-bezier(0.2, 0, 0, 1);
+}
+.aimemo-export-summary-markdown {
+  box-sizing: border-box;
+  color: var(--color-text-body);
   font-size: var(--font-size-sm);
   line-height: 1.65;
   margin: 6px 0 0;
-  max-width: 68ch;
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  word-break: break-word;
+}
+.aimemo-export-summary-markdown p,
+.aimemo-export-summary-markdown ul,
+.aimemo-export-summary-markdown ol {
+  box-sizing: border-box;
+  max-width: 100%;
+  min-width: 0;
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  word-break: break-word;
+}
+.aimemo-export-summary-markdown * {
+  box-sizing: border-box;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  word-break: break-word;
+}
+.aimemo-export-summary-markdown ul,
+.aimemo-export-summary-markdown ol {
+  padding-left: 1.25em;
+}
+.aimemo-export-summary-markdown li {
+  display: list-item;
+  min-width: 0;
+}
+.aimemo-export-summary-markdown code {
+  white-space: normal;
+}
+@keyframes aimemo-export-summary-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 .aimemo-export-meta {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
-  justify-content: flex-end;
-  margin: 0;
+  justify-content: flex-start;
+  margin: var(--space-2) 0 0;
 }
 .aimemo-export-meta div {
   align-items: baseline;
@@ -1382,9 +1659,11 @@ a { color: inherit; }
   border: 1px solid rgba(154, 117, 83, 0.24);
   border-radius: var(--radius-sm);
   display: inline-flex;
+  flex: 0 0 auto;
   gap: 6px;
   min-height: 34px;
   padding: 0 var(--space-3);
+  white-space: nowrap;
 }
 .aimemo-export-meta dt {
   color: var(--color-text-muted);
@@ -1394,13 +1673,16 @@ a { color: inherit; }
   color: var(--color-text-strong);
   font-weight: 700;
   margin: 0;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
+  white-space: nowrap;
 }
 .chat-message-list {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  max-width: 100%;
   min-height: 0;
+  min-width: 0;
   overflow: visible;
   overscroll-behavior: auto;
   padding-right: var(--space-1);
@@ -1432,7 +1714,9 @@ a { color: inherit; }
   flex: 0 1 auto;
   max-width: min(760px, 82%);
   min-width: 0;
+  overflow-wrap: anywhere;
   padding: var(--space-3) var(--space-4);
+  width: fit-content;
 }
 .chat-message.user .chat-message-bubble {
   background: var(--color-brand-500);
@@ -1446,14 +1730,16 @@ a { color: inherit; }
   border-bottom-left-radius: var(--radius-xs);
   box-shadow: var(--shadow-sm);
   color: var(--color-text-body);
-  max-width: min(760px, calc(100% - 46px));
+  max-width: min(760px, 100%);
+  width: min(760px, 100%);
 }
 .chat-message-content {
   display: grid;
   gap: 8px;
+  grid-template-columns: minmax(0, 1fr);
   max-width: 100%;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 .chat-message-content p,
 .markdown-message p,
@@ -1472,11 +1758,15 @@ a { color: inherit; }
 .chat-chronological-timeline {
   display: grid;
   gap: 12px;
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 100%;
+  min-width: 0;
 }
 .chat-segment,
 .chat-segment__tools {
   display: grid;
   gap: 8px;
+  grid-template-columns: minmax(0, 1fr);
   max-width: 100%;
   min-width: 0;
 }
@@ -1532,6 +1822,8 @@ a { color: inherit; }
   border: 1px solid #dcebd9;
   border-radius: var(--radius-sm);
   margin: 12px 0;
+  max-width: 100%;
+  min-width: 0;
   overflow: hidden;
 }
 .markdown-code-block__toolbar {
@@ -1573,15 +1865,25 @@ a { color: inherit; }
   border-color: #f3b6b6;
   color: var(--color-danger);
 }
+.markdown-code-scroll {
+  max-height: min(62vh, 680px);
+  max-width: 100%;
+  min-width: 0;
+  overflow: auto;
+  scrollbar-gutter: stable both-edges;
+}
 .markdown-code-block pre {
   background: transparent;
   margin: 0;
+  max-width: none;
   overflow: auto;
   padding: 12px 14px;
   white-space: pre;
+  width: max-content;
+  min-width: 100%;
 }
 .markdown-code-block--mermaid .mermaid-viewer {
-  min-height: 340px;
+  min-height: 0;
   position: relative;
 }
 .markdown-code-block--mermaid .mermaid-pan-surface {
@@ -1589,7 +1891,7 @@ a { color: inherit; }
   border: 0;
   border-radius: 0;
   cursor: zoom-in;
-  min-height: 340px;
+  min-height: 0;
   min-width: 0;
   overflow: hidden;
   touch-action: none;
@@ -1619,7 +1921,6 @@ a { color: inherit; }
   z-index: 1;
 }
 .markdown-mermaid-svg {
-  min-height: 340px;
   min-width: max-content;
   padding: 16px;
   transform-origin: 0 0;
@@ -1644,18 +1945,20 @@ a { color: inherit; }
   display: none !important;
 }
 .markdown-code-highlight {
-  max-width: 100%;
-  min-width: 0;
-  overflow: auto;
+  max-width: none;
+  min-width: 100%;
+  overflow: visible;
+  width: max-content;
 }
 .markdown-code-highlight pre.shiki {
   background: #0f172a !important;
   border-radius: 0;
   margin: 0;
-  max-width: 100%;
-  min-width: 0;
+  max-width: none;
+  min-width: 100%;
   overflow: auto;
   padding: 12px 14px;
+  width: max-content;
 }
 .markdown-code-highlight code {
   display: block;
@@ -1933,6 +2236,7 @@ code {
   background: var(--color-bg-surface);
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-md);
+  min-width: 0;
   padding: var(--space-4);
 }
 .aimemo-export-followups > header {
@@ -1952,12 +2256,21 @@ code {
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-sm);
   margin-top: var(--space-2);
+  min-width: 0;
+  overflow: hidden;
   padding: var(--space-3);
 }
 .segment-followup-panel__summary {
+  align-items: center;
   cursor: pointer;
   display: grid;
-  gap: 6px;
+  gap: 5px 7px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  list-style: none;
+  min-width: 0;
+}
+.segment-followup-panel__summary::-webkit-details-marker {
+  display: none;
 }
 .segment-followup-panel__badge,
 .segment-followup-panel__status {
@@ -1980,16 +2293,49 @@ code {
   background: var(--color-danger-bg);
   color: var(--color-danger);
 }
+.segment-followup-panel__status--answered {
+  background: #ecfdf3;
+  color: #067647;
+}
+.segment-followup-panel__status--pending {
+  background: #fff7ed;
+  color: #b54708;
+}
 .segment-followup-panel__source-text {
   color: var(--color-text-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.segment-followup-panel__summary strong {
+  color: var(--color-text-strong);
+  font-size: var(--font-size-sm);
+  grid-column: 1 / -1;
+  line-height: 1.45;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.segment-followup-panel__summary small {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  grid-column: 2 / -1;
+  min-width: 0;
 }
 .segment-followup-thread-turns {
   display: grid;
   gap: var(--space-3);
   margin-top: var(--space-3);
+  min-width: 0;
 }
 .segment-followup-turn {
   border-top: 1px solid var(--color-divider);
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
   padding-top: var(--space-3);
 }
 .segment-followup-turn__question span,
@@ -2003,6 +2349,26 @@ code {
 }
 .aimemo-export-followup-origin {
   margin: var(--space-3) 0 0;
+}
+.segment-followup-turn__question,
+.segment-followup-turn__answer,
+.segment-followup-turn__answer .markdown-message {
+  min-width: 0;
+  max-width: 100%;
+}
+.segment-followup-turn__question {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: auto minmax(0, 1fr);
+}
+.segment-followup-turn__question p {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.segment-followup-turn__answer .markdown-message,
+.aimemo-export-modal__body .markdown-message {
+  overflow-wrap: anywhere;
 }
 .aimemo-export-modal-open {
   overflow: hidden;
@@ -2030,6 +2396,7 @@ code {
   flex-direction: column;
   max-height: min(86vh, 920px);
   max-width: min(1040px, 94vw);
+  min-width: 0;
   overflow: hidden;
   width: 100%;
 }
@@ -2041,27 +2408,104 @@ code {
   justify-content: space-between;
   padding: 12px 14px;
 }
+.aimemo-export-modal__header > div {
+  min-width: 0;
+}
 .aimemo-export-modal__header h2 {
   color: var(--color-text-strong);
   font-family: var(--font-family-display);
   font-size: var(--font-size-lg);
   margin: 0;
 }
+.aimemo-export-modal__header p {
+  color: var(--color-text-muted);
+  display: none;
+  font-size: var(--font-size-sm);
+  margin: 2px 0 0;
+}
 .aimemo-export-modal__header button {
+  align-items: center;
   background: var(--color-bg-surface);
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-sm);
   cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 20px;
+  height: 32px;
+  justify-content: center;
+  line-height: 1;
   min-height: 32px;
-  padding: 0 var(--space-3);
+  padding: 0;
+  width: 32px;
 }
 .aimemo-export-modal__body {
+  min-width: 0;
   overflow: auto;
   padding: var(--space-4);
 }
 .aimemo-export-modal__body .aimemo-export-followups {
   display: block;
   margin: 0;
+  max-width: 100%;
+}
+.aimemo-export-modal-backdrop--followups .aimemo-export-modal {
+  border-color: #dbe6ff;
+  max-width: calc(100vw - 56px);
+  width: min(1040px, calc(100vw - 56px));
+}
+.aimemo-export-modal-backdrop--followups .aimemo-export-modal__header {
+  background: #ffffff;
+}
+.aimemo-export-modal-backdrop--followups .aimemo-export-modal__header p {
+  display: block;
+}
+.aimemo-export-modal-backdrop--followups .aimemo-export-modal__body {
+  background: #fbfcff;
+  padding: 10px;
+}
+.aimemo-export-modal-backdrop--followups .aimemo-export-modal__body .aimemo-export-followups {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0;
+}
+.aimemo-export-modal-backdrop--followups .aimemo-export-modal__body .aimemo-export-followups > header {
+  display: none;
+}
+.aimemo-export-modal-backdrop--followups .segment-followup-panel__item {
+  background: #ffffff;
+  border-color: #8ea6ff;
+  border-radius: 8px;
+  box-shadow: 0 0 0 2px rgba(124, 156, 255, 0.12);
+  margin-top: 0;
+  padding: 0;
+}
+.aimemo-export-modal-backdrop--followups .segment-followup-panel__summary {
+  padding: 10px 11px;
+}
+.aimemo-export-modal-backdrop--followups .segment-followup-thread-turns {
+  border-left: 3px solid #bfdbfe;
+  margin: 0 11px 11px;
+  max-height: min(62vh, 620px);
+  overflow: auto;
+  padding-left: 10px;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+}
+.aimemo-export-modal-backdrop--followups .segment-followup-turn {
+  border-top: 0;
+  padding-top: 0;
+}
+.aimemo-export-modal-backdrop--followups .segment-followup-turn + .segment-followup-turn {
+  border-top: 1px solid #edf2f7;
+  padding-top: 10px;
+}
+.aimemo-export-modal-backdrop--followups .aimemo-export-followup-origin {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  margin: 8px 2px 0;
 }
 .aimemo-export-image-preview {
   display: grid;
@@ -2089,8 +2533,69 @@ code {
     grid-template-columns: minmax(0, 1fr);
     overflow: visible;
   }
+  .chat-sidebar-toggle {
+    display: flex;
+  }
+  .aimemo-export-sidebar-toggle {
+    position: fixed;
+    top: 50vh;
+    z-index: 81;
+  }
+  .chat-main-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .aimemo-export-meta {
+    justify-content: flex-start;
+  }
+  .aimemo-export-sidebar-scrim {
+    background: rgba(29, 36, 51, 0.32);
+    border: 0;
+    cursor: pointer;
+    display: block;
+    inset: 0;
+    opacity: 0;
+    padding: 0;
+    pointer-events: none;
+    position: fixed;
+    transition:
+      opacity 220ms var(--ease-standard),
+      visibility 0s linear 220ms;
+    visibility: hidden;
+    z-index: 79;
+  }
   .aimemo-export-sidebar {
-    display: none;
+    border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
+    box-shadow: 18px 0 46px rgba(29, 36, 51, 0.18);
+    display: grid;
+    height: 100vh;
+    left: 0;
+    max-height: none;
+    position: fixed;
+    top: 0;
+    transform: translateX(calc(-100% - 12px));
+    transition: transform 220ms cubic-bezier(0.2, 0, 0, 1);
+    width: min(360px, calc(100vw - 44px));
+    will-change: transform;
+    z-index: 80;
+  }
+  body.aimemo-export-sidebar-open .aimemo-export-sidebar {
+    transform: translateX(0);
+  }
+  body.aimemo-export-sidebar-open .aimemo-export-sidebar-scrim {
+    opacity: 1;
+    pointer-events: auto;
+    transition-delay: 0s;
+    visibility: visible;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .aimemo-export-sidebar,
+    .aimemo-export-sidebar-scrim {
+      transition-duration: 0ms;
+    }
+    .aimemo-export-summary[open] .aimemo-export-summary-body {
+      animation: none;
+    }
   }
   .chat-main {
     min-height: calc(100vh - 88px);
@@ -2122,7 +2627,26 @@ code {
   }
   .chat-message.user .chat-message-bubble,
   .chat-message.assistant .chat-message-bubble {
-    max-width: calc(100vw - 74px);
+    max-width: 100%;
+    width: 100%;
+  }
+  .aimemo-export-modal-backdrop {
+    align-items: flex-start;
+    padding: 76px 8px 14px;
+  }
+  .aimemo-export-modal {
+    max-height: calc(100vh - 92px);
+    max-width: calc(100vw - 16px);
+  }
+  .aimemo-export-modal-backdrop--followups .aimemo-export-modal {
+    max-width: calc(100vw - 16px);
+    width: calc(100vw - 16px);
+  }
+  .aimemo-export-modal__body {
+    padding: 10px;
+  }
+  .aimemo-export-modal-backdrop--followups .segment-followup-thread-turns {
+    max-height: calc(100vh - 282px);
   }
 }
 `;

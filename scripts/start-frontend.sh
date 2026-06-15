@@ -68,6 +68,15 @@ if ! package_installed mermaid; then
   exit 1
 fi
 
+FRONTEND_WATCH_MODE="${AIMEMO_FRONTEND_WATCH_MODE:-auto}"
+if [[ "$FRONTEND_WATCH_MODE" == "auto" && "$(uname -s)" == "Linux" ]]; then
+  cat <<'EOF'
+Using Vite polling file watcher on Linux.
+This avoids ENOSPC failures when the system inotify watcher limit is exhausted.
+Set AIMEMO_FRONTEND_WATCH_MODE=native to use native file watchers instead.
+EOF
+fi
+
 echo "Starting AiMemo frontend dev server at http://$HOST:$PORT/app/ ..."
 echo "Product entry remains http://$HOST:$BACKEND_PORT/app after frontend build."
-VITE_API_BASE_URL="${VITE_API_BASE_URL:-http://$HOST:$BACKEND_PORT}" npm run dev -- --host "$HOST" --port "$PORT" --strictPort
+AIMEMO_FRONTEND_WATCH_MODE="$FRONTEND_WATCH_MODE" VITE_API_BASE_URL="${VITE_API_BASE_URL:-http://$HOST:$BACKEND_PORT}" npm run dev -- --host "$HOST" --port "$PORT" --strictPort

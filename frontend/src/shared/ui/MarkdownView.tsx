@@ -242,14 +242,16 @@ function MarkdownPre({ children, ...props }: ComponentPropsWithoutRef<"pre">) {
           {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
         </button>
       </div>
-      {highlightedHtml ? (
-        <div
-          className="markdown-code-highlight"
-          dangerouslySetInnerHTML={{ __html: highlightedHtml }}
-        />
-      ) : (
-        <pre {...props}>{children}</pre>
-      )}
+      <div className="markdown-code-scroll">
+        {highlightedHtml ? (
+          <div
+            className="markdown-code-highlight"
+            dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+          />
+        ) : (
+          <pre {...props}>{children}</pre>
+        )}
+      </div>
     </div>
   );
 }

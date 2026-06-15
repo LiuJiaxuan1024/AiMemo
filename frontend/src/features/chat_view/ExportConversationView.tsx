@@ -1,5 +1,6 @@
-import { MessageCircleQuestion, MessageSquare } from "lucide-react";
+import { MessageCircleQuestion, MessageSquare, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 
+import { CompactMarkdown, MarkdownView } from "../../shared/ui";
 import { ChatMessageBody } from "./ChatMessageBody";
 import type {
   ConversationExportSnapshot,
@@ -37,6 +38,23 @@ export function ExportConversationView({ snapshot }: ExportConversationViewProps
       </header>
 
       <section className="chat-shell aimemo-export-chat-shell">
+        <button
+          aria-label="打开导出的对话列表"
+          className="chat-sidebar-toggle aimemo-export-sidebar-toggle"
+          data-export-toggle-sidebar="true"
+          title="打开或收起对话列表"
+          type="button"
+        >
+          <PanelLeftOpen aria-hidden="true" className="aimemo-export-sidebar-icon-open" size={18} />
+          <PanelLeftClose aria-hidden="true" className="aimemo-export-sidebar-icon-close" size={18} />
+        </button>
+        <button
+          aria-label="关闭导出的对话列表"
+          className="aimemo-export-sidebar-scrim"
+          data-export-close-sidebar="true"
+          type="button"
+        />
+
         <aside className="chat-sidebar aimemo-export-sidebar" aria-label="导出的会话">
           <header>
             <h2>对话</h2>
@@ -58,9 +76,11 @@ export function ExportConversationView({ snapshot }: ExportConversationViewProps
                   </span>
                   <span className="chat-conv-card__body">
                     <strong className="chat-conv-card__title">{item.conversation.title}</strong>
-                    <span className="chat-conv-card__summary">
-                      {plainSummary(item.conversation.summary) || "导出的静态对话"}
-                    </span>
+                    <CompactMarkdown
+                      className="chat-conv-card__summary"
+                      content={item.conversation.summary}
+                      fallback="导出的静态对话"
+                    />
                     <span className="chat-conv-card__meta">{formatExportDate(item.conversation.exported_at)}</span>
                   </span>
                 </a>
@@ -85,7 +105,12 @@ export function ExportConversationView({ snapshot }: ExportConversationViewProps
                   {item.conversation.summary ? (
                     <details className="aimemo-export-summary">
                       <summary>会话摘要</summary>
-                      <p>{item.conversation.summary}</p>
+                      <div className="aimemo-export-summary-body">
+                        <MarkdownView
+                          className="aimemo-export-summary-markdown"
+                          content={item.conversation.summary}
+                        />
+                      </div>
                     </details>
                   ) : null}
                 </div>
@@ -137,10 +162,6 @@ function ExportMessageCard({
   snapshot: ConversationExportSnapshot;
 }) {
   const draftMessage = exportMessageToDraft(message, snapshot);
-  const followupCount = message.followup_threads.reduce(
-    (count, thread) => count + thread.turns.length,
-    0,
-  );
   const roleLabel =
     message.role === "user" ? "用户" : message.role === "assistant" ? "AiMemo" : message.role;
   return (
@@ -169,22 +190,6 @@ function ExportMessageCard({
           </div>
         </div>
       </div>
-
-      {message.role === "assistant" ? (
-        <div className="aimemo-export-message-actions" aria-label="导出消息附加内容">
-          {message.followup_threads.length > 0 ? (
-            <button
-              data-export-open-followups={message.id}
-              data-export-action-has-items="true"
-              title="查看片段追问"
-              type="button"
-            >
-              <MessageCircleQuestion aria-hidden="true" size={16} />
-              片段追问 {followupCount}
-            </button>
-          ) : null}
-        </div>
-      ) : null}
 
       {message.followup_threads.length > 0 ? (
         <ExportFollowups messageId={message.id} threads={message.followup_threads} />
@@ -365,17 +370,6 @@ function formatAttachmentSize(sizeBytes: number): string {
 
 function formatExportDate(value: string): string {
   return value.replace("T", " ").slice(0, 16) || value;
-}
-
-function plainSummary(value: string): string {
-  return value
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/__([^_]+)__/g, "$1")
-    .replace(/[_*#>\-[\]]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 function escapeHtml(value: string): string {

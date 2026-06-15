@@ -1,11 +1,12 @@
 import { Check, MessageSquare, Plus, Trash2 } from "lucide-react";
 
-import { Button } from "../../shared/ui";
+import { Button, CompactMarkdown } from "../../shared/ui";
 import { formatRelativeTime } from "./formatRelativeTime";
 import type { Conversation } from "./types";
 
 interface ConversationListProps {
   activeConversationId: number | undefined;
+  className?: string;
   conversations: Conversation[];
   exportMode?: boolean;
   onDeleteConversation: (conversation: Conversation) => void;
@@ -17,6 +18,7 @@ interface ConversationListProps {
 
 export function ConversationList({
   activeConversationId,
+  className = "",
   conversations,
   exportMode = false,
   onDeleteConversation,
@@ -26,13 +28,15 @@ export function ConversationList({
   selectedExportConversationIds = new Set(),
 }: ConversationListProps) {
   return (
-    <aside className="chat-sidebar">
+    <aside className={`chat-sidebar${className ? ` ${className}` : ""}`}>
       <header>
         <h2>对话</h2>
-        <Button onClick={onNewConversation} size="sm">
-          <Plus aria-hidden="true" size={16} />
-          新建
-        </Button>
+        <div className="chat-sidebar__actions">
+          <Button onClick={onNewConversation} size="sm">
+            <Plus aria-hidden="true" size={16} />
+            新建
+          </Button>
+        </div>
       </header>
       <div className="chat-conversation-list">
         {conversations.length === 0 ? (
@@ -61,7 +65,7 @@ export function ConversationList({
                     {conversation.title || "新对话"}
                   </span>
                   {conversation.summary ? (
-                    <span className="chat-conv-card__summary">{conversation.summary}</span>
+                    <CompactMarkdown className="chat-conv-card__summary" content={conversation.summary} />
                   ) : null}
                   {relativeTime ? (
                     <span className="chat-conv-card__meta">{relativeTime}</span>
