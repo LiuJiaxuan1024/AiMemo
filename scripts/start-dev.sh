@@ -26,7 +26,12 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DEV_LOG_DIR="$REPO_ROOT/data/dev_logs"
+DEV_PID_FILE="$DEV_LOG_DIR/start-dev.pid"
+DEV_STATUS_FILE="$DEV_LOG_DIR/start-dev.status"
 source "$SCRIPT_DIR/dev-utils.sh"
+mkdir -p "$DEV_LOG_DIR"
+rm -f "$DEV_STATUS_FILE"
 
 assert_command_available() {
   local command_name="$1"
@@ -227,6 +232,65 @@ run_quick_doctor() {
   fi
 }
 
+wait_for_http() {
+  local name="$1"
+  local url="$2"
+  local timeout_seconds="${3:-60}"
+
+  node - "$name" "$url" "$timeout_seconds" <<'JS'
+const http = require("node:http");
+const https = require("node:https");
+
+const name = process.argv[2];
+const url = process.argv[3];
+const timeoutMs = Number(process.argv[4]) * 1000;
+const deadline = Date.now() + timeoutMs;
+const client = url.startsWith("https:") ? https : http;
+
+function tryOnce() {
+  const req = client.get(url, { timeout: 1000 }, (res) => {
+    res.resume();
+    if (res.statusCode >= 200 && res.statusCode < 500) {
+      process.exit(0);
+    }
+    retry();
+  });
+
+  req.on("timeout", () => {
+    req.destroy();
+    retry();
+  });
+  req.on("error", retry);
+}
+
+function retry() {
+  if (Date.now() >= deadline) {
+    console.error(`${name} did not become ready before timeout: ${url}`);
+    process.exit(1);
+  }
+  setTimeout(tryOnce, 500);
+}
+
+tryOnce();
+JS
+}
+
+write_start_status() {
+  local status="$1"
+  mkdir -p "$DEV_LOG_DIR"
+  cat >"$DEV_STATUS_FILE" <<EOF
+STATUS=$status
+BACKEND_URL=http://$HOST:$BACKEND_PORT
+FRONTEND_URL=http://$HOST:$FRONTEND_PORT/app/
+PRODUCT_URL=http://$HOST:$BACKEND_PORT/app/
+DESKTOP_ENABLED=$DESKTOP_ENABLED
+DESKTOP_SKIP_REASON=$DESKTOP_SKIP_REASON
+BACKEND_PID=$BACKEND_PID
+FRONTEND_PID=$FRONTEND_PID
+DESKTOP_PID=$DESKTOP_PID
+EOF
+}
+
 run_quick_doctor
 assert_node_version
 assert_aimemo_not_already_running
@@ -276,10 +340,19 @@ fi
 
 "$SCRIPT_DIR/start-backend.sh" $START_ARGS --host="$HOST" --port="$BACKEND_PORT" &
 BACKEND_PID=$!
+FRONTEND_PID=""
+DESKTOP_PID=""
 
 cleanup() {
   echo "Stopping AiMemo dev services..."
-  kill "$BACKEND_PID" "$FRONTEND_PID" "${DESKTOP_PID:-}" 2>/dev/null || true
+  local pids=()
+  [[ -n "${BACKEND_PID:-}" ]] && pids+=("$BACKEND_PID")
+  [[ -n "${FRONTEND_PID:-}" ]] && pids+=("$FRONTEND_PID")
+  [[ -n "${DESKTOP_PID:-}" ]] && pids+=("$DESKTOP_PID")
+  if [[ "${#pids[@]}" -gt 0 ]]; then
+    kill "${pids[@]}" 2>/dev/null || true
+  fi
+  rm -f "$DEV_PID_FILE" "$DEV_STATUS_FILE"
 }
 trap cleanup INT TERM EXIT
 
@@ -289,8 +362,10 @@ if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
   echo "AiMemo backend failed to start. Fix the backend error above, then rerun ./scripts/start-dev.sh." >&2
   exit 1
 fi
+wait_for_http "Backend" "http://$HOST:$BACKEND_PORT/api/health" 90
 "$SCRIPT_DIR/start-frontend.sh" $START_ARGS --host="$HOST" --port="$FRONTEND_PORT" --backend-port="$BACKEND_PORT" &
 FRONTEND_PID=$!
+wait_for_http "Frontend" "http://$HOST:$FRONTEND_PORT/app/" 60
 
 if [[ "$DESKTOP_ENABLED" -eq 1 ]]; then
   (
@@ -306,6 +381,8 @@ if [[ "$DESKTOP_ENABLED" -eq 1 ]]; then
   ) &
   DESKTOP_PID=$!
 fi
+
+write_start_status "ready"
 
 if [[ "$DESKTOP_ENABLED" -eq 1 ]]; then
   wait "$BACKEND_PID" "$FRONTEND_PID" "$DESKTOP_PID"

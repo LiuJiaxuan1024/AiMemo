@@ -21,6 +21,7 @@ from app.agent.graphs.memory_chat.nodes import (
     build_l3_retrieved_memory_node,
     build_l4_core_memory_node,
     build_lx_attachment_context_node,
+    build_lx_web_context_node,
     build_agent_node,
     build_generate_elf_bubble_answer_node,
     build_load_turn_state_node,
@@ -48,6 +49,7 @@ CONTEXT_WORKER_NODES = [
     "build_l2_summary",
     "build_l1_recent_messages",
     "build_lx_attachment_context",
+    "build_lx_web_context",
     "build_l0_adjacent_turn",
     "build_l0_current_input",
     "build_current_conversation_window",
@@ -87,6 +89,7 @@ def build_memory_chat_graph(
     graph.add_node("build_l2_summary", build_l2_summary_node())
     graph.add_node("build_l1_recent_messages", build_l1_recent_messages_node())
     graph.add_node("build_lx_attachment_context", build_lx_attachment_context_node(session_factory))
+    graph.add_node("build_lx_web_context", build_lx_web_context_node(session_factory))
     graph.add_node("build_l0_adjacent_turn", build_l0_adjacent_turn_node())
     graph.add_node("build_l0_current_input", build_l0_current_input_node())
     graph.add_node("build_current_conversation_window", build_current_conversation_window_node())
@@ -119,6 +122,7 @@ def build_memory_chat_graph(
     graph.add_edge("build_l2_summary", "merge_prompt_context")
     graph.add_edge("build_l1_recent_messages", "merge_prompt_context")
     graph.add_edge("build_lx_attachment_context", "merge_prompt_context")
+    graph.add_edge("build_lx_web_context", "merge_prompt_context")
     graph.add_edge("build_l0_adjacent_turn", "merge_prompt_context")
     graph.add_edge("build_l0_current_input", "merge_prompt_context")
     graph.add_edge("build_current_conversation_window", "merge_prompt_context")

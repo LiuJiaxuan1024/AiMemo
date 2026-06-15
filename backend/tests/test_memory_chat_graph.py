@@ -30,20 +30,26 @@ from app.agent.graphs.memory_chat.nodes import _build_model_messages
 from app.agent.graphs.memory_chat.nodes import _parse_elf_bubble_parts
 from app.agent.graphs.memory_chat.nodes import build_merge_prompt_context_node
 from app.agent.graphs.memory_chat.nodes import build_l3_knowledge_context_node
+from app.agent.graphs.memory_chat.nodes import build_lx_web_context_node
+from app.agent.graphs.memory_chat.nodes import plan_lx_web_context
 from app.agent.graphs.memory_chat.nodes import _tool_observations_to_context
 from app.agent.graphs.memory_chat.nodes import build_observe_tool_result_node
 from app.agent.graphs.memory_chat.nodes import build_plan_task_node
 from app.agent.graphs.memory_chat.nodes import build_verify_goal_node
+from app.core.config import settings
 from app.models.chat_message import ChatMessage
 from app.models.knowledge import ConversationKnowledgeMount, KnowledgeChunk, KnowledgeDocument, KnowledgeSpace
 from app.models.long_term_memory import LongTermMemory
+from app.models.web_search import WebSearchCache, WebSearchUsage
 from app.models.conversation import Conversation
 from app.models.note import Note
 from app.models.note_chunk import NoteChunk
 from app.rag.hashing import content_hash
 from app.rag.search import NoteSearchResult
+from app.schemas.web_search import WebFetchRequest, WebSearchResponse, WebSearchResultItem
 from app.schemas.conversation import ConversationCreate
 from app.services.conversation_service import create_conversation
+from app.services.web_search_service import WebSearchService
 from app.services.chat_turn_service import initial_node_statuses
 from app.services.chat_turn_service import get_chat_turn_state_history
 from app.services.memory_service import build_memory_content_hash
@@ -81,6 +87,8 @@ def test_memory_chat_graph_direct_answer_persists_messages(
     assert result["context_l3_layer"]["name"] == "个人笔记检索"
     assert result["context_l2_layer"]["level"] == 2
     assert result["context_l1_layer"]["level"] == 1
+    assert result["context_lx_web_layer"]["name"] == "联网搜索上下文（Lx.web）"
+    assert "本轮未执行联网搜索" in result["context_lx_web_layer"]["content"]
     assert result["context_l0_layer"]["level"] == 0
     assert result["context_conversation_window_layer"]["level"] == 1
     assert "L1 近期对话窗口" in result["prompt_context"]
@@ -88,6 +96,7 @@ def test_memory_chat_graph_direct_answer_persists_messages(
     assert "1+1 等于几？" in result["prompt_context"]
     assert "L3 个人笔记检索" in result["prompt_context"]
     assert "个人笔记检索未执行" in result["prompt_context"]
+    assert "L0 联网搜索上下文（Lx.web）" in result["prompt_context"]
     assert [message.role for message in messages] == ["user", "assistant"]
     assert messages[0].content == "1+1 等于几？"
     assert messages[1].content == "1+1 等于 2。"
@@ -151,6 +160,161 @@ def test_memory_chat_graph_l4_memory_includes_compact_source_trace(
     assert "来源线索" in result["prompt_context"]
     assert "精灵声线设计" in result["prompt_context"]
     assert "用户说：我希望精灵的声线像小鸟游星野" in result["prompt_context"]
+
+
+def test_lx_web_context_skips_when_disabled(monkeypatch, session_factory):
+    monkeypatch.setattr(settings, "web_search_enabled", False)
+
+    update = build_lx_web_context_node(session_factory)(
+        {
+            "conversation_id": 1,
+            "user_message": "联网查一下阿里云 OSS 最新计费",
+        }
+    )
+
+    assert update["web_search_debug"]["action"] == "skip"
+    assert "web_search.enabled=false" in update["context_lx_web_layer"]["content"]
+
+
+def test_lx_web_context_searches_with_fake_provider(monkeypatch, session, session_factory):
+    monkeypatch.setattr(settings, "web_search_enabled", True)
+    monkeypatch.setattr(settings, "web_search_fetch_verify_max_results", 0)
+    monkeypatch.setattr(settings, "web_search_daily_limit", 100)
+    monkeypatch.setattr(settings, "web_search_cache_ttl_seconds", 86400)
+
+    class FakeProvider:
+        name = "aliyun_dashscope"
+
+        def search(self, request):
+            return WebSearchResponse(
+                ok=True,
+                provider="aliyun_dashscope",
+                query=request.query,
+                conclusion="OSS 标准存储按容量计费。",
+                results=[
+                    WebSearchResultItem(
+                        title="对象存储 OSS 计费",
+                        url="https://help.aliyun.com/zh/oss/product-overview/billing-overview",
+                        snippet="阿里云 OSS 计费说明。",
+                        source_domain="help.aliyun.com",
+                        rank=1,
+                    )
+                ],
+                message="fake search ok",
+            )
+
+    monkeypatch.setattr(
+        "app.services.web_search_service.create_web_search_provider",
+        lambda provider_name: FakeProvider(),
+    )
+
+    conversation = create_conversation(session, ConversationCreate(title="联网搜索"))
+    update = build_lx_web_context_node(session_factory)(
+        {
+            "conversation_id": conversation.id,
+            "user_message": "联网查一下阿里云 OSS 最新计费",
+        }
+    )
+
+    assert update["web_search_debug"]["action"] == "search"
+    assert update["web_search_debug"]["ok"] is True
+    assert "对象存储 OSS 计费" in update["context_lx_web_layer"]["content"]
+    assert "https://help.aliyun.com/zh/oss/product-overview/billing-overview" in update["context_lx_web_layer"]["content"]
+    assert session.exec(select(WebSearchUsage)).first().request_count == 1
+    assert session.exec(select(WebSearchCache)).first() is not None
+
+
+def test_plan_lx_web_context_confirms_private_query(monkeypatch):
+    monkeypatch.setattr(settings, "web_search_enabled", True)
+
+    plan = plan_lx_web_context(
+        {
+            "conversation_id": 1,
+            "user_message": "联网搜索 /home/wujie/project/AiMemo/.env 里的 DASHSCOPE_API_KEY 为什么不可用",
+        }
+    )
+
+    assert plan.action == "confirm"
+    assert "敏感" in plan.privacy_risk or "密钥" in plan.privacy_risk or "路径" in plan.privacy_risk
+
+
+def test_plan_lx_web_context_searches_public_policy_report_by_year(monkeypatch):
+    monkeypatch.setattr(settings, "web_search_enabled", True)
+
+    plan = plan_lx_web_context(
+        {
+            "conversation_id": 1,
+            "user_message": "介绍下2026年政府工作报告中提出的“算电协同”概念和“太空算力”，以及2022年政府工作报告中提出的“东数西算”概念",
+        }
+    )
+
+    assert plan.action == "search"
+    assert "政府工作报告" in plan.query
+    assert "公共政策" in plan.reason or "报告" in plan.reason
+
+
+def test_web_fetch_blocks_localhost():
+    service = WebSearchService()
+    response = service.fetch(WebFetchRequest(url="http://127.0.0.1:8000/app/", max_chars=1000))
+
+    assert response.ok is False
+    assert response.error_code == "WEB_FETCH_BLOCKED_URL"
+
+
+def test_web_search_tool_keeps_model_arguments(session_factory, monkeypatch):
+    monkeypatch.setattr(settings, "web_search_enabled", True)
+
+    def fake_search_and_fetch(self, request):
+        assert request.query == "2026 政府工作报告 算电协同 太空算力"
+        assert request.max_results == 3
+        return WebSearchResponse(
+            ok=True,
+            provider="aliyun_dashscope",
+            query=request.query,
+            results=[
+                WebSearchResultItem(
+                    title="政府工作报告",
+                    url="https://www.gov.cn/",
+                    source_domain="www.gov.cn",
+                    rank=1,
+                )
+            ],
+            message="fake ok",
+        )
+
+    monkeypatch.setattr(WebSearchService, "search_and_fetch", fake_search_and_fetch)
+    tools_node = build_tools_node(session_factory)
+    update = tools_node(
+        {
+            "conversation_id": 1,
+            "agent_step_index": 1,
+            "agent_decision": {
+                "type": "tool_call",
+                "tool_calls": [
+                    {
+                        "id": "web-1",
+                        "name": "web_search",
+                        "args": {
+                            "query": "2026 政府工作报告 算电协同 太空算力",
+                            "max_results": 3,
+                            "freshness": "year",
+                        },
+                    }
+                ],
+            },
+            "tool_observations": [],
+            "turn_messages": [],
+            "thought_events": [],
+            "prompt_context": "",
+            "tool_budget": 20,
+        }
+    )
+
+    observation = update["tool_observations"][0]
+    assert observation["ok"] is True
+    assert observation["tool_name"] == "web_search"
+    assert observation["arguments"]["query"] == "2026 政府工作报告 算电协同 太空算力"
+    assert observation["data"]["results"][0]["url"] == "https://www.gov.cn/"
 
 
 def test_chat_turn_state_history_reads_langgraph_checkpoints(
@@ -411,6 +575,7 @@ def test_memory_chat_graph_main_flow_is_flat_context_worker_graph(session_factor
     assert "dispatch_context_workers" in mermaid
     assert "build_l3_retrieved_memory" in mermaid
     assert "build_l3_knowledge_context" in mermaid
+    assert "build_lx_web_context" in mermaid
     assert "build_current_conversation_window" in mermaid
     assert "plan_task" in mermaid
     assert "agent" in mermaid
@@ -1713,7 +1878,7 @@ def test_request_user_input_normalizes_multi_question_resume():
 
 
 def test_tools_node_executes_consecutive_reads_in_parallel(session_factory, monkeypatch):
-    """连续多个 READ 工具必须真并行（与 Claude Code 行为对齐）。
+    """连续多个 READ 工具必须真并行（与 通用 coding agent 行为对齐）。
 
     用 threading.Barrier(N) 强同步：如果是串行执行，第一个线程进入 barrier 后
     没有第二个线程到达，barrier.wait() 会超时抛 BrokenBarrierError，测试就失败。

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
-// 6 帧字符脉冲，灵感来自 Claude Code Spinner（macOS 优先字符集）：
-// submodules/Claude-Code/src/components/Spinner/utils.ts
+// 6 帧字符脉冲，灵感来自 通用 coding agent Spinner（macOS 优先字符集）：
+// 参考实现源码/src/components/Spinner/utils.ts
 const PULSE_FRAMES = ["·", "✢", "✳", "✶", "✻", "✽"] as const;
 const FRAME_MS = 80;
 

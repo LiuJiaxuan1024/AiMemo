@@ -101,7 +101,7 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 def _normalize_user_path(raw_path: str) -> str:
     """规范化模型/用户传入的路径字符串。
 
-    这里借鉴 Claude Code 的 read 工具思路：路径进入系统边界前先做轻量清洗。
+    这里借鉴 通用 coding agent 的 read 工具思路：路径进入系统边界前先做轻量清洗。
     这不是权限判断本身，真正的授权仍然由 `resolve().relative_to(root)` 兜底。
 
     参数：

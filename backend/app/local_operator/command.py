@@ -165,7 +165,7 @@ class LocalCommandExecutor:
 def evaluate_command_policy(command: str) -> CommandPolicyDecision:
     """判断命令是否允许执行。
 
-    这里借鉴 Claude Code 的 Bash/PowerShell 思路，但第一版不尝试完整解析 shell AST。
+    这里借鉴 通用 coding agent 的 Bash/PowerShell 思路，但第一版不尝试完整解析 shell AST。
     解析不完整时要保守：命中危险符号或危险命令就拦截，普通开发命令先允许短时执行。
     """
 

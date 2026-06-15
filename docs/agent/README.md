@@ -71,6 +71,7 @@ LangGraph 不直接替代业务数据库。
 - [Conversation Memory Graph](./conversation-memory-graph.md)
 - [Context Pyramid](./context-pyramid.md)
 - [Agent 指令配置设计](./command-configuration.md)
+- [Web Search 工具设计草案](./web-search-tool-design.md)
 - [聊天模型 Provider 适配设计](./model-provider-adapter.md)
 - [模型 Provider 与凭据解耦设计草案](./model-provider-auth-design.md)
 - [Local Operator Agent](./local-operator-agent.md)
@@ -78,7 +79,7 @@ LangGraph 不直接替代业务数据库。
 - [前后台任务边界](./background-vs-foreground.md)
 - [Dynamic Execution Graph](./dynamic-execution-graph.md)
 - [Memory Chat Agent 工具循环升级草案](./tool-loop-agent-upgrade.md)
-- [Claude-Code Agent 设计借鉴与 AiMemo 升级方案](./claude-code-agent-lessons.md)
+- [通用 coding agent 设计借鉴与 AiMemo 升级方案](./coding-agent-lessons.md)
 - [Memory Chat Graph 设计草案](./memory-chat-graph-design.md)
 
 ## Memory Chat Graph 当前结构

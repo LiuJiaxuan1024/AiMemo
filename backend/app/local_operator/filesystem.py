@@ -623,7 +623,7 @@ def _read_text_file_in_range(
 ) -> dict[str, Any]:
     """读取文本文件的指定行范围，并限制返回字节数。
 
-    设计上参考 Claude Code 的 `readFileInRange`：
+    设计上参考 通用 coding agent 的 `readFileInRange`：
     - 小文件走快速路径，直接读入后切行。
     - 大文件走逐行扫描，只保留用户请求范围，避免为几行内容加载整份文件。
     - 统一去掉 UTF BOM，并把 CRLF 规范化成 LF，减少跨平台差异。

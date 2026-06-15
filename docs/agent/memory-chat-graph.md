@@ -31,6 +31,7 @@ flowchart TD
     Dispatch --> L2[build_l2_summary]
     Dispatch --> L1[build_l1_recent_messages]
     Dispatch --> LX[build_lx_attachment_context]
+    Dispatch --> LXW[build_lx_web_context]
     Dispatch --> L05[build_l0_adjacent_turn]
     Dispatch --> L0[build_l0_current_input]
     Dispatch --> Window[build_current_conversation_window]
@@ -40,6 +41,7 @@ flowchart TD
     L2 --> Merge
     L1 --> Merge
     LX --> Merge
+    LXW --> Merge
     L05 --> Merge
     L0 --> Merge
     Window --> Merge
@@ -117,6 +119,12 @@ build_lx_attachment_context
   agent 默认基于派生文本回答；如果发现派生文本不够，必须能通过 attachment_id/storage_path
   回到原图重新解析，而不是凭不完整摘要编造。
 
+build_lx_web_context
+  可选的联网搜索上下文 worker。它先由 planner 判断本轮是否需要公网时效信息；
+  需要时生成最小化 query，再通过 web_search_service 执行搜索、缓存、限额、隐私确认和
+  web_fetch 来源核验。该层写入公网来源 URL、fetch 状态和审计信息，不进入 L4 长期记忆。
+  当本地笔记、挂载知识库或当前附件足以回答时，应跳过该 worker 的真实搜索调用。
+
 build_l0_current_input
   构建当前用户输入层。该层作为 L0 单独喂给回答模型和工具规划器。
 
@@ -127,7 +135,7 @@ build_current_conversation_window
   agent 把 L1 历史 assistant 草稿误当成本轮 L0 指令继续执行。
 
 merge_prompt_context
-  按 L4 -> L3.5 mounted knowledge -> L3 personal notes -> L2 -> L1 history -> Lx attachments -> L0.5 adjacent -> L0 current 顺序合并上下文。
+  按 L4 -> L3.5 mounted knowledge -> L3 personal notes -> L2 -> L1 history -> Lx attachments -> Lx.web -> L0.5 adjacent -> L0 current 顺序合并上下文。
   输出最终 prompt_context。
 
 agent
@@ -238,6 +246,7 @@ context_l2_layer
 context_conversation_window_layer
 context_l1_layer
 context_lx_attachment_layer
+context_lx_web_layer
 context_l0_adjacent_layer
 context_l0_layer
 prompt_context
@@ -541,6 +550,7 @@ flowchart TD
     Dispatch --> L2[L2 worker<br/>对话摘要]
     Dispatch --> L1[L1 worker<br/>近期对话窗口]
     Dispatch --> LX[Lx worker<br/>附件派生上下文]
+    Dispatch --> LXW[Lx.web worker<br/>planner-gated web search]
     Dispatch --> L05[L0.5 worker<br/>最近邻接上下文]
     Dispatch --> L0[L0 worker<br/>当前输入]
     Dispatch --> Window[L1+L0 worker<br/>当前对话窗口]
@@ -551,6 +561,7 @@ flowchart TD
     L2 --> Merge
     L1 --> Merge
     LX --> Merge
+    LXW --> Merge
     L05 --> Merge
     L0 --> Merge
     Window -. debug only .-> Merge
@@ -565,9 +576,9 @@ flowchart TD
     Route -->|elf_bubble| BubbleGenerate[generate_elf_bubble_answer]
 ```
 
-这里的工具循环发生在 Memory Chat Graph 主干上，而不是隐藏在回答前的上下文构建阶段。
-L0/L0.5/L1/L2/L3/L4、Lx 附件派生上下文和 L1+L0 当前对话窗口仍然并行构建；工具是否调用由合并上下文后的 agent 决定。
-`merge_prompt_context` 真正注入模型的是 L4、L3.5 mounted knowledge、L3 personal notes、L2、L1 history、Lx attachments、L0.5 adjacent、L0 current。
+这里的本地工具循环发生在 Memory Chat Graph 主干上，而不是隐藏在回答前的上下文构建阶段。
+L0/L0.5/L1/L2/L3/L4、Lx 附件派生上下文、Lx.web 联网搜索上下文和 L1+L0 当前对话窗口仍然并行构建；其中 Lx.web 由 planner-gated worker 决定是否联网，本地 read/write/exec 等工具仍由合并上下文后的 agent 决定。
+`merge_prompt_context` 真正注入模型的是 L4、L3.5 mounted knowledge、L3 personal notes、L2、L1 history、Lx attachments、Lx.web、L0.5 adjacent、L0 current。
 L1+L0 当前对话窗口保留给调试，不再作为主 prompt 的默认输入。
 
 当前主循环已开放第一批 read/write/exec 工具：
@@ -613,7 +624,7 @@ exec_command
 所有工具的 `path/root/cwd` 参数都要求使用绝对路径；用户明确给出 `E:\demo` 时，
 agent 不能降级成当前仓库下的 `demo/...`。所有路径仍会进入 `LocalOperatorPolicy` 和工具层校验。读取默认开放本机固定盘符和用户
 Home，但 `.env`、密钥、数据库文件、设备路径、UNC 网络路径和超大文件等敏感目标默认拒绝。
-写入会复用 Claude Code 风格的 read-before-write、路径策略和审计记录；覆盖已有文件时，
+写入会复用 通用 coding agent 风格的 read-before-write、路径策略和审计记录；覆盖已有文件时，
 `read_file` 必须返回完整视图，且文件 mtime 不能在读取后发生变化。`get_file_info/list_dir`
 只能证明路径存在，不能替代读取正文。高风险写入审批后续接 LangGraph `interrupt()`。
 
@@ -684,6 +695,7 @@ context_l3_layer
 context_l2_layer
 context_l1_layer
 context_lx_attachment_layer
+context_lx_web_layer
 context_l0_adjacent_layer
 context_l0_layer
 context_conversation_window_layer

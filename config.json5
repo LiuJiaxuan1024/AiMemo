@@ -34,6 +34,23 @@
     // weak 检索最多保留的候选块数，避免弱相关材料挤占上下文。
     "weak_retrieval_max_chunks": 5,
   },
+  "web_search": {
+    // 联网搜索已开启；由 Lx.web planner 判断本轮是否需要公网时效信息。
+    // 密钥仍从 TAVILY_API_KEY 等环境变量读取，不能写入本文件。
+    "enabled": true,
+    "provider": "tavily",
+    "model": "",
+    "strategy": "basic",
+    "max_results": 5,
+    "timeout_seconds": 12,
+    "fetch_timeout_seconds": 15,
+    "fetch_verify_max_results": 2,
+    "daily_limit": 100,
+    "cache_ttl_seconds": 86400,
+    "require_confirmation_for_private_queries": true,
+    "allowed_domains": [],
+    "blocked_domains": [],
+  },
   "attachments": {
     // 原始附件保存目录；默认落在项目 data 下，避免污染源码目录。
     "storage_dir": "./data/uploads",
@@ -96,6 +113,9 @@
     },
   },
   "elf": {
+    // false 时 Web 前端不挂载精灵组件，start-dev 也不启动桌面精灵；
+    // 精灵工坊仍可通过侧边按钮打开。
+    "enabled": false,
     "voice": {
       // 是否进入持续语音对话模式，可通过 /config elf.voice.mode 修改。
       "mode": true,

@@ -443,6 +443,29 @@ class Settings(BaseSettings):
     context_pyramid_weak_retrieval_max_chunks: int = int(
         _config_value("context_pyramid.weak_retrieval_max_chunks", 5)
     )
+    web_search_enabled: bool = bool(_config_value("web_search.enabled", False))
+    web_search_provider: str = str(_config_value("web_search.provider", "tavily"))
+    web_search_model: str = str(_config_value("web_search.model", ""))
+    web_search_strategy: str = str(_config_value("web_search.strategy", "basic"))
+    web_search_max_results: int = int(_config_value("web_search.max_results", 5))
+    web_search_timeout_seconds: int = int(_config_value("web_search.timeout_seconds", 12))
+    web_search_fetch_timeout_seconds: int = int(_config_value("web_search.fetch_timeout_seconds", 15))
+    web_search_fetch_verify_max_results: int = int(_config_value("web_search.fetch_verify_max_results", 2))
+    web_search_daily_limit: int = int(_config_value("web_search.daily_limit", 100))
+    web_search_cache_ttl_seconds: int = int(_config_value("web_search.cache_ttl_seconds", 86400))
+    web_search_require_confirmation_for_private_queries: bool = bool(
+        _config_value("web_search.require_confirmation_for_private_queries", True)
+    )
+    web_search_allowed_domains: list[str] = [
+        str(item).strip().lower()
+        for item in _config_value("web_search.allowed_domains", [])
+        if str(item).strip()
+    ]
+    web_search_blocked_domains: list[str] = [
+        str(item).strip().lower()
+        for item in _config_value("web_search.blocked_domains", [])
+        if str(item).strip()
+    ]
     attachments_storage_dir: str = str(_config_value("attachments.storage_dir", "./data/uploads"))
     attachments_image_max_mb: int = int(_config_value("attachments.image_max_mb", 10))
     attachments_file_max_mb: int = int(_config_value("attachments.file_max_mb", 30))
@@ -531,6 +554,7 @@ class Settings(BaseSettings):
     voice_aliyun_sample_rate: int = int(_config_value("voice.aliyun.sample_rate", 48_000))
     voice_aliyun_timeout_seconds: int = int(_config_value("voice.aliyun.timeout_seconds", 120))
     dashscope_api_key: str = ""
+    tavily_api_key: str = ""
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     dashscope_embedding_model: str = "text-embedding-v4"
     embedding_dimensions: int = 1024

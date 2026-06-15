@@ -32,6 +32,7 @@ flowchart TB
     L2[L2 对话摘要<br/>conversation.summary] --> Prompt
     L1[L1 history<br/>近期历史消息] --> Prompt
     LX[Lx 附件派生上下文<br/>图片/OCR/文件摘要 + attachment 引用] --> Prompt
+    LXW[Lx.web 联网搜索上下文<br/>planner-gated public web evidence] --> Prompt
     L05[L0.5 最近邻接上下文<br/>解析继续/完整代码/这个] --> Prompt
     L0[L0 current<br/>当前用户输入] --> Prompt
     Window[L1+L0 当前对话窗口<br/>调试视图，不默认注入] -. debug .-> Prompt
@@ -81,6 +82,13 @@ Lx 附件派生上下文
   未来的 OCR、caption、key facts、尺寸、来源路径等派生文本，而不是把历史图片重新塞进每一轮模型输入。
   派生文本必须保留 attachment_id / storage_path / source_hash，方便 agent 在派生信息
   不够时重新打开原图或重新解析。
+
+Lx.web 联网搜索上下文
+  可选的公网时效信息层。由 planner 基于当前用户输入和本地上下文判断是否需要联网，
+  需要时生成最小化 query，再交给 web_search_service 执行搜索、缓存、限额、隐私确认和
+  web_fetch 来源核验。该层不属于 L4 长期记忆、L3 个人笔记或 L3.5 挂载知识库；它只是本轮
+  临时外部证据，必须保留 query、provider、来源 URL、fetch 状态和审计信息。
+  当本地笔记/知识库足以回答时，planner 应跳过 Lx.web。
 
 L1+L0 当前对话窗口
   把近期消息和当前用户输入合并为连续对话，当前输入使用 user(current) 标记。
@@ -133,6 +141,7 @@ flowchart TD
     Dispatch --> L2Worker[build_l2_summary]
     Dispatch --> L1Worker[build_l1_recent_messages]
     Dispatch --> LXWorker[build_lx_attachment_context]
+    Dispatch --> LXWebWorker[build_lx_web_context<br/>planner-gated web search]
     Dispatch --> L05Worker[build_l0_adjacent_turn]
     Dispatch --> L0Worker[build_l0_current_input]
     Dispatch --> WindowWorker[build_current_conversation_window]
@@ -143,6 +152,7 @@ flowchart TD
     L2Worker --> Merge
     L1Worker --> Merge
     LXWorker --> Merge
+    LXWebWorker --> Merge
     L05Worker --> Merge
     L0Worker --> Merge
     WindowWorker -. debug only .-> Merge
@@ -159,11 +169,12 @@ context_l2_layer
 context_conversation_window_layer
 context_l1_layer
 context_lx_attachment_layer
+context_lx_web_layer
 context_l0_adjacent_layer
 context_l0_layer
 ```
 
-`merge_prompt_context` 按 L4 -> L3.5 mounted knowledge -> L3 personal notes -> L2 -> L1 history -> Lx attachments -> L0.5 adjacent -> L0 current
+`merge_prompt_context` 按 L4 -> L3.5 mounted knowledge -> L3 personal notes -> L2 -> L1 history -> Lx attachments -> Lx.web -> L0.5 adjacent -> L0 current
 顺序还原为 `PyramidPromptContext`，并渲染为最终 `prompt_context`。L1+L0 当前对话窗口只用于
 调试和后续状态树，不再默认进入最终 prompt，避免跨任务 continuation 过触发。
 

@@ -253,10 +253,14 @@ chmod +x scripts/*.sh
 桌面精灵:      Memo Elf Tauri 窗口
 ```
 
-Windows 默认不会再额外弹出后端、前端、桌面三个 PowerShell 服务窗口；这些服务会在隐藏进程中运行，日志写入 `data/dev_logs/`。如果正在调试启动问题，需要看到实时控制台输出，可以显式使用：
+Windows 默认不会再额外弹出后端、前端、桌面三个 PowerShell 服务窗口；这些服务会在隐藏进程中运行，日志写入 `data/dev_logs/`。Linux/macOS 上 `aimemo start` 也会在后台启动服务并立即返回，日志写入 `data/dev_logs/start-dev.log`。如果正在调试启动问题，需要看到实时控制台输出，可以显式使用：
 
 ```powershell
 aimemo start -SeparateWindows
+```
+
+```bash
+./scripts/start-dev.sh
 ```
 
 `aimemo start` 只负责启动；如果检测到当前仓库的 AiMemo 开发服务已经在运行，会直接提示并退出，不会隐式停止旧进程。需要重启时使用：

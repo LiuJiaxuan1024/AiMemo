@@ -547,7 +547,7 @@ def _llm_plan_tool_action(user_input: str) -> LocalOperatorAction | None:
 def _expand_planned_actions(action: LocalOperatorAction) -> list[LocalOperatorAction]:
     """把单个高层动作展开为 graph 可顺序执行的工具队列。
 
-    覆盖已有文件时，`write_file` 必须先完整读取目标路径。这样既保留 Claude Code
+    覆盖已有文件时，`write_file` 必须先完整读取目标路径。这样既保留 通用 coding agent
     read-before-write 的保护思想，也避免模型直接用整文件覆盖误伤用户刚改的内容。
     """
 

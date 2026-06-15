@@ -214,7 +214,7 @@ backend/app/agent/graphs/local_operator/
 
 第一阶段只允许读取本机只读范围内的内容。
 
-当前默认只读范围参考 Claude Code 的 Read 工具心智模型：
+当前默认只读范围参考 通用 coding agent 的 Read 工具心智模型：
 
 - 模型层不要预先假设“我不能读 C 盘/系统目录/用户硬盘”。
 - 如果用户给出明确路径，先规划 read-only 工具调用。
@@ -341,9 +341,9 @@ get_file_info(path)
 | `truncated` | 是否因大小、行数或请求范围被截断。 |
 | `truncated_by_bytes` | 是否因为 `max_bytes` 截断。 |
 
-### 借鉴 Claude Code 的 Read 工具设计
+### 借鉴 通用 coding agent 的 Read 工具设计
 
-本项目的 read 工具不是照搬 Claude Code，但会选择性吸收它在工程稳定性上的长处。当前已经吸收的点如下：
+本项目的 read 工具不是照搬 通用 coding agent，但会选择性吸收它在工程稳定性上的长处。当前已经吸收的点如下：
 
 ```text
 路径进入系统前先规范化
@@ -702,7 +702,7 @@ agent_operations 审计
 
 ### Write File 第一版
 
-`write_file(path, content, overwrite)` 借鉴 Claude Code `Write` 工具的核心约束：
+`write_file(path, content, overwrite)` 借鉴 通用 coding agent `Write` 工具的核心约束：
 
 ```text
 整文件写入
@@ -736,7 +736,7 @@ LangGraph interrupt 审批恢复
 
 ### Exec Command 第一版
 
-`exec_command(command, cwd, timeout_ms, max_output_bytes)` 借鉴 Claude Code Bash/PowerShell
+`exec_command(command, cwd, timeout_ms, max_output_bytes)` 借鉴 通用 coding agent Bash/PowerShell
 工具的设计边界，但第一版不做完整 shell AST 解析，采用“白名单意图 + 危险模式拦截”的保守策略。
 
 ```text

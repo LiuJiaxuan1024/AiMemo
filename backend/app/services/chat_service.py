@@ -1139,14 +1139,15 @@ def _extract_context_layers(state: dict) -> list[dict]:
     layers = []
     for key in [
         "context_l4_layer",
-        "context_l3_layer",
         "context_l3_knowledge_layer",
+        "context_l3_layer",
         "context_l2_layer",
-        "context_conversation_window_layer",
         "context_l1_layer",
         "context_lx_attachment_layer",
+        "context_lx_web_layer",
         "context_l0_adjacent_layer",
         "context_l0_layer",
+        "context_conversation_window_layer",
     ]:
         payload = state.get(key)
         if payload:

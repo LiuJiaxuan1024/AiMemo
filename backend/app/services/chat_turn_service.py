@@ -31,6 +31,7 @@ MEMORY_CHAT_NODE_ORDER = [
     "build_l2_summary",
     "build_l1_recent_messages",
     "build_lx_attachment_context",
+    "build_lx_web_context",
     "build_l0_adjacent_turn",
     "build_l0_current_input",
     "build_current_conversation_window",

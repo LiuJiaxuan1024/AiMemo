@@ -22,6 +22,7 @@ from app.models.runtime_config import RuntimeConfig
 from app.models.sync_state import SyncState
 from app.models.sync_metadata import SyncConflict, SyncDevice, SyncItem
 from app.models.voice_profile import VoiceProfile
+from app.models.web_search import WebSearchCache, WebSearchEvent, WebSearchUsage
 
 __all__ = [
     "AgentOperation",
@@ -49,4 +50,7 @@ __all__ = [
     "SyncDevice",
     "SyncItem",
     "VoiceProfile",
+    "WebSearchCache",
+    "WebSearchEvent",
+    "WebSearchUsage",
 ]

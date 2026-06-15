@@ -2,28 +2,28 @@
 
 > 写作时间：2026-05-24
 > 适用版本：第一轮 ReAct 重构落地后（`graph.py` 现为 `agent ↔ tools` 双节点循环）
-> 配套阅读：`docs/agent/claude-code-agent-lessons.md`、`docs/agent/tool-loop-agent-upgrade.md`
+> 配套阅读：`docs/agent/coding-agent-lessons.md`、`docs/agent/tool-loop-agent-upgrade.md`
 
 > 落地状态：P0 路径语义、P1 read-before-write、P2 prompt discipline、P3 exec 输出清洗已进入代码；P2 流式 UX 分层保留为下一步协议改造，避免牺牲普通最终回答的实时流式体验。
 
 ## 1. 背景
 
-第一轮重构把 `plan_task / select_tool / check_tool_policy / run_*_tool / observe_tool_result / verify_goal` 等节点替换成了 Claude Code 同款的 `agent ↔ tools` 循环（`backend/app/agent/graphs/memory_chat/graph.py:80-109`），同时去掉了所有 `_should_try_*` / `_looks_like_*` 关键词路由，由模型的 `tool_calls` 字段决定是否继续调工具。新一轮端到端测试（"在 E:\demo 建 Rust 项目并打印 8 个随机数"）验证：
+第一轮重构把 `plan_task / select_tool / check_tool_policy / run_*_tool / observe_tool_result / verify_goal` 等节点替换成了 通用 coding agent 同款的 `agent ↔ tools` 循环（`backend/app/agent/graphs/memory_chat/graph.py:80-109`），同时去掉了所有 `_should_try_*` / `_looks_like_*` 关键词路由，由模型的 `tool_calls` 字段决定是否继续调工具。新一轮端到端测试（"在 E:\demo 建 Rust 项目并打印 8 个随机数"）验证：
 
 - 链路确实走了 `agent → tools → agent`，不再凭空伪造结果；
 - 最终回答的 8 个随机数来自真实 `cargo run` 输出；
 - 策略层成功拦截了 `exec_command` 里的 shell 重定向写文件。
 
-但同一轮也暴露 5 个新问题，全部属于"agent 能做、做得不够聪明"。这份文档把每一项对照 Claude Code 的设计给出可落地的改造路线。
+但同一轮也暴露 5 个新问题，全部属于"agent 能做、做得不够聪明"。这份文档把每一项对照 通用 coding agent 的设计给出可落地的改造路线。
 
 ## 2. 5 个问题对照表
 
-| # | 现象 | 根因 | Claude Code 对应设计 | 优先级 |
+| # | 现象 | 根因 | 通用 coding agent 对应设计 | 优先级 |
 |---|------|------|----------------------|--------|
 | 1 | 路径写到 `E:/Ai记/demo/...` 而不是 `E:\demo` | 工具接受相对路径 + 没显式告诉模型当前 cwd | 工具 schema 强制绝对路径 + 系统提示告知 cwd | **P0** |
 | 2 | 删了旧 `random_numbers.rs` 之后 cargo run 报错 | 改 Cargo.toml 前没读现状，对项目状态盲改 | `FileWriteTool` / `FileEditTool` 的 read-before-write 运行时保护 | **P1** |
 | 3 | OP 171→191 大量失败重试，路径太绕 | 模型没"诊断 root cause 再换策略"的硬约束 | 系统提示里的 "diagnose why before switching tactics" + TodoWrite 风格的轻量计划 | **P2** |
-| 4 | Windows `dir` / cargo 中文输出乱码 | 子进程默认 GBK，模型读到的是 mojibake | Claude Code 统一 UTF-8 + `stripAnsi`（`QueryEngine.ts:20`） | **P3** |
+| 4 | Windows `dir` / cargo 中文输出乱码 | 子进程默认 GBK，模型读到的是 mojibake | 通用 coding agent 统一 UTF-8 + `stripAnsi`（`QueryEngine.ts:20`） | **P3** |
 | 5 | tool_call 前的过程文本流到了回答气泡 | mapper 仅在 chunk 自身带 tool_calls 时屏蔽；早期 text token 漏过 | content block 分离：文本 vs `tool_use` 在同一 AIMessage 内是两类块，UI 分层渲染 | **P2** |
 
 ## 3. 详细改造方案
@@ -33,13 +33,13 @@
 #### 现象回放
 用户说 `E:\demo`，模型第一次调用 `write_file` 时给的是 `demo/Cargo.toml`。后端 `policy.from_roots()` 把它解析成相对当前 workspace（`e:/Ai记/`）的路径，于是写到了 `e:/Ai记/demo/Cargo.toml`。模型在后续轮次看了 `list_dir` 才意识到错位置，又重新走了一遍。
 
-#### Claude Code 怎么做
+#### 通用 coding agent 怎么做
 1. **schema 层强制绝对路径**
-   - `submodules/Claude-Code/src/tools/FileReadTool/prompt.ts:36`：
+   - `参考实现源码/src/tools/FileReadTool/prompt.ts:36`：
      > "The `file_path` parameter must be an absolute path, not a relative path."
    - `FileEditTool.ts` 在 prompt 和分析事件里都校验 `isAbsolute(file_path)`。
 2. **运行时 `expandPath` 规范化**：避免 `..` / `~` 绕过 allowlist。
-3. **系统提示告知工作目录**：Claude Code 的环境块明确写出 `Primary working directory: ...`、平台、shell，让模型不必猜。
+3. **系统提示告知工作目录**：通用 coding agent 的环境块明确写出 `Primary working directory: ...`、平台、shell，让模型不必猜。
 
 #### 我们的改造
 - `backend/app/local_operator/schemas.py:39-87`：
@@ -68,8 +68,8 @@
 #### 现象回放
 模型为了"清理项目"，直接 `write_file` 覆盖 `Cargo.toml` 并把旧的 `random_numbers.rs` 删掉，但 Cargo.toml 里残留 `[[bin]] path="random_numbers.rs"`，导致 cargo run 找不到文件，又得回头修。本质是"在没真正了解当前状态的情况下做覆盖"。
 
-#### Claude Code 怎么做
-- `submodules/Claude-Code/src/tools/FileWriteTool/FileWriteTool.ts:195-225`：
+#### 通用 coding agent 怎么做
+- `参考实现源码/src/tools/FileWriteTool/FileWriteTool.ts:195-225`：
   ```ts
   const readTimestamp = toolUseContext.readFileState.get(fullFilePath)
   if (!readTimestamp || readTimestamp.isPartialView) {
@@ -102,8 +102,8 @@
 #### 现象回放
 OP 171 → 191 之间大量 "失败 → 重试 → 失败" 的循环，主因不是单点 bug，而是模型在出错时倾向于"换一种调法重试"而不是"读错误信息推因"。
 
-#### Claude Code 怎么做
-- `submodules/Claude-Code/src/constants/prompts.ts` 的 `# Doing tasks`、`# Using your tools`、`# Tone and style` 段都没有硬规则，但反复强调三件事：
+#### 通用 coding agent 怎么做
+- `参考实现源码/src/constants/prompts.ts` 的 `# Doing tasks`、`# Using your tools`、`# Tone and style` 段都没有硬规则，但反复强调三件事：
   1. 出现障碍时，**找根因**再换策略，不要把破坏性 / `--no-verify` / 重试当捷径。
   2. **优先并行调用**：彼此独立的工具一次性发出去。
   3. 长任务（>3 步）用 TodoWrite 自维护进度，"mark completed IMMEDIATELY after finishing, don't batch"。
@@ -125,7 +125,7 @@ OP 171 → 191 之间大量 "失败 → 重试 → 失败" 的循环，主因不
 **Phase B（可选）**——加一个轻量 `plan_todo` 工具（无副作用，只把列表回写到 state）：
 - schema：`PlanTodoInput { steps: list[{content: str, status: Literal["pending","in_progress","done"]}] }`
 - 实现：把 steps 写进 `state["agent_plan"]`，在 SSE 里以 `thought_snapshot` 推到前端右侧面板。
-- 这样既不阻断 ReAct 循环，又给模型一个"显式 think aloud"的载体；和 Claude Code 的 TodoWrite 行为对齐。
+- 这样既不阻断 ReAct 循环，又给模型一个"显式 think aloud"的载体；和 通用 coding agent 的 TodoWrite 行为对齐。
 - 风险：会多一次 tool round-trip。Phase A 跑两轮看看是否足够，再决定要不要做 B。
 
 #### 收益
@@ -138,8 +138,8 @@ OP 171 → 191 之间大量 "失败 → 重试 → 失败" 的循环，主因不
 #### 现象回放
 `dir`、`cargo` 的中文输出在 Windows 控制台默认 GBK，进 Python `subprocess` 之后解 UTF-8 时变 mojibake，模型读不懂自己的命令输出，反过来又判错。
 
-#### Claude Code 怎么做
-- `submodules/Claude-Code/src/services/QueryEngine.ts:20` 用 `stripAnsi` 清理工具输出里的转义码。
+#### 通用 coding agent 怎么做
+- `参考实现源码/src/services/QueryEngine.ts:20` 用 `stripAnsi` 清理工具输出里的转义码。
 - Bash 工具在 spawn 时强制 `LANG=C.UTF-8`/`PYTHONIOENCODING=UTF-8`（Unix），Windows shell tool 走 PowerShell + UTF-8 输出。
 
 #### 我们的改造
@@ -167,9 +167,9 @@ if node_name == visible_answer_node and _has_tool_call_chunk(token_chunk):
 ```
 只在**当前 chunk 自身已经带 tool_calls 时**才屏蔽。但 LangChain 流式行为是先吐文本 delta，最后才在某个 chunk 里出现 `tool_calls`/`tool_call_chunks`——所以"我现在去调 list_dir 看一下..."这段会先被分类为 `answer_delta`。
 
-#### Claude Code 怎么做
+#### 通用 coding agent 怎么做
 - 模型返回的 `Message.content` 是 `Array<TextBlock | ToolUseBlock | ...>`；UI 渲染时按 block 类型走不同样式（text → 气泡，tool_use → 折叠面板）。
-- 关键洞察：**一条 AIMessage 要么是"中间思考 + 工具调用"，要么是"最终回答"，不会混着用。** Claude Code 的循环判定 `if (toolUseBlocks.length > 0) needsFollowUp = true`（`query.ts:830-836`）——只要这一轮有任何 tool_use，整条消息就是"过程"。
+- 关键洞察：**一条 AIMessage 要么是"中间思考 + 工具调用"，要么是"最终回答"，不会混着用。** 通用 coding agent 的循环判定 `if (toolUseBlocks.length > 0) needsFollowUp = true`（`query.ts:830-836`）——只要这一轮有任何 tool_use，整条消息就是"过程"。
 
 #### 我们的改造（两种思路，建议选 A）
 
@@ -254,9 +254,9 @@ P0/P1 完成后再跑一遍同一个 "在 E:\demo 建 Rust 项目并打印 8 个
 - 3.5 缓冲式 streaming 会让"最终回答"的首 token 延迟比现在多 ~100-300ms（取决于工具消息长度）。前端可以在等待第一个 `answer_delta` 期间显示 typing 指示，体验差距很小。
 - 3.4 PowerShell 包装意味着子进程总会带一层 `pwsh -NoProfile -Command`；脚本里若依赖原生 cmd.exe 的语义（极少）需要白名单回退。
 
-## 7. 与 Claude Code 的对照小结
+## 7. 与 通用 coding agent 的对照小结
 
-| 改造点 | Claude Code 出处 |
+| 改造点 | 通用 coding agent 出处 |
 |--------|-----------------|
 | 工具 schema 强制绝对路径 | `src/tools/FileReadTool/prompt.ts:36`，`FileEditTool.ts` 中 `isAbsolute(file_path)` 分析 |
 | 系统提示注入 cwd / 平台 | `src/constants/prompts.ts` 的环境信息段 |
@@ -270,4 +270,4 @@ P0/P1 完成后再跑一遍同一个 "在 E:\demo 建 Rust 项目并打印 8 个
 
 ---
 
-**结论**：这一轮的问题已经不在"agent 框架"层面，而是在"工具产品 polish"层面——Claude Code 之所以好用，主要是 8 年踩坑沉淀出来的 tool prompt + 运行时校验 + UI 分层，而不是循环结构本身。沿着上面 P0 → P3 的顺序走，AiMemo 的 Local Operator 体验可以快速接近 Claude Code 的"看起来很聪明"的实际感受。
+**结论**：这一轮的问题已经不在"agent 框架"层面，而是在"工具产品 polish"层面——通用 coding agent 之所以好用，主要是 8 年踩坑沉淀出来的 tool prompt + 运行时校验 + UI 分层，而不是循环结构本身。沿着上面 P0 → P3 的顺序走，AiMemo 的 Local Operator 体验可以快速接近 通用 coding agent 的"看起来很聪明"的实际感受。

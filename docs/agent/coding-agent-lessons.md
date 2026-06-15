@@ -1,8 +1,8 @@
-# Claude-Code Agent 设计借鉴与 AiMemo 升级方案
+# 通用 coding agent 设计借鉴与 AiMemo 升级方案
 
-本文档记录从 `submodules/Claude-Code` 源码中提炼出的 agent 设计经验，并把这些经验映射到 AiMemo 当前 `Memory Chat Graph` 的下一阶段升级。
+本文档记录从 `参考实现源码` 源码中提炼出的 agent 设计经验，并把这些经验映射到 AiMemo 当前 `Memory Chat Graph` 的下一阶段升级。
 
-目标不是照搬 Claude-Code，而是吸收它在工具调用、消息轨迹、任务管理、结果验收和防幻觉方面的工程思路，避免继续用零散规则修补 agent loop。
+目标不是照搬 通用 coding agent，而是吸收它在工具调用、消息轨迹、任务管理、结果验收和防幻觉方面的工程思路，避免继续用零散规则修补 agent loop。
 
 ## 背景
 
@@ -44,11 +44,11 @@ cargo run 输出 Hello, updated world!
 
 这说明问题不只是模型质量，而是 runtime 给了模型错误的结束信号。
 
-## Claude-Code 的关键设计
+## 通用 coding agent 的关键设计
 
 ### 1. 工具调用是 transcript 的一部分
 
-Claude-Code 的主循环不是外部状态机单独决定“下一步工具”，而是让模型输出 `tool_use`，工具执行后把 `tool_result` 作为新的 user message 追加回上下文，然后继续下一轮模型调用。
+通用 coding agent 的主循环不是外部状态机单独决定“下一步工具”，而是让模型输出 `tool_use`，工具执行后把 `tool_result` 作为新的 user message 追加回上下文，然后继续下一轮模型调用。
 
 核心形态：
 
@@ -60,13 +60,13 @@ assistant: 基于 tool_result 继续调用工具或最终回答
 
 关键源码：
 
-- `submodules/Claude-Code/src/query.ts`
+- `参考实现源码/src/query.ts`
   - `while (true)` 主循环。
   - 检测 assistant message 中的 `tool_use`。
   - 只有没有 tool use 时才允许进入结束流程。
-- `submodules/Claude-Code/src/services/tools/toolExecution.ts`
+- `参考实现源码/src/services/tools/toolExecution.ts`
   - 执行单个工具并生成 `tool_result` 消息。
-- `submodules/Claude-Code/src/services/tools/toolOrchestration.ts`
+- `参考实现源码/src/services/tools/toolOrchestration.ts`
   - 批量执行工具，并维护执行顺序与上下文更新。
 
 对 AiMemo 的启发：
@@ -76,7 +76,7 @@ assistant: 基于 tool_result 继续调用工具或最终回答
 
 ### 2. Tool 是协议对象，不是简单函数
 
-Claude-Code 的 `Tool` 定义很厚。一个工具不仅有 `call()`，还包括：
+通用 coding agent 的 `Tool` 定义很厚。一个工具不仅有 `call()`，还包括：
 
 ```text
 inputSchema
@@ -94,7 +94,7 @@ renderToolResultMessage
 
 关键源码：
 
-- `submodules/Claude-Code/src/Tool.ts`
+- `参考实现源码/src/Tool.ts`
 
 对 AiMemo 的启发：
 
@@ -110,7 +110,7 @@ renderToolResultMessage
 
 ### 3. Read-only 工具可并发，写/执行工具要串行
 
-Claude-Code 会把工具调用按并发安全性分批：
+通用 coding agent 会把工具调用按并发安全性分批：
 
 - read/search/list 类工具可以并发。
 - write/edit/bash 类工具通常串行。
@@ -118,8 +118,8 @@ Claude-Code 会把工具调用按并发安全性分批：
 
 关键源码：
 
-- `submodules/Claude-Code/src/services/tools/toolOrchestration.ts`
-- `submodules/Claude-Code/src/services/tools/StreamingToolExecutor.ts`
+- `参考实现源码/src/services/tools/toolOrchestration.ts`
+- `参考实现源码/src/services/tools/StreamingToolExecutor.ts`
 
 对 AiMemo 的启发：
 
@@ -129,7 +129,7 @@ Claude-Code 会把工具调用按并发安全性分批：
 
 ### 4. Write 有硬契约：read-before-write
 
-Claude-Code 的 `FileWriteTool` 对已有文件有明确保护：
+通用 coding agent 的 `FileWriteTool` 对已有文件有明确保护：
 
 - 已存在文件必须先 Read。
 - 如果读取后文件被外部修改，Write 会拒绝。
@@ -137,8 +137,8 @@ Claude-Code 的 `FileWriteTool` 对已有文件有明确保护：
 
 关键源码：
 
-- `submodules/Claude-Code/src/tools/FileWriteTool/FileWriteTool.ts`
-- `submodules/Claude-Code/src/utils/queryHelpers.ts` 中 `extractReadFilesFromMessages`
+- `参考实现源码/src/tools/FileWriteTool/FileWriteTool.ts`
+- `参考实现源码/src/utils/queryHelpers.ts` 中 `extractReadFilesFromMessages`
 
 对 AiMemo 的启发：
 
@@ -148,7 +148,7 @@ Claude-Code 的 `FileWriteTool` 对已有文件有明确保护：
 
 ### 5. Todo/Task 是目标约束，不只是 UI
 
-Claude-Code 的 Todo/Task 工具会提醒模型持续维护任务列表，并要求：
+通用 coding agent 的 Todo/Task 工具会提醒模型持续维护任务列表，并要求：
 
 - 复杂任务要拆分。
 - 同一时间只有一个 in_progress。
@@ -157,10 +157,10 @@ Claude-Code 的 Todo/Task 工具会提醒模型持续维护任务列表，并要
 
 关键源码：
 
-- `submodules/Claude-Code/src/tools/TodoWriteTool/TodoWriteTool.ts`
-- `submodules/Claude-Code/src/tools/TodoWriteTool/prompt.ts`
-- `submodules/Claude-Code/src/tools/TaskCreateTool/TaskCreateTool.ts`
-- `submodules/Claude-Code/src/tools/TaskUpdateTool/TaskUpdateTool.ts`
+- `参考实现源码/src/tools/TodoWriteTool/TodoWriteTool.ts`
+- `参考实现源码/src/tools/TodoWriteTool/prompt.ts`
+- `参考实现源码/src/tools/TaskCreateTool/TaskCreateTool.ts`
+- `参考实现源码/src/tools/TaskUpdateTool/TaskUpdateTool.ts`
 
 对 AiMemo 的启发：
 

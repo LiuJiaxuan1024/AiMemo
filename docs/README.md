@@ -54,6 +54,7 @@
 - [Memory Chat Graph](./agent/memory-chat-graph.md)
 - [Context Pyramid](./agent/context-pyramid.md)
 - [Agent 指令配置设计](./agent/command-configuration.md)
+- [Web Search 工具设计草案](./agent/web-search-tool-design.md)
 - [聊天模型 Provider 适配设计](./agent/model-provider-adapter.md)
 - [远程服务器操作失败复盘与改进说明](./agent/remote-server-operation-failure-analysis.md)
 - [Conversation Summary Graph](./agent/conversation-summary-graph.md)
@@ -62,7 +63,7 @@
 - [Memory Consolidation](./agent/memory-consolidation.md)
 - [Local Operator Agent](./agent/local-operator-agent.md)
 - [前后台任务边界](./agent/background-vs-foreground.md)
-- [Claude-Code Agent 设计借鉴](./agent/claude-code-agent-lessons.md)
+- [通用 coding agent 设计借鉴](./agent/coding-agent-lessons.md)
 
 ### 前端
 

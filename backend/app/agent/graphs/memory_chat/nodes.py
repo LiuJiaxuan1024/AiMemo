@@ -82,12 +82,14 @@ from app.services.knowledge_search_service import (
     KnowledgeSearchItem,
     search_mounted_knowledge,
 )
+from app.schemas.web_search import WebFetchRequest, WebSearchRequest
 from app.services.attachment_service import (
     attach_attachments_to_message,
     get_attachment_or_404,
     load_attachment_context_for_message,
 )
 from app.services.long_term_memory_service import format_core_memory_with_sources_for_prompt, list_core_memories
+from app.services.web_search_service import WebSearchService, classify_private_query
 
 
 SessionFactory = Callable[[], AbstractContextManager[Session]]
@@ -99,6 +101,8 @@ MAX_CONSECUTIVE_FAILED_TOOL_BATCHES = 3
 REQUEST_USER_INPUT_TOOL_NAME = "request_user_input"
 USER_INTERRUPT_TOOL_NAMES = {REQUEST_USER_INPUT_TOOL_NAME}
 INSPECT_IMAGE_ATTACHMENT_TOOL_NAME = "inspect_image_attachment"
+WEB_SEARCH_TOOL_NAME = "web_search"
+WEB_FETCH_TOOL_NAME = "web_fetch"
 
 
 class UserInputOption(BaseModel):
@@ -157,6 +161,19 @@ class NoteRetrievalDecision:
     query: str
     confidence: float
     reason: str
+    source: str = "rule"
+
+
+@dataclass(frozen=True)
+class WebSearchPlan:
+    """Lx.web 联网搜索规划结果。"""
+
+    action: Literal["skip", "search", "confirm"]
+    query: str
+    freshness: Literal["any", "day", "week", "month", "year"]
+    site: str
+    reason: str
+    privacy_risk: str = ""
     source: str = "rule"
 
 
@@ -282,6 +299,8 @@ def build_load_turn_state_node(
                 "context_l3_knowledge_layer": {},
                 "context_l4_layer": {},
                 "context_lx_attachment_layer": {},
+                "context_lx_web_layer": {},
+                "web_search_debug": {},
                 "prompt_context": "",
                 "turn_messages": [
                     {
@@ -335,6 +354,7 @@ def dispatch_context_workers(state: MemoryChatGraphState) -> list[Send]:
         Send("build_l2_summary", state),
         Send("build_l1_recent_messages", state),
         Send("build_lx_attachment_context", state),
+        Send("build_lx_web_context", state),
         Send("build_l0_adjacent_turn", state),
         Send("build_l0_current_input", state),
         Send("build_current_conversation_window", state),
@@ -737,6 +757,285 @@ def build_lx_attachment_context_node(session_factory: SessionFactory):
     return build_lx_attachment_context
 
 
+def build_lx_web_context_node(session_factory: SessionFactory):
+    """构建 Lx.web 联网搜索上下文层。"""
+
+    def build_lx_web_context(state: MemoryChatGraphState) -> MemoryChatGraphState:
+        user_message = _resolve_user_message(state)
+        plan = plan_lx_web_context(state)
+        budget_tokens = min(_context_budget().summary_tokens, 4000)
+        debug = {
+            "action": plan.action,
+            "query": plan.query,
+            "freshness": plan.freshness,
+            "site": plan.site,
+            "reason": plan.reason,
+            "privacy_risk": plan.privacy_risk,
+            "provider": settings.web_search_provider,
+        }
+
+        if plan.action == "skip":
+            content = f"本轮未执行联网搜索。\n原因：{plan.reason}"
+            layer = ContextLayer(
+                level=0,
+                name="联网搜索上下文（Lx.web）",
+                content=content,
+                budget_tokens=budget_tokens,
+                used_tokens=count_tokens(content),
+                note="没有成功联网搜索 observation 时，不要声称已经查询公网。",
+            )
+            return {
+                "context_lx_web_layer": layer.to_payload(),
+                "web_search_debug": debug,
+            }
+
+        if plan.action == "confirm":
+            content = (
+                "本轮没有自动联网搜索，因为搜索 query 可能包含隐私或项目敏感信息。\n"
+                f"建议 query：{plan.query or user_message}\n"
+                f"风险：{plan.privacy_risk or '需要用户确认后才能外发 query'}"
+            )
+            layer = ContextLayer(
+                level=0,
+                name="联网搜索上下文（Lx.web）",
+                content=content,
+                budget_tokens=budget_tokens,
+                used_tokens=count_tokens(content),
+                note="如确需联网，应先调用 request_user_input 确认是否允许外发该 query。",
+            )
+            return {
+                "context_lx_web_layer": layer.to_payload(),
+                "web_search_debug": debug,
+            }
+
+        with session_factory() as session:
+            service = WebSearchService(session=session, conversation_id=_resolve_conversation_id(state))
+            response = service.search_and_fetch(
+                WebSearchRequest(
+                    query=plan.query,
+                    max_results=settings.web_search_max_results,
+                    freshness=plan.freshness,
+                    locale="zh-CN",
+                    site=plan.site,
+                    provider=settings.web_search_provider,
+                    model=settings.web_search_model,
+                    search_strategy=settings.web_search_strategy,
+                )
+            )
+        debug.update(
+            {
+                "ok": response.ok,
+                "error_code": response.error_code,
+                "message": response.message,
+                "result_count": len(response.results),
+                "cached": response.cached,
+            }
+        )
+        layer = _build_lx_web_context_layer(plan, response, budget_tokens=budget_tokens)
+        return {
+            "context_lx_web_layer": layer.to_payload(),
+            "web_search_debug": debug,
+        }
+
+    return build_lx_web_context
+
+
+def plan_lx_web_context(state: MemoryChatGraphState) -> WebSearchPlan:
+    """Plan whether this turn needs public web evidence."""
+
+    user_message = _resolve_user_message(state).strip()
+    if not settings.web_search_enabled:
+        return WebSearchPlan(
+            action="skip",
+            query="",
+            freshness="any",
+            site="",
+            reason="web_search.enabled=false。",
+        )
+    if not user_message:
+        return WebSearchPlan(action="skip", query="", freshness="any", site="", reason="当前输入为空。")
+    local_skip_reason = _local_context_question_reason(user_message)
+    if local_skip_reason:
+        return WebSearchPlan(action="skip", query="", freshness="any", site="", reason=local_skip_reason)
+
+    should_search, reason = _should_search_public_web(user_message)
+    if not should_search:
+        return WebSearchPlan(action="skip", query="", freshness="any", site="", reason=reason)
+
+    query = _minimize_web_search_query(user_message)
+    privacy_risk = classify_private_query(query)
+    if privacy_risk:
+        return WebSearchPlan(
+            action="confirm",
+            query=query,
+            freshness=_infer_web_search_freshness(user_message),
+            site=_infer_web_search_site(user_message),
+            reason="query 可能包含隐私，需先确认。",
+            privacy_risk=privacy_risk,
+        )
+    return WebSearchPlan(
+        action="search",
+        query=query,
+        freshness=_infer_web_search_freshness(user_message),
+        site=_infer_web_search_site(user_message),
+        reason=reason,
+    )
+
+
+def _build_lx_web_context_layer(
+    plan: WebSearchPlan,
+    response,
+    *,
+    budget_tokens: int,
+) -> ContextLayer:
+    if not response.ok:
+        content = (
+            f"联网搜索未成功。\nquery: {plan.query}\n"
+            f"error_code: {response.error_code}\nmessage: {response.message}"
+        )
+        note = "联网搜索失败；回答时必须说明未能联网，不要声称已查到最新网页。"
+    elif not response.results:
+        content = f"联网搜索已执行，但没有返回可用来源。\nquery: {plan.query}\nmessage: {response.message}"
+        note = "没有可引用 URL；回答不能把搜索摘要当成可靠来源。"
+    else:
+        lines = [
+            f"query: {plan.query}",
+            f"provider: {response.provider}",
+            f"cached: {str(response.cached).lower()}",
+            f"reason: {plan.reason}",
+        ]
+        if response.conclusion:
+            lines.append(f"provider_conclusion: {response.conclusion}")
+        lines.append("sources:")
+        for index, item in enumerate(response.results, start=1):
+            lines.extend(
+                [
+                    f"- [{index}] {item.title or item.url}",
+                    f"  url: {item.url}",
+                    f"  domain: {item.source_domain}",
+                    f"  fetched: {str(item.fetched).lower()}",
+                ]
+            )
+            if item.snippet:
+                lines.append(f"  snippet: {item.snippet}")
+            if item.fetch_title:
+                lines.append(f"  fetched_title: {item.fetch_title}")
+            if item.fetch_text_preview:
+                lines.append("  fetched_preview:\n" + _indent_text(item.fetch_text_preview, 4))
+        content = _truncate_context_text("\n".join(lines), budget_tokens)
+        note = "本层来自公网搜索。使用其中事实回答时必须列出来源 URL；价格、政策、API 参数优先信任 fetched=true 的官方来源。"
+    return ContextLayer(
+        level=0,
+        name="联网搜索上下文（Lx.web）",
+        content=content,
+        budget_tokens=budget_tokens,
+        used_tokens=count_tokens(content),
+        note=note,
+    )
+
+
+def _local_context_question_reason(text: str) -> str:
+    lowered = text.lower()
+    local_markers = [
+        "我之前",
+        "我刚才",
+        "我的笔记",
+        "本地",
+        "这个项目",
+        "当前项目",
+        "仓库",
+        "代码",
+        "文件",
+        "目录",
+        "知识库",
+        "挂载",
+        "previous note",
+        "local file",
+        "this repo",
+    ]
+    if any(marker in lowered for marker in local_markers):
+        freshness_markers = ["最新", "官网", "联网", "网上", "当前价格", "计费", "release", "changelog"]
+        if not any(marker in lowered for marker in freshness_markers):
+            return "问题更像是在问本地/个人/挂载上下文，优先使用已有上下文，不主动联网。"
+    return ""
+
+
+def _should_search_public_web(text: str) -> tuple[bool, str]:
+    lowered = text.lower()
+    if re.search(r"20\d{2}\s*年", text) and any(
+        marker in text for marker in ["政府工作报告", "政策", "报告", "提出", "概念"]
+    ):
+        return True, "当前问题包含明确年份和公共政策/报告概念，适合联网核验来源。"
+    triggers = [
+        "联网",
+        "网上",
+        "搜索",
+        "搜一下",
+        "查一下",
+        "查官网",
+        "官网",
+        "政府工作报告",
+        "最新",
+        "当前",
+        "现在",
+        "今天",
+        "今年",
+        "价格",
+        "计费",
+        "限额",
+        "版本",
+        "发布",
+        "新闻",
+        "法规",
+        "政策",
+        "标准",
+        "文档",
+        "source",
+        "citation",
+        "official",
+        "latest",
+        "current",
+        "price",
+        "pricing",
+        "release",
+        "changelog",
+    ]
+    if any(trigger in lowered for trigger in triggers):
+        return True, "当前问题包含公网搜索或时效信息触发词。"
+    return False, "未检测到明确公网时效信息需求。"
+
+
+def _minimize_web_search_query(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", text).strip()
+    normalized = re.sub(r"(?i)(请|帮我|能不能|可以|麻烦|联网|网上|搜一下|搜索一下|查一下)", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip(" ，。?？")
+    if len(normalized) > 160:
+        normalized = normalized[:160].rstrip()
+    return normalized or text.strip()[:160]
+
+
+def _infer_web_search_freshness(text: str) -> Literal["any", "day", "week", "month", "year"]:
+    lowered = text.lower()
+    if any(marker in lowered for marker in ["今天", "今日", "today"]):
+        return "day"
+    if any(marker in lowered for marker in ["本周", "最近", "latest", "recent"]):
+        return "week"
+    if any(marker in lowered for marker in ["本月", "当前", "现在", "价格", "计费", "current", "pricing"]):
+        return "month"
+    if any(marker in lowered for marker in ["今年", "2026", "year"]):
+        return "year"
+    return "any"
+
+
+def _infer_web_search_site(text: str) -> str:
+    lowered = text.lower()
+    if "阿里" in text or "aliyun" in lowered or "dashscope" in lowered or "百炼" in text:
+        return "aliyun.com"
+    if "openai" in lowered:
+        return "openai.com"
+    return ""
+
+
 def _ensure_current_turn_image_derivatives(
     session: Session,
     attachment_context: list[tuple[ChatAttachment, list[ChatAttachmentDerivative]]],
@@ -1102,7 +1401,7 @@ def build_tools_node(session_factory: SessionFactory):
             | WRITE_TOOL_NAMES
             | EXEC_TOOL_NAMES
             | USER_INTERRUPT_TOOL_NAMES
-            | {"knowledge_search", INSPECT_IMAGE_ATTACHMENT_TOOL_NAME}
+            | {"knowledge_search", INSPECT_IMAGE_ATTACHMENT_TOOL_NAME, WEB_SEARCH_TOOL_NAME, WEB_FETCH_TOOL_NAME}
         )
 
         # 每条工具完成后立刻通过 custom stream channel 把它推给上游，
@@ -1151,6 +1450,10 @@ def build_tools_node(session_factory: SessionFactory):
                 arguments = _normalize_request_user_input_arguments(raw_arguments)
             elif tool_name == "knowledge_search":
                 arguments = _normalize_knowledge_search_arguments(raw_arguments)
+            elif tool_name == WEB_SEARCH_TOOL_NAME:
+                arguments = _normalize_web_search_arguments(raw_arguments)
+            elif tool_name == WEB_FETCH_TOOL_NAME:
+                arguments = _normalize_web_fetch_arguments(raw_arguments)
             else:
                 arguments = _normalize_tool_arguments(tool_name, raw_arguments)
             return {
@@ -1232,12 +1535,17 @@ def build_tools_node(session_factory: SessionFactory):
         # - 连续若干个 READ 工具 → 同一批并行执行（共享同一个 snapshot）
         # - WRITE / EXEC / 未知工具 → 单独串行执行
         # 这样既保留了 read-before-write、exec 命令的顺序依赖语义，
-        # 又能让模型一次性发出的多个独立读取真正并行（与 Claude Code 行为对齐）。
+        # 又能让模型一次性发出的多个独立读取真正并行（与 通用 coding agent 行为对齐）。
         groups: list[list[tuple[int, dict]]] = []
         current_reads: list[tuple[int, dict]] = []
         for index, tool_call in enumerate(tool_calls):
             tool_name = str(tool_call.get("name") or tool_call.get("tool_name") or "")
-            if tool_name in READ_TOOL_NAMES or tool_name in {"knowledge_search", INSPECT_IMAGE_ATTACHMENT_TOOL_NAME}:
+            if tool_name in READ_TOOL_NAMES or tool_name in {
+                "knowledge_search",
+                INSPECT_IMAGE_ATTACHMENT_TOOL_NAME,
+                WEB_SEARCH_TOOL_NAME,
+                WEB_FETCH_TOOL_NAME,
+            }:
                 current_reads.append((index, tool_call))
             else:
                 if current_reads:
@@ -1339,6 +1647,8 @@ def _create_react_tools(
         state,
         session_factory=session_factory,
     )
+    tools[WEB_SEARCH_TOOL_NAME] = _create_web_search_tool(state, session_factory=session_factory)
+    tools[WEB_FETCH_TOOL_NAME] = _create_web_fetch_tool(state, session_factory=session_factory)
     return tools
 
 
@@ -1460,6 +1770,107 @@ def _create_inspect_image_attachment_tool(
     )
 
 
+def _create_web_search_tool(
+    state: MemoryChatGraphState,
+    *,
+    session_factory: SessionFactory,
+) -> StructuredTool:
+    conversation_id = _resolve_conversation_id(state)
+
+    def web_search(
+        query: str,
+        max_results: int = 5,
+        freshness: str = "any",
+        site: str = "",
+    ) -> str:
+        """Search the public web through the configured AiMemo web search provider."""
+
+        normalized_query = str(query or "").strip()
+        if not normalized_query:
+            return json_dumps_compact(
+                {
+                    "ok": False,
+                    "tool_name": WEB_SEARCH_TOOL_NAME,
+                    "error_code": "INVALID_ARGUMENT",
+                    "message": "query 不能为空。",
+                    "blocked": True,
+                    "data": {"results": []},
+                }
+            )
+        with session_factory() as session:
+            service = WebSearchService(session=session, conversation_id=conversation_id)
+            response = service.search_and_fetch(
+                WebSearchRequest(
+                    query=normalized_query,
+                    max_results=max(1, min(int(max_results or settings.web_search_max_results), 10)),
+                    freshness=freshness if freshness in {"any", "day", "week", "month", "year"} else "any",
+                    locale="zh-CN",
+                    site=str(site or "").strip(),
+                    provider=settings.web_search_provider,
+                    model=settings.web_search_model,
+                    search_strategy=settings.web_search_strategy,
+                )
+            )
+        return json_dumps_compact(
+            {
+                "ok": response.ok,
+                "tool_name": WEB_SEARCH_TOOL_NAME,
+                "error_code": response.error_code,
+                "message": response.message,
+                "blocked": response.error_code in {"WEB_SEARCH_PRIVATE_QUERY_CONFIRMATION_REQUIRED"},
+                "data": response.model_dump(),
+            }
+        )
+
+    return StructuredTool.from_function(
+        func=web_search,
+        name=WEB_SEARCH_TOOL_NAME,
+        description=(
+            "搜索公共互联网资料，适用于用户明确要求联网、最新信息、官网文档、价格、计费、版本、政策、新闻或来源引用。"
+            "当本地笔记、挂载知识库或当前附件足以回答时不要调用。"
+            "query 必须最小化；不要外发私人笔记原文、未公开代码、本地路径、账号、密钥或聊天隐私。"
+            "使用联网结果回答时必须列出来源 URL；涉及价格/政策/API 参数时优先使用 fetched=true 的官方来源。"
+        ),
+        args_schema=WebSearchToolInput,
+    )
+
+
+def _create_web_fetch_tool(
+    state: MemoryChatGraphState,
+    *,
+    session_factory: SessionFactory,
+) -> StructuredTool:
+    conversation_id = _resolve_conversation_id(state)
+
+    def web_fetch(url: str, max_chars: int = 12000) -> str:
+        """Fetch and extract text from a public http(s) URL with SSRF protection."""
+
+        with session_factory() as session:
+            service = WebSearchService(session=session, conversation_id=conversation_id)
+            response = service.fetch(WebFetchRequest(url=str(url or "").strip(), max_chars=max_chars))
+        return json_dumps_compact(
+            {
+                "ok": response.ok,
+                "tool_name": WEB_FETCH_TOOL_NAME,
+                "error_code": response.error_code,
+                "message": response.message,
+                "blocked": response.error_code == "WEB_FETCH_BLOCKED_URL",
+                "data": response.model_dump(),
+            }
+        )
+
+    return StructuredTool.from_function(
+        func=web_fetch,
+        name=WEB_FETCH_TOOL_NAME,
+        description=(
+            "读取并抽取指定公网 http(s) URL 的正文，用于核验 web_search 返回的来源。"
+            "不能抓取 localhost、内网地址、file:// 或非 http(s) URL。"
+            "需要精确价格、政策、API 参数或官方说明时，应优先 fetch 官方来源后再回答。"
+        ),
+        args_schema=WebFetchToolInput,
+    )
+
+
 class KnowledgeSearchToolInput(BaseModel):
     query: str = Field(min_length=1, description="要在当前对话已挂载知识空间中检索的问题或关键词。")
     top_k: int = Field(default=5, ge=1, le=20, description="最多返回多少条知识片段，默认 5。")
@@ -1476,6 +1887,18 @@ class InspectImageAttachmentToolInput(BaseModel):
         default="请分析这张图片的主要内容、可见文字、布局和对用户问题有帮助的细节。",
         description="本次图片解析重点，例如 OCR、图表分析、界面说明或整体描述。",
     )
+
+
+class WebSearchToolInput(BaseModel):
+    query: str = Field(min_length=1, description="公网搜索 query。必须最小化，不要包含私人笔记原文、密钥、本地路径或未公开代码。")
+    max_results: int = Field(default=5, ge=1, le=10, description="最多返回多少条来源。")
+    freshness: Literal["any", "day", "week", "month", "year"] = Field(default="any", description="时效范围。")
+    site: str = Field(default="", description="可选域名过滤，例如 aliyun.com。")
+
+
+class WebFetchToolInput(BaseModel):
+    url: str = Field(min_length=1, description="要核验的 http(s) URL。")
+    max_chars: int = Field(default=12000, ge=100, le=50000, description="最多返回多少正文字符。")
 
 
 def _create_knowledge_search_tool(
@@ -1839,6 +2262,14 @@ def _build_react_agent_system_prompt() -> str:
         "[K1]/[K2] 这类编号只用于内部定位检索片段，最终回答不要输出裸露编号或单独引用列表；"
         "需要说明来源时，用文档标题或自然语言融入句子。"
         "如果没有挂载或工具返回 NEED_KNOWLEDGE_MOUNT，应明确说明需要先挂载知识空间。\n"
+        "- 联网搜索边界：`Lx.web 联网搜索上下文` 是本轮公网证据层，只有 planner 判断需要时才会自动搜索。"
+        "当问题需要最新公共信息、官网资料、价格、计费、版本、政策、法规、新闻或明确来源 URL 时，"
+        "可以使用 Lx.web，或在来源不足时调用 web_search/web_fetch 补充。"
+        "当本地笔记、挂载知识库、附件或本地文件足以回答时，优先使用本地上下文，不主动联网。"
+        "不要把用户私人笔记原文、未公开代码、本地路径、账号、密钥或聊天隐私放入 web_search query。"
+        "如果必须外发可能含隐私的 query，先调用 request_user_input 确认。"
+        "使用联网信息回答时必须列出来源 URL；涉及价格、政策、API 参数时优先引用 fetched=true 的官方来源。"
+        "没有成功的 Lx.web/web_search/web_fetch 结果时，不得声称已经联网搜索。\n"
         "- 多个互不依赖的读取、搜索或信息查询可以在同一轮 tool_calls 中并行发出；"
         "有依赖关系的步骤必须等上一步 ToolMessage 返回后再继续。\n"
         "- 不要把删除、清理、覆盖配置、重建项目作为开局动作；只有定位到具体原因后才做针对性修改。\n"
@@ -2049,7 +2480,7 @@ def _local_fixed_drive_roots() -> list[Path]:
     r"""返回本机固定盘符根目录，用于 read-only Local Operator。
 
     Windows 上用户经常直接给 `C:\...`、`D:\...` 这样的绝对路径。如果默认只授权
-    Home，模型就会在回答层误以为自己“看不到 C 盘”。参考 Claude Code 的设计：
+    Home，模型就会在回答层误以为自己“看不到 C 盘”。参考 通用 coding agent 的设计：
     读取能力应由工具真实执行并返回错误，而不是由模型预先拒绝。
     """
 
@@ -2093,6 +2524,7 @@ def build_merge_prompt_context_node():
             _resolve_context_layer(state, "context_l2_layer"),
             _resolve_context_layer(state, "context_l1_layer"),
             _resolve_context_layer(state, "context_lx_attachment_layer"),
+            _resolve_context_layer(state, "context_lx_web_layer"),
             _resolve_context_layer(state, "context_l0_adjacent_layer"),
             _resolve_context_layer(state, "context_l0_layer"),
         ]
@@ -2860,6 +3292,42 @@ def _normalize_knowledge_search_arguments(arguments: dict) -> dict:
     return normalized
 
 
+def _normalize_web_search_arguments(arguments: dict) -> dict:
+    query = str(
+        arguments.get("query")
+        or arguments.get("q")
+        or arguments.get("search_query")
+        or arguments.get("keyword")
+        or arguments.get("keywords")
+        or ""
+    ).strip()
+    try:
+        max_results = int(arguments.get("max_results") or arguments.get("top_k") or settings.web_search_max_results)
+    except (TypeError, ValueError):
+        max_results = settings.web_search_max_results
+    freshness = str(arguments.get("freshness") or "any").strip().lower()
+    if freshness not in {"any", "day", "week", "month", "year"}:
+        freshness = "any"
+    return {
+        "query": query,
+        "max_results": max(1, min(max_results, 10)),
+        "freshness": freshness,
+        "site": str(arguments.get("site") or arguments.get("domain") or "").strip(),
+    }
+
+
+def _normalize_web_fetch_arguments(arguments: dict) -> dict:
+    url = str(arguments.get("url") or arguments.get("link") or arguments.get("href") or "").strip()
+    try:
+        max_chars = int(arguments.get("max_chars") or arguments.get("limit") or 12000)
+    except (TypeError, ValueError):
+        max_chars = 12000
+    return {
+        "url": url,
+        "max_chars": max(100, min(max_chars, 50000)),
+    }
+
+
 def _run_request_user_input_action(
     state: MemoryChatGraphState,
     *,
@@ -3598,6 +4066,8 @@ def _run_agent_tool_action(
             state,
             session_factory=session_factory,
         )
+        tools[WEB_SEARCH_TOOL_NAME] = _create_web_search_tool(state, session_factory=session_factory)
+        tools[WEB_FETCH_TOOL_NAME] = _create_web_fetch_tool(state, session_factory=session_factory)
         if tool_name not in tools:
             observation = {
                 "tool_call_id": tool_call_id,
@@ -4202,7 +4672,7 @@ def _thought(
     """创建一个可展示的过程摘要。
 
     step_index 标记该 thought 属于 ReAct 循环里的哪一步，前端可以据此把
-    同一步的工具调用、回答片段聚合到一段时间线上,实现 Claude Code 那样
+    同一步的工具调用、回答片段聚合到一段时间线上,实现 通用 coding agent 那样
     "思考-工具-回答" 顺序串行的展示。
     """
 

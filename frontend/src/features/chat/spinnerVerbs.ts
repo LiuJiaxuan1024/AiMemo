@@ -1,5 +1,5 @@
-// 灵感来自 Claude Code 的 spinner 动词词典：
-// submodules/Claude-Code/src/constants/spinnerVerbs.ts
+// 灵感来自 通用 coding agent 的 spinner 动词词典：
+// 参考实现源码/src/constants/spinnerVerbs.ts
 // 这里改为中文风格的"思考动词"，保持节奏感、轻幽默。
 export const SPINNER_VERBS: readonly string[] = [
   "思考中",

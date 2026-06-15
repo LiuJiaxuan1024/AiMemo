@@ -5,7 +5,7 @@
 1. **AiMemo 运行时智能体**（仓库内的 LangGraph agent：`local_operator` /
    `memory_chat` 等）。运行时智能体通过 `backend/app/agent/project_rules.py`
    把本文件的核心条款固化为常量并注入到 system prompt，每次推理都会带上。
-2. **在本仓库内改代码的开发者代理**（Claude Code / Cursor / 子智能体等）。
+2. **在本仓库内改代码的开发者代理**（编辑器代理 / CLI 代理 / 子智能体等）。
    开发者代理在该仓库工作时必须遵守同一份规则。
 
 ## 工作目录与文件落地（最重要）

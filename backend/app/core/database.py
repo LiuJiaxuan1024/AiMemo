@@ -37,6 +37,9 @@ from app.models import (
     SyncItem,
     SyncState,
     VoiceProfile,
+    WebSearchCache,
+    WebSearchEvent,
+    WebSearchUsage,
 )
 from app.rag.hashing import content_hash
 
@@ -73,6 +76,9 @@ _AUTOINCREMENT_MODELS = (
     SyncItem,
     SyncConflict,
     SyncDevice,
+    WebSearchCache,
+    WebSearchUsage,
+    WebSearchEvent,
 )
 _AUTOINCREMENT_TABLES = tuple(model.__tablename__ for model in _AUTOINCREMENT_MODELS)
 

@@ -233,6 +233,8 @@ class MemoryChatGraphState(TypedDict, total=False):
     context_l3_knowledge_layer: ContextLayerPayload
     context_l4_layer: ContextLayerPayload
     context_lx_attachment_layer: ContextLayerPayload
+    context_lx_web_layer: ContextLayerPayload
+    web_search_debug: dict
     attachment_ids: list[int]
     prompt_context: str
     # 本轮 graph 内部消息流。每轮 load_turn_state 会重新初始化，避免跨轮重复累加。
