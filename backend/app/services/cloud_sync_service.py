@@ -545,12 +545,10 @@ def _apply_config_payload(session: Session, payload: dict[str, Any]) -> None:
     path = str(record.get("path") or "")
     if not _is_syncable_config(path):
         return
-    item_id = int(record.get("id") or 0)
-    item = session.get(RuntimeConfig, item_id) if item_id else None
+    scope = str(record.get("scope") or "user")
+    item = session.exec(select(RuntimeConfig).where(RuntimeConfig.scope == scope, RuntimeConfig.path == path)).first()
     if item is None:
-        item = session.exec(select(RuntimeConfig).where(RuntimeConfig.scope == str(record.get("scope") or "user"), RuntimeConfig.path == path)).first()
-    if item is None:
-        item = RuntimeConfig(scope=str(record.get("scope") or "user"), path=path)
+        item = RuntimeConfig(scope=scope, path=path)
     _assign_fields(item, record, exclude={"id"})
     session.add(item)
 

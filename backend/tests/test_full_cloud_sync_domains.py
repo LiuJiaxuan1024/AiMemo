@@ -69,6 +69,63 @@ def test_memory_and_config_domains_exclude_secret_like_config(session, tmp_path,
     assert "api_key" not in json.dumps(config_payload, ensure_ascii=False)
 
 
+def test_config_pull_matches_existing_row_by_scope_and_path(session, tmp_path, monkeypatch):
+    _configure_sync(monkeypatch)
+    provider = LocalMockStorageProvider(tmp_path)
+    first_local = RuntimeConfig(scope="user", path="elf.voice.mode", value_json='"text"')
+    target_config = RuntimeConfig(scope="user", path="elf.voice.default_profile_id", value_json='"1"')
+    session.add(first_local)
+    session.add(target_config)
+    session.commit()
+
+    object_key = domain_object_key("u1", "config", "runtime_config:1")
+    remote_payload = {
+        "schema_version": 1,
+        "domain": "config",
+        "id": "runtime_config:1",
+        "revision": 2,
+        "object_key": object_key,
+        "kind": "runtime_config",
+        "record": {
+            "id": first_local.id,
+            "scope": "user",
+            "path": "elf.voice.default_profile_id",
+            "value_json": '"3"',
+            "created_at": "2026-06-13T01:00:00Z",
+            "updated_at": "2026-06-13T02:00:00Z",
+        },
+        "updated_at": "2026-06-13T02:00:00Z",
+    }
+    remote_manifest = {
+        "schema_version": 1,
+        "user_id": "u1",
+        "domain": "config",
+        "global_revision": 2,
+        "updated_at": "2026-06-13T02:00:00Z",
+        "device_id": "remote",
+        "entities": {
+            "runtime_config:1": {
+                "revision": 2,
+                "content_hash": "remote-hash",
+                "updated_at": "2026-06-13T02:00:00Z",
+                "deleted": False,
+                "object_key": object_key,
+                "summary": "elf.voice.default_profile_id",
+            }
+        },
+    }
+    provider.put_bytes(object_key, json.dumps(remote_payload).encode("utf-8"), content_type="application/json")
+    provider.put_bytes(domain_manifest_key("u1", "config"), json.dumps(remote_manifest).encode("utf-8"), content_type="application/json")
+
+    result = pull_once(session, provider=provider, domains=["config"])
+
+    session.refresh(first_local)
+    session.refresh(target_config)
+    assert result.domains[0].downloaded_count == 1
+    assert first_local.path == "elf.voice.mode"
+    assert target_config.value_json == '"3"'
+
+
 def test_domain_conflict_is_recorded_when_local_dirty_and_remote_newer(session, tmp_path, monkeypatch):
     _configure_sync(monkeypatch)
     provider = LocalMockStorageProvider(tmp_path)

@@ -2340,8 +2340,8 @@ code {
   min-width: 0;
   padding-top: var(--space-3);
 }
-.segment-followup-turn__question span,
-.segment-followup-turn__answer span,
+.segment-followup-turn__question > span,
+.segment-followup-turn__answer > span,
 .aimemo-export-followup-origin {
   color: var(--color-text-muted);
   display: block;
