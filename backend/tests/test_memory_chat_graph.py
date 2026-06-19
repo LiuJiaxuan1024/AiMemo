@@ -1,4 +1,8 @@
+import importlib
+import inspect
+import pkgutil
 from pathlib import Path
+from typing import get_type_hints
 
 from langchain_core.messages import AIMessage
 from langchain_core.messages import ToolMessage
@@ -11,6 +15,7 @@ from app.agent.graphs.memory_chat.graph import (
     run_memory_chat_graph,
 )
 from app.agent.graphs.memory_chat.graph import _resolve_graph_input_for_turn
+import app.agent.graphs.memory_chat as memory_chat_package
 from app.agent.checkpoints import get_sqlite_checkpointer
 from app.agent.graphs.memory_chat.nodes import RetrievalPlan
 from app.agent.graphs.memory_chat.nodes import build_memory_chat_answer_system_prompt
@@ -23,7 +28,16 @@ from app.agent.graphs.memory_chat.nodes import _build_react_agent_messages
 from app.agent.graphs.memory_chat.nodes import _extract_ai_tool_calls
 from app.agent.graphs.memory_chat.nodes import _run_agent_tool_action
 from app.agent.graphs.memory_chat.nodes import _normalize_user_input_resume
+from app.agent.graphs.memory_chat.nodes import build_current_conversation_window_node
+from app.agent.graphs.memory_chat.nodes import build_generate_elf_bubble_answer_node
+from app.agent.graphs.memory_chat.nodes import build_l0_adjacent_turn_node
+from app.agent.graphs.memory_chat.nodes import build_l0_current_input_node
+from app.agent.graphs.memory_chat.nodes import build_l1_recent_messages_node
+from app.agent.graphs.memory_chat.nodes import build_l2_summary_node
+from app.agent.graphs.memory_chat.nodes import build_l3_retrieved_memory_node
 from app.agent.graphs.memory_chat.nodes import build_load_turn_state_node
+from app.agent.graphs.memory_chat.nodes import build_l4_core_memory_node
+from app.agent.graphs.memory_chat.nodes import build_lx_attachment_context_node
 from app.agent.graphs.memory_chat.nodes import default_retrieval_planner
 from app.agent.graphs.memory_chat.nodes import _should_retrieve_mounted_knowledge
 from app.agent.graphs.memory_chat.nodes import _build_model_messages
@@ -31,6 +45,7 @@ from app.agent.graphs.memory_chat.nodes import _parse_elf_bubble_parts
 from app.agent.graphs.memory_chat.nodes import build_merge_prompt_context_node
 from app.agent.graphs.memory_chat.nodes import build_l3_knowledge_context_node
 from app.agent.graphs.memory_chat.nodes import build_lx_web_context_node
+from app.agent.graphs.memory_chat.nodes import build_persist_messages_node
 from app.agent.graphs.memory_chat.nodes import plan_lx_web_context
 from app.agent.graphs.memory_chat.nodes import _tool_observations_to_context
 from app.agent.graphs.memory_chat.nodes import build_observe_tool_result_node
@@ -53,6 +68,52 @@ from app.services.web_search_service import WebSearchService
 from app.services.chat_turn_service import initial_node_statuses
 from app.services.chat_turn_service import get_chat_turn_state_history
 from app.services.memory_service import build_memory_content_hash
+
+
+def test_memory_chat_split_node_factory_type_hints_are_resolvable():
+    factories = [
+        build_load_turn_state_node,
+        build_l4_core_memory_node,
+        build_l2_summary_node,
+        build_l1_recent_messages_node,
+        build_current_conversation_window_node,
+        build_l0_current_input_node,
+        build_l0_adjacent_turn_node,
+        build_l3_retrieved_memory_node,
+        build_l3_knowledge_context_node,
+        build_lx_attachment_context_node,
+        build_lx_web_context_node,
+        build_merge_prompt_context_node,
+        build_agent_node,
+        build_generate_elf_bubble_answer_node,
+        build_tools_node,
+        build_plan_task_node,
+        build_observe_tool_result_node,
+        build_verify_goal_node,
+        build_persist_messages_node,
+    ]
+
+    for factory in factories:
+        get_type_hints(factory)
+
+
+def test_memory_chat_split_module_function_type_hints_are_resolvable():
+    failures = []
+
+    for module_info in pkgutil.iter_modules(
+        memory_chat_package.__path__,
+        f"{memory_chat_package.__name__}.",
+    ):
+        module = importlib.import_module(module_info.name)
+        for name, value in inspect.getmembers(module, inspect.isfunction):
+            if getattr(value, "__module__", "") != module.__name__:
+                continue
+            try:
+                get_type_hints(value)
+            except Exception as exc:  # pragma: no cover - failure message is the assertion payload
+                failures.append(f"{module.__name__}.{name}: {type(exc).__name__}: {exc}")
+
+    assert failures == []
 
 
 def test_memory_chat_graph_direct_answer_persists_messages(

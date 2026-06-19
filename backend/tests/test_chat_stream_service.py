@@ -3,6 +3,7 @@ import threading
 import time
 from pathlib import Path
 
+from langchain_core.messages import AIMessage
 from sqlmodel import select
 
 from app.models.chat_message import ChatMessage
@@ -19,6 +20,55 @@ from app.services.chat_turn_service import (
     list_active_chat_turns,
 )
 from app.services.conversation_service import create_conversation
+
+
+def test_stream_chat_runs_real_memory_graph_with_fake_model(
+    session,
+    session_factory,
+    tmp_path: Path,
+    monkeypatch,
+):
+    """服务层流式入口应能穿过真实 memory_chat_graph 完成一轮普通对话。"""
+
+    chat_turn_buffer.reset_for_tests()
+    conversation = create_conversation(session, ConversationCreate(title="真实 graph 流式 smoke"))
+    checkpoint_path = tmp_path / "checkpoints.db"
+
+    class FakeModel:
+        def invoke(self, messages):  # noqa: ARG002
+            return AIMessage(content="真实 graph 流式回答")
+
+    monkeypatch.setattr(
+        "app.agent.graphs.memory_chat.nodes.get_agent_chat_model_with_tools",
+        lambda tools: FakeModel(),  # noqa: ARG005
+    )
+
+    try:
+        events = [
+            _parse_sse(event)
+            for event in stream_conversation_chat_events(
+                conversation.id,
+                message="随便问一个问题",
+                session_factory=session_factory,
+                checkpoint_path=str(checkpoint_path),
+                emit_status_events=False,
+            )
+        ]
+    finally:
+        chat_turn_buffer.reset_for_tests()
+
+    assert events[0]["event"] == "turn"
+    errors = [event for event in events if event["event"] == "error"]
+    assert errors == []
+    done_event = next(event for event in events if event["event"] == "done")
+    assert done_event["data"]["response"]["assistant_message"]["content"] == "真实 graph 流式回答"
+
+    session.expire_all()
+    messages = session.exec(select(ChatMessage).order_by(ChatMessage.id)).all()
+    assert [message.role for message in messages] == ["user", "assistant"]
+    assert messages[0].content == "随便问一个问题"
+    assert messages[1].content == "真实 graph 流式回答"
+    assert messages[1].status == "completed"
 
 
 def test_stream_chat_creates_turn_and_messages_before_graph_finishes(

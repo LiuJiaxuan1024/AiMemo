@@ -49,6 +49,18 @@ class ChatTurnCancelled(RuntimeError):
     """Raised inside a worker when the user has cancelled the turn."""
 
 
+def run_memory_chat_graph(**kwargs):
+    from app.agent.graphs.memory_chat.graph import run_memory_chat_graph as impl
+
+    return impl(**kwargs)
+
+
+def stream_memory_chat_graph(**kwargs):
+    from app.agent.graphs.memory_chat.graph import stream_memory_chat_graph as impl
+
+    yield from impl(**kwargs)
+
+
 def run_conversation_chat(
     conversation_id: int,
     *,
@@ -82,8 +94,6 @@ def run_conversation_chat(
         langgraph_thread_id = (
             conversation.langgraph_thread_id or f"conversation:{conversation_id}"
         )
-
-    from app.agent.graphs.memory_chat.graph import run_memory_chat_graph
 
     result = run_memory_chat_graph(
         conversation_id=conversation_id,
@@ -483,8 +493,6 @@ def _run_turn_to_buffer(
     # 不应再次派发同一条卡片；同时也覆盖 stream_writer 失败时只能从 state 派发的情形。
     emitted_tool_call_ids: set[str] = set()
     last_runtime_status = "thinking" if runtime_scope == "elf" else ""
-
-    from app.agent.graphs.memory_chat.graph import stream_memory_chat_graph
 
     def mark_elf_runtime(status: str, **kwargs) -> None:
         nonlocal last_runtime_status
