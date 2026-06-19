@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 import pytest
@@ -225,6 +226,7 @@ def _assert_eval_expectations(case: dict[str, Any], result: dict[str, Any]) -> N
     expected = dict(case.get("expected") or {})
     case_id = str(case["id"])
     prompt_context = str(result.get("prompt_context") or "")
+    actual_sources = _collect_actual_sources(result)
 
     if "needs_retrieval" in expected:
         assert bool(result.get("needs_retrieval")) is bool(expected["needs_retrieval"]), case_id
@@ -239,3 +241,176 @@ def _assert_eval_expectations(case: dict[str, Any], result: dict[str, Any]) -> N
         assert str(text) in prompt_context, f"{case_id}: expected prompt_context to include {text!r}"
     for text in expected.get("must_not_include_text") or []:
         assert str(text) not in prompt_context, f"{case_id}: expected prompt_context to exclude {text!r}"
+
+    for source in expected.get("must_hit_sources") or []:
+        assert _source_matches_any(source, actual_sources), _format_missing_source_message(case, source, actual_sources)
+    for source in expected.get("must_not_hit_sources") or []:
+        assert not _source_matches_any(source, actual_sources), _format_forbidden_source_message(case, source, actual_sources)
+
+
+def _collect_actual_sources(result: dict[str, Any]) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = []
+    for chunk in result.get("retrieved_chunks") or []:
+        sources.append(
+            {
+                "type": "note",
+                "note_id": chunk.get("note_id"),
+                "title": chunk.get("note_title"),
+                "chunk_id": chunk.get("chunk_id"),
+                "chunk_text": chunk.get("content"),
+                "content_hash": chunk.get("content_hash"),
+                "score": chunk.get("score"),
+            }
+        )
+    for chunk in result.get("knowledge_retrieved_chunks") or []:
+        sources.append(
+            {
+                "type": "knowledge",
+                "space_id": chunk.get("space_id"),
+                "space": chunk.get("space_name"),
+                "document_id": chunk.get("document_id"),
+                "document": chunk.get("document_title"),
+                "chunk_id": chunk.get("chunk_id"),
+                "chunk_text": chunk.get("text"),
+                "score": chunk.get("score"),
+                "score_source": chunk.get("score_source"),
+                "retrieval_phase": chunk.get("retrieval_phase"),
+            }
+        )
+
+    l4_layer = result.get("context_l4_layer") if isinstance(result.get("context_l4_layer"), dict) else {}
+    l4_content = str(l4_layer.get("content") or "")
+    for line in l4_content.splitlines():
+        normalized = line.strip()
+        if not normalized or "暂无已整理的核心长期记忆" in normalized:
+            continue
+        memory_key_match = re.search(r"key=([^,\]]+)", normalized)
+        category_match = re.search(r"\[([^,\]]+)", normalized)
+        sources.append(
+            {
+                "type": "memory",
+                "memory_key": memory_key_match.group(1).strip() if memory_key_match else "",
+                "category": category_match.group(1).strip(" -") if category_match else "",
+                "content": normalized,
+            }
+        )
+
+    for layer_key in ["context_l1_layer", "context_l0_adjacent_layer"]:
+        layer = result.get(layer_key) if isinstance(result.get(layer_key), dict) else {}
+        content = str(layer.get("content") or "")
+        if content:
+            sources.append(
+                {
+                    "type": "recent_message",
+                    "layer": layer_key,
+                    "content": content,
+                }
+            )
+    return sources
+
+
+def _source_matches_any(expected: dict[str, Any], actual_sources: list[dict[str, Any]]) -> bool:
+    return any(_source_matches(expected, actual) for actual in actual_sources)
+
+
+def _source_matches(expected: dict[str, Any], actual: dict[str, Any]) -> bool:
+    source_type = str(expected.get("type") or "")
+    if source_type != str(actual.get("type") or ""):
+        return False
+    if source_type == "note":
+        return _matches_common_source_fields(
+            expected,
+            actual,
+            exact_fields=[("title", "title"), ("note_id", "note_id"), ("chunk_id", "chunk_id")],
+            text_field="chunk_text",
+        )
+    if source_type == "knowledge":
+        return _matches_common_source_fields(
+            expected,
+            actual,
+            exact_fields=[
+                ("space", "space"),
+                ("space_id", "space_id"),
+                ("document", "document"),
+                ("document_id", "document_id"),
+                ("chunk_id", "chunk_id"),
+            ],
+            text_field="chunk_text",
+        )
+    if source_type == "memory":
+        return _matches_common_source_fields(
+            expected,
+            actual,
+            exact_fields=[("memory_key", "memory_key"), ("category", "category")],
+            text_field="content",
+        )
+    if source_type == "recent_message":
+        return _matches_common_source_fields(
+            expected,
+            actual,
+            exact_fields=[("layer", "layer")],
+            text_field="content",
+        )
+    return False
+
+
+def _matches_common_source_fields(
+    expected: dict[str, Any],
+    actual: dict[str, Any],
+    *,
+    exact_fields: list[tuple[str, str]],
+    text_field: str,
+) -> bool:
+    for expected_key, actual_key in exact_fields:
+        if expected_key in expected and str(actual.get(actual_key) or "") != str(expected[expected_key]):
+            return False
+    if "chunk_text" in expected and str(expected["chunk_text"]) not in str(actual.get(text_field) or ""):
+        return False
+    if "content" in expected and str(expected["content"]) not in str(actual.get(text_field) or ""):
+        return False
+    if "min_score" in expected:
+        try:
+            if float(actual.get("score") or 0) < float(expected["min_score"]):
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def _format_missing_source_message(
+    case: dict[str, Any],
+    source: dict[str, Any],
+    actual_sources: list[dict[str, Any]],
+) -> str:
+    return (
+        f"{case['id']}: expected source was not hit\n"
+        f"question: {case.get('question')}\n"
+        f"missing source: {json.dumps(source, ensure_ascii=False, sort_keys=True)}\n"
+        f"actual sources:\n{_format_actual_sources(actual_sources)}"
+    )
+
+
+def _format_forbidden_source_message(
+    case: dict[str, Any],
+    source: dict[str, Any],
+    actual_sources: list[dict[str, Any]],
+) -> str:
+    return (
+        f"{case['id']}: forbidden source was hit\n"
+        f"question: {case.get('question')}\n"
+        f"forbidden source: {json.dumps(source, ensure_ascii=False, sort_keys=True)}\n"
+        f"actual sources:\n{_format_actual_sources(actual_sources)}"
+    )
+
+
+def _format_actual_sources(actual_sources: list[dict[str, Any]]) -> str:
+    if not actual_sources:
+        return "  <none>"
+    lines: list[str] = []
+    for source in actual_sources:
+        compact = dict(source)
+        for key in ["chunk_text", "content"]:
+            if key in compact and isinstance(compact[key], str) and len(compact[key]) > 90:
+                compact[key] = f"{compact[key][:87]}..."
+        lines.append(f"  - {json.dumps(compact, ensure_ascii=False, sort_keys=True)}")
+    return "\n".join(lines)
