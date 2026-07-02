@@ -16,7 +16,7 @@ from app.models.knowledge import (
     KnowledgeSpace,
 )
 from app.models.long_term_memory import LongTermMemory
-from app.models.note import Note
+from app.models.note import Note, NoteCategory
 from app.models.note_chunk import NoteChunk
 from app.models.runtime_config import RuntimeConfig
 from app.models.sync_state import SyncState
@@ -43,6 +43,7 @@ __all__ = [
     "KnowledgeSpace",
     "LongTermMemory",
     "Note",
+    "NoteCategory",
     "NoteChunk",
     "RuntimeConfig",
     "SyncState",

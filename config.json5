@@ -111,6 +111,10 @@
         },
       },
     },
+
+    "slots": {
+      "agent_chat": {"provider": "deepseek", "model": "deepseek-reasoner", "temperature": 0.2, "streaming": true},
+    },
   },
   "elf": {
     // false 时 Web 前端不挂载精灵组件，start-dev 也不启动桌面精灵；

@@ -1,18 +1,20 @@
 import { FormEvent, useEffect, useState } from "react";
-import { ArchiveX, CalendarDays, FileText, Pencil, RotateCcw, Save, Tags, Trash2, X } from "lucide-react";
+import { ArchiveX, CalendarDays, Check, ChevronDown, FileText, Folder, Pencil, Pin, RotateCcw, Save, Star, Tags, Trash2, X } from "lucide-react";
 
 import { Badge, Button, EmptyState, MarkdownView } from "../../shared/ui";
-import type { Note, UpdateNoteInput } from "../../types/note";
+import type { Note, NoteCategory, UpdateNoteInput } from "../../types/note";
 import { LazyMarkdownEditor } from "./LazyMarkdownEditor";
 import { formatNoteDate } from "./noteUtils";
 
 interface NoteDetailProps {
+  categories: NoteCategory[];
   isMutating: boolean;
   note: Note | null;
   onDelete: (note: Note) => void;
   onHardDelete: (note: Note) => void;
   onRestore: (note: Note) => void;
   onUpdate: (note: Note, input: UpdateNoteInput) => void;
+  onUpdateOrganization: (note: Note, input: UpdateNoteInput) => void;
 }
 
 /**
@@ -20,24 +22,30 @@ interface NoteDetailProps {
  * 后续如果加入编辑、chunk、embedding 调试信息，可以继续在这个组件内扩展展示区。
  */
 export function NoteDetail({
+  categories,
   isMutating,
   note,
   onDelete,
   onHardDelete,
   onRestore,
   onUpdate,
+  onUpdateOrganization,
 }: NoteDetailProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [contentDraft, setContentDraft] = useState("");
   const [contentBlocksDraft, setContentBlocksDraft] = useState("");
+  const [tagsDraft, setTagsDraft] = useState("");
+  const [isCategoryMenuOpen, setIsCategoryMenuOpen] = useState(false);
 
   useEffect(() => {
     setIsEditing(false);
+    setIsCategoryMenuOpen(false);
     setTitleDraft(note?.title ?? "");
     setContentDraft(note?.content_markdown ?? note?.content ?? "");
     setContentBlocksDraft(note?.content_blocks ?? "");
-  }, [note?.id, note?.title, note?.content, note?.content_markdown, note?.content_blocks]);
+    setTagsDraft(note?.tags.join(", ") ?? "");
+  }, [note?.id, note?.title, note?.content, note?.content_markdown, note?.content_blocks, note?.tags]);
 
   if (!note) {
     return (
@@ -66,6 +74,28 @@ export function NoteDetail({
     setIsEditing(false);
   }
 
+  function saveTags() {
+    if (!note) {
+      return;
+    }
+    const tags = tagsDraft
+      .split(/[,，]/)
+      .map((tag) => tag.trim())
+      .filter(Boolean);
+    onUpdateOrganization(note, { tags });
+  }
+
+  function selectCategory(categoryId: number | null) {
+    if (!note) {
+      return;
+    }
+    setIsCategoryMenuOpen(false);
+    if ((note.category_id ?? null) === categoryId) {
+      return;
+    }
+    onUpdateOrganization(note, { category_id: categoryId });
+  }
+
   return (
     <article className="note-detail">
       <header className="note-detail-header">
@@ -87,6 +117,22 @@ export function NoteDetail({
       <div className="note-detail-actions">
         {note.status === "active" ? (
           <>
+            <Button
+              disabled={isMutating}
+              onClick={() => onUpdateOrganization(note, { is_favorite: !note.is_favorite })}
+              size="sm"
+            >
+              <Star aria-hidden="true" size={15} />
+              {note.is_favorite ? "取消收藏" : "收藏"}
+            </Button>
+            <Button
+              disabled={isMutating}
+              onClick={() => onUpdateOrganization(note, { pinned: !note.pinned_at })}
+              size="sm"
+            >
+              <Pin aria-hidden="true" size={15} />
+              {note.pinned_at ? "取消置顶" : "置顶"}
+            </Button>
             <Button disabled={isMutating} onClick={() => setIsEditing(true)} size="sm">
               <Pencil aria-hidden="true" size={15} />
               编辑
@@ -109,6 +155,71 @@ export function NoteDetail({
           </>
         )}
       </div>
+      {note.status === "active" ? (
+        <section className="note-organization-panel" aria-label="笔记组织">
+          <label className="note-organization-control note-category-control">
+            <span className="note-organization-label">
+              <Folder aria-hidden="true" size={15} />
+              分类
+            </span>
+            <div className="note-category-menu">
+              <button
+                aria-expanded={isCategoryMenuOpen}
+                aria-haspopup="menu"
+                className="note-category-trigger"
+                disabled={isMutating}
+                onClick={() => setIsCategoryMenuOpen((current) => !current)}
+                type="button"
+              >
+                <span>{note.category_name || "未分类"}</span>
+                <ChevronDown aria-hidden="true" size={15} />
+              </button>
+              {isCategoryMenuOpen ? (
+                <div className="note-category-menu-popover" role="menu">
+                  <button
+                    className={note.category_id === null ? "active" : ""}
+                    onClick={() => selectCategory(null)}
+                    role="menuitem"
+                    type="button"
+                  >
+                    <span>未分类</span>
+                    {note.category_id === null ? <Check aria-hidden="true" size={14} /> : null}
+                  </button>
+                  {categories.map((category) => (
+                    <button
+                      className={note.category_id === category.id ? "active" : ""}
+                      key={category.id}
+                      onClick={() => selectCategory(category.id)}
+                      role="menuitem"
+                      type="button"
+                    >
+                      <span>{category.name}</span>
+                      {note.category_id === category.id ? <Check aria-hidden="true" size={14} /> : null}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </label>
+          <label className="note-organization-control note-tags-control">
+            <span className="note-organization-label">
+              <Tags aria-hidden="true" size={15} />
+              标签
+            </span>
+            <div className="note-tag-editor">
+              <input
+                disabled={isMutating}
+                onChange={(event) => setTagsDraft(event.target.value)}
+                placeholder="用逗号分隔标签"
+                value={tagsDraft}
+              />
+              <Button disabled={isMutating} onClick={saveTags} size="sm">
+                保存标签
+              </Button>
+            </div>
+          </label>
+        </section>
+      ) : null}
       <section className="note-health-grid" aria-label="笔记处理状态">
         <div className={isProcessing ? "running" : ""}>
           <span>AI 整理</span>

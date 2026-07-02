@@ -38,6 +38,13 @@ def test_app_registers_search_routes():
     assert "/api/cloud-sync/pull" in paths
     assert "/api/cloud-sync/push" in paths
     assert "/api/cloud-sync/sync" in paths
+    assert "/api/cloud-sync/repairs/conversation-attachment-paths" in paths
+    assert "/api/note-categories" in paths
+    assert "/api/note-categories/{category_id}" in paths
+    assert "/api/note-tags" in paths
+    assert "/api/note-tags/rename" in paths
+    assert "/api/note-tags/merge" in paths
+    assert "/api/note-tags/delete" in paths
 
 
 def test_frontend_static_module_mime_types_are_registered():

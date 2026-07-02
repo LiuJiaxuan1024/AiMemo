@@ -149,10 +149,33 @@ def get_attachment_path_or_404(
         conversation_id=conversation_id,
         attachment_id=attachment_id,
     )
-    path = Path(attachment.storage_path)
+    try:
+        path = resolve_chat_attachment_path(attachment.storage_path)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attachment file not found") from None
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attachment file not found")
     return path
+
+
+def resolve_chat_attachment_path(storage_path: str) -> Path:
+    """Resolve a chat attachment storage path to the current machine's upload root.
+
+    New rows store paths relative to settings.attachments_storage_dir. Legacy
+    absolute paths are still accepted so existing local databases keep working.
+    """
+
+    raw_path = str(storage_path or "").strip()
+    root = _attachment_storage_root()
+    if not raw_path:
+        return root
+    path = Path(raw_path).expanduser()
+    if path.is_absolute():
+        return path.resolve(strict=False)
+    target = (root / path).resolve(strict=False)
+    if not _path_is_relative_to(target, root):
+        raise ValueError("Attachment storage path escapes attachments root.")
+    return target
 
 
 def load_attachment_context_for_message(
@@ -250,17 +273,17 @@ def _write_attachment_file(
     original_name: str,
     data: bytes,
 ) -> Path:
-    root = Path(settings.attachments_storage_dir).expanduser()
-    target_dir = root / "conversations" / str(conversation_id)
+    root = _attachment_storage_root()
+    relative_path = Path("conversations") / str(conversation_id) / f"{sha256[:16]}-{_safe_storage_name(original_name)}"
+    target = root / relative_path
+    target_dir = target.parent
     target_dir.mkdir(parents=True, exist_ok=True)
-    safe_name = _safe_storage_name(original_name)
-    target = target_dir / f"{sha256[:16]}-{safe_name}"
     if target.exists():
-        return target.resolve()
+        return relative_path
     tmp = target.with_suffix(target.suffix + ".part")
     tmp.write_bytes(data)
     os.replace(tmp, target)
-    return target.resolve()
+    return relative_path
 
 
 def _build_metadata_derivative(attachment: ChatAttachment) -> ChatAttachmentDerivative:
@@ -292,11 +315,11 @@ def _delete_attachment_records(session: Session, attachments: list[ChatAttachmen
         ).all()
         for derivative in derivatives:
             session.delete(derivative)
-        path = Path(attachment.storage_path)
         try:
+            path = resolve_chat_attachment_path(attachment.storage_path)
             if path.exists() and path.is_file():
                 path.unlink()
-        except OSError:
+        except (OSError, ValueError):
             pass
         session.delete(attachment)
 
@@ -309,6 +332,18 @@ def _safe_original_name(name: str) -> str:
 def _safe_storage_name(name: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", _safe_original_name(name))
     return cleaned.strip("._") or "attachment"
+
+
+def _attachment_storage_root() -> Path:
+    return Path(settings.attachments_storage_dir).expanduser().resolve()
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def _guess_mime_type(name: str) -> str:

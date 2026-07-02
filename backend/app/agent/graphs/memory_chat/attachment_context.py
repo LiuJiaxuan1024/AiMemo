@@ -2,7 +2,6 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 import base64
 import logging
-from pathlib import Path
 
 from langchain_core.messages import HumanMessage
 from sqlmodel import Session
@@ -13,7 +12,7 @@ from app.agent.model import get_vision_chat_model
 from app.core.config import settings
 from app.models.chat_attachment import ChatAttachment, ChatAttachmentDerivative
 from app.rag.chunking.tokenizer import count_tokens
-from app.services.attachment_service import load_attachment_context_for_message
+from app.services.attachment_service import load_attachment_context_for_message, resolve_chat_attachment_path
 
 
 SessionFactory = Callable[[], AbstractContextManager[Session]]
@@ -153,7 +152,15 @@ def _ensure_current_turn_image_derivatives(
 
 
 def _inspect_image_attachment_payload(attachment: ChatAttachment, *, instruction: str) -> dict:
-    image_path = Path(attachment.storage_path)
+    try:
+        image_path = resolve_chat_attachment_path(attachment.storage_path)
+    except ValueError:
+        return {
+            "ok": False,
+            "message": "图片附件文件不存在，无法解析。",
+            "error_code": "ATTACHMENT_FILE_NOT_FOUND",
+            "data": {"attachment_id": attachment.id},
+        }
     if not image_path.exists() or not image_path.is_file():
         return {
             "ok": False,

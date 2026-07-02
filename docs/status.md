@@ -30,13 +30,15 @@ planned       仅规划或设计中。
 
 ## 当前优先级
 
-短期不再横向新增大模块。下一阶段优先：
+短期不再横向新增大模块。近期执行项、进度和待排期候选池统一维护在 [项目优先级追踪表](./project-priority-tracker.md)。
+
+下一阶段优先：
 
 ```text
-1. 拆分 memory_chat/nodes.py。
-2. 建 memory/retrieval eval set。
-3. 落地 Local Operator approval interrupt。
-4. 补长期记忆 revision/evidence 表。
-5. 给导出 HTML 增加浏览器回归测试。
-6. 加固 Cloud Sync 错误分类和冲突体验。
+1. 建 memory/retrieval eval set。
+2. 给导出 HTML 增加浏览器视觉回归测试。
+3. 继续拆分 Memory Chat Graph 复杂模块。
+4. 落地 Local Operator approval interrupt。
+5. 加固 Cloud Sync 错误分类和冲突体验。
+6. 补长期记忆 revision/evidence 表。
 ```

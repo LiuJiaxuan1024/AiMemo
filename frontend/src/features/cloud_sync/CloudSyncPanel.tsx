@@ -1,4 +1,4 @@
-import { Archive, Cloud, DownloadCloud, RefreshCw, ShieldAlert, UploadCloud } from "lucide-react";
+import { Archive, Cloud, Copy, DownloadCloud, RefreshCw, ShieldAlert, UploadCloud } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
@@ -13,7 +13,14 @@ import {
   runCloudSync,
   syncCloudSyncDomain,
 } from "./cloudSyncApi";
-import type { CloudSyncBackup, CloudSyncConflict, CloudSyncDomainStatus, CloudSyncRunResult, CloudSyncStatus } from "./types";
+import type {
+  CloudSyncBackup,
+  CloudSyncConflict,
+  CloudSyncConflictResolution,
+  CloudSyncDomainStatus,
+  CloudSyncRunResult,
+  CloudSyncStatus,
+} from "./types";
 import { Badge, Button, EmptyState, PanelHeader } from "../../shared/ui";
 
 type SyncAction = "pull" | "push" | "sync";
@@ -66,10 +73,12 @@ export function CloudSyncPanel() {
     },
   });
   const resolveConflictMutation = useMutation({
-    mutationFn: resolveCloudSyncConflict,
+    mutationFn: ({ id, resolution }: { id: number; resolution: CloudSyncConflictResolution }) =>
+      resolveCloudSyncConflict(id, resolution),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["cloud-sync", "status"] });
       await queryClient.invalidateQueries({ queryKey: ["cloud-sync", "conflicts"] });
+      await queryClient.invalidateQueries({ queryKey: ["notes"] });
     },
     onError: (caught) => {
       setActionError(caught instanceof Error ? caught.message : "处理冲突失败");
@@ -133,7 +142,11 @@ export function CloudSyncPanel() {
       </div>
 
       {lastResult ? <CloudSyncResult result={lastResult} /> : null}
-      <CloudSyncConflicts conflicts={conflictsQuery.data ?? []} isBusy={isBusy} onResolve={(id) => resolveConflictMutation.mutate(id)} />
+      <CloudSyncConflicts
+        conflicts={conflictsQuery.data ?? []}
+        isBusy={isBusy}
+        onResolve={(id, resolution) => resolveConflictMutation.mutate({ id, resolution })}
+      />
       <CloudSyncBackups
         backups={backupsQuery.data ?? []}
         isBusy={isBusy}
@@ -276,7 +289,7 @@ function CloudSyncConflicts({
 }: {
   conflicts: CloudSyncConflict[];
   isBusy: boolean;
-  onResolve: (id: number) => void;
+  onResolve: (id: number, resolution: CloudSyncConflictResolution) => void;
 }) {
   return (
     <section className="cloud-sync-section">
@@ -290,16 +303,27 @@ function CloudSyncConflicts({
         <div className="cloud-sync-conflict-list">
           {conflicts.map((conflict) => (
             <article className="cloud-sync-conflict-card" key={conflict.id}>
-              <div>
+              <div className="cloud-sync-conflict-card-header">
                 <strong>{domainLabel(conflict.domain)} #{conflict.entity_id}</strong>
                 <span>
-                  本地 v{conflict.local_revision} / 远端 v{conflict.remote_revision}
+                  {conflictTypeLabel(conflict.conflict_type)} · 本地 v{conflict.local_revision} / 远端 v{conflict.remote_revision}
                 </span>
               </div>
-              <p>{conflict.remote_summary || conflict.local_summary || "远端和本地都有修改。"}</p>
-              <Button disabled={isBusy} onClick={() => onResolve(conflict.id)} size="sm">
-                保留两份
-              </Button>
+              <p>{conflictDescription(conflict)}</p>
+              <div className="cloud-sync-conflict-actions">
+                <Button disabled={isBusy} onClick={() => onResolve(conflict.id, "keep_both")} size="sm" variant="primary">
+                  <Copy aria-hidden="true" size={14} />
+                  另存副本
+                </Button>
+                <Button disabled={isBusy} onClick={() => onResolve(conflict.id, "keep_local")} size="sm">
+                  <UploadCloud aria-hidden="true" size={14} />
+                  保留本机
+                </Button>
+                <Button disabled={isBusy} onClick={() => onResolve(conflict.id, "accept_remote")} size="sm" variant="ghost">
+                  <DownloadCloud aria-hidden="true" size={14} />
+                  {conflict.conflict_type === "remote_deleted_local_modified" ? "接受删除" : "接受云端"}
+                </Button>
+              </div>
             </article>
           ))}
         </div>
@@ -341,6 +365,20 @@ function CloudSyncBackups({
       )}
     </section>
   );
+}
+
+function conflictTypeLabel(conflictType: string): string {
+  if (conflictType === "remote_deleted_local_modified") {
+    return "云端删除，本机有修改";
+  }
+  return "云端和本机都有修改";
+}
+
+function conflictDescription(conflict: CloudSyncConflict): string {
+  if (conflict.conflict_type === "remote_deleted_local_modified") {
+    return "云端已经删除这条内容，但本机还有未上传修改。推荐另存副本：保留本机内容，同时接受云端删除。";
+  }
+  return conflict.remote_summary || conflict.local_summary || "云端和本机都有新版本。推荐另存副本：保留本机内容，同时应用云端版本。";
 }
 
 function providerLabel(provider: string): string {

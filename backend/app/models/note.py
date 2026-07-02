@@ -24,6 +24,10 @@ class Note(SQLModel, table=True):
     content_hash: str = Field(default="", index=True, max_length=64)
     summary: str = ""
     tags: str = ""
+    category_id: int | None = Field(default=None, foreign_key="notecategory.id", index=True)
+    is_favorite: bool = Field(default=False, index=True)
+    pinned_at: datetime | None = Field(default=None, index=True)
+    archived_at: datetime | None = Field(default=None, index=True)
     status: str = Field(default="active", index=True, max_length=24)
     processing_status: str = Field(default="pending", index=True, max_length=24)
     processing_error: str = ""
@@ -31,6 +35,27 @@ class Note(SQLModel, table=True):
     embedding_status: str = Field(default="pending", index=True, max_length=24)
     embedding_error: str = ""
     embedded_at: datetime | None = Field(default=None, index=True)
+    deleted_at: datetime | None = Field(default=None, index=True)
+    cloud_revision: int = Field(default=0, index=True)
+    local_revision: int = Field(default=1, index=True)
+    last_synced_revision: int = Field(default=0, index=True)
+    sync_status: str = Field(default="dirty", index=True, max_length=24)
+    sync_conflict_id: str = Field(default="", index=True, max_length=80)
+    cloud_object_key: str = Field(default="", index=True, max_length=400)
+    last_synced_at: datetime | None = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=utc_now, index=True)
+    updated_at: datetime = Field(default_factory=utc_now, index=True)
+
+
+class NoteCategory(SQLModel, table=True):
+    __table_args__ = {"sqlite_autoincrement": True}
+
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = Field(index=True, max_length=120)
+    description: str = ""
+    sort_order: int = Field(default=0, index=True)
+    color: str = Field(default="", max_length=40)
+    status: str = Field(default="active", index=True, max_length=24)
     deleted_at: datetime | None = Field(default=None, index=True)
     cloud_revision: int = Field(default=0, index=True)
     local_revision: int = Field(default=1, index=True)

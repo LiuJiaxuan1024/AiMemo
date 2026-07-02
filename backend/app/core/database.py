@@ -30,6 +30,7 @@ from app.models import (
     KnowledgeSpace,
     LongTermMemory,
     Note,
+    NoteCategory,
     NoteChunk,
     RuntimeConfig,
     SyncConflict,
@@ -53,6 +54,7 @@ SQLITE_BUSY_TIMEOUT_MS = SQLITE_BUSY_TIMEOUT_SECONDS * 1000
 # `PRIMARY KEY (id)` 分离约束当成 `id INTEGER PRIMARY KEY` inline 格式，全部 miss）。
 _AUTOINCREMENT_MODELS = (
     Note,
+    NoteCategory,
     Conversation,
     ChatMessage,
     ChatAttachment,
@@ -151,6 +153,10 @@ def migrate_existing_sqlite_schema() -> None:
                 "content_format": "VARCHAR(24) DEFAULT 'markdown'",
                 "content_version": "INTEGER DEFAULT 1",
                 "content_hash": "VARCHAR(64) DEFAULT ''",
+                "category_id": "INTEGER",
+                "is_favorite": "BOOLEAN DEFAULT 0",
+                "pinned_at": "DATETIME",
+                "archived_at": "DATETIME",
                 "status": "VARCHAR(24) DEFAULT 'active'",
                 "processing_status": "VARCHAR(24) DEFAULT 'completed'",
                 "processing_error": "TEXT DEFAULT ''",
@@ -205,6 +211,14 @@ def migrate_existing_sqlite_schema() -> None:
             },
         )
 
+    if SyncConflict.__tablename__ in table_names:
+        _add_missing_columns(
+            SyncConflict.__tablename__,
+            {
+                "conflict_type": "VARCHAR(80) DEFAULT 'remote_changed_local_modified'",
+            },
+        )
+
     if LongTermMemory.__tablename__ in table_names:
         _add_missing_columns(
             LongTermMemory.__tablename__,
@@ -227,6 +241,9 @@ def migrate_existing_sqlite_schema() -> None:
                 "debug_payload": "TEXT DEFAULT '{}'",
             },
         )
+
+    if ChatAttachment.__tablename__ in table_names:
+        _normalize_chat_attachment_storage_paths(ChatAttachment.__tablename__)
 
     if VoiceProfile.__tablename__ in table_names:
         _add_missing_columns(
@@ -300,6 +317,38 @@ def _backfill_note_content_markdown(table_name: str) -> None:
                 """
             )
         )
+
+
+def _normalize_chat_attachment_storage_paths(table_name: str) -> None:
+    """把旧版聊天附件绝对路径收敛为相对于 attachments_storage_dir 的路径。"""
+
+    root = Path(settings.attachments_storage_dir).expanduser().resolve()
+    with engine.begin() as connection:
+        rows = connection.execute(
+            text(f'SELECT id, storage_path FROM "{table_name}" WHERE storage_path IS NOT NULL AND storage_path != ""')
+        ).fetchall()
+        for attachment_id, raw_storage_path in rows:
+            path = Path(str(raw_storage_path or "").strip()).expanduser()
+            if not path.is_absolute():
+                continue
+            try:
+                resolved = path.resolve(strict=False)
+            except OSError:
+                resolved = path
+            if not _path_is_relative_to(resolved, root):
+                continue
+            connection.execute(
+                text(f'UPDATE "{table_name}" SET storage_path = :storage_path WHERE id = :id'),
+                {"storage_path": resolved.relative_to(root).as_posix(), "id": attachment_id},
+            )
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 # ─── SQLite PK AUTOINCREMENT 升级 ────────────────────────────────────

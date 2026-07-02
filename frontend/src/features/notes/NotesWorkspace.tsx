@@ -2,16 +2,18 @@ import type { FormEvent } from "react";
 import { PenLine } from "lucide-react";
 
 import { Button } from "../../shared/ui";
-import type { Note, UpdateNoteInput } from "../../types/note";
+import type { Note, NoteCategory, UpdateNoteInput } from "../../types/note";
 import { NoteComposer } from "./NoteComposer";
 import { NoteDetail } from "./NoteDetail";
 
 interface NotesWorkspaceProps {
   contentBlocks: string;
   content: string;
+  categories: NoteCategory[];
   error: string;
   isMutatingNote: boolean;
   isSaving: boolean;
+  isTransitioning: boolean;
   noteMode: "active" | "deleted";
   onContentChange: (value: { blocksJson: string; markdown: string }) => void;
   onDeleteNote: (note: Note) => void;
@@ -20,6 +22,7 @@ interface NotesWorkspaceProps {
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onTitleChange: (value: string) => void;
   onUpdateNote: (note: Note, input: UpdateNoteInput) => void;
+  onUpdateNoteOrganization: (note: Note, input: UpdateNoteInput) => void;
   onWriteNote: () => void;
   selectedNote: Note | null;
   title: string;
@@ -33,9 +36,11 @@ interface NotesWorkspaceProps {
 export function NotesWorkspace({
   contentBlocks,
   content,
+  categories,
   error,
   isMutatingNote,
   isSaving,
+  isTransitioning,
   noteMode,
   onContentChange,
   onDeleteNote,
@@ -44,6 +49,7 @@ export function NotesWorkspace({
   onSubmit,
   onTitleChange,
   onUpdateNote,
+  onUpdateNoteOrganization,
   onWriteNote,
   selectedNote,
   title,
@@ -67,7 +73,14 @@ export function NotesWorkspace({
   }
 
   return (
-    <section className="memo-workspace-panel memo-workspace-panel--reader">
+    <section
+      aria-busy={isTransitioning}
+      className={
+        isTransitioning
+          ? "memo-workspace-panel memo-workspace-panel--reader memo-workspace-panel--transitioning"
+          : "memo-workspace-panel memo-workspace-panel--reader"
+      }
+    >
       <div className="memo-reader-header">
         <div>
           <strong>{noteMode === "active" ? "查阅笔记" : "最近删除"}</strong>
@@ -90,12 +103,14 @@ export function NotesWorkspace({
       ) : null}
 
       <NoteDetail
+        categories={categories}
         isMutating={isMutatingNote}
         note={selectedNote}
         onDelete={onDeleteNote}
         onHardDelete={onHardDeleteNote}
         onRestore={onRestoreNote}
         onUpdate={onUpdateNote}
+        onUpdateOrganization={onUpdateNoteOrganization}
       />
 
       <section className="elf-panel memo-reader-footer">

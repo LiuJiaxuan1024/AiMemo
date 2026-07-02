@@ -55,6 +55,7 @@ class CloudSyncConflictRead(BaseModel):
     entity_id: str
     local_revision: int
     remote_revision: int
+    conflict_type: str = "remote_changed_local_modified"
     local_summary: str
     remote_summary: str
     status: str
@@ -79,3 +80,19 @@ class CloudSyncBackupCreateResult(BaseModel):
 
 class CloudSyncConflictResolveRequest(BaseModel):
     resolution: str = "keep_both"
+
+
+class CloudSyncRepairRequest(BaseModel):
+    dry_run: bool = True
+
+
+class CloudSyncRepairResult(BaseModel):
+    status: str = "ok"
+    domain: str = "conversations"
+    dry_run: bool = True
+    scanned_count: int = 0
+    repaired_count: int = 0
+    repaired_attachment_count: int = 0
+    skipped_count: int = 0
+    error_count: int = 0
+    message: str = ""

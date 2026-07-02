@@ -28,9 +28,25 @@ def create_note_api(
 @router.get("", response_model=list[NoteListItem])
 def list_notes_api(
     status: str = Query(default="active"),
+    category_id: str | None = Query(default=None),
+    tag: str | None = Query(default=None),
+    favorite: bool | None = Query(default=None),
+    pinned: bool | None = Query(default=None),
+    processing_status: str | None = Query(default=None),
     session: Session = Depends(get_session),
 ) -> list[NoteListItem]:
-    return list_notes(session, status_filter=status)
+    normalized_category_id: int | str | None = category_id
+    if category_id and category_id != "uncategorized":
+        normalized_category_id = int(category_id)
+    return list_notes(
+        session,
+        status_filter=status,
+        category_id=normalized_category_id,
+        tag=tag,
+        favorite=favorite,
+        pinned=pinned,
+        processing_status=processing_status,
+    )
 
 
 @router.get("/{note_id}", response_model=NoteRead)

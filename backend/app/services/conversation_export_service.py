@@ -29,6 +29,7 @@ from app.schemas.conversation import (
     ConversationExportRequest,
     ConversationExportSnapshot,
 )
+from app.services.attachment_service import resolve_chat_attachment_path
 
 
 MAX_EMBEDDED_IMAGE_BYTES = settings.attachments_image_max_mb * 1024 * 1024
@@ -617,7 +618,10 @@ def _render_attachments(attachments: list[ConversationExportAttachment]) -> str:
 def _attachment_image_data_uri(attachment: ChatAttachment) -> str:
     if attachment.size_bytes <= 0 or attachment.size_bytes > MAX_EMBEDDED_IMAGE_BYTES:
         return ""
-    path = Path(attachment.storage_path)
+    try:
+        path = resolve_chat_attachment_path(attachment.storage_path)
+    except ValueError:
+        return ""
     if not path.exists() or not path.is_file():
         return ""
     try:

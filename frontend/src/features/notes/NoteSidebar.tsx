@@ -1,13 +1,28 @@
-import { Search } from "lucide-react";
+import { Folder, Inbox, Pin, Plus, Search, Star, Tags } from "lucide-react";
 
 import { Badge } from "../../shared/ui";
-import type { Note, NoteListItem } from "../../types/note";
+import type { Note, NoteCategory, NoteListItem, NoteTag } from "../../types/note";
 import { formatNoteDate } from "./noteUtils";
+
+export type NoteFilter =
+  | { type: "all" }
+  | { type: "uncategorized" }
+  | { type: "favorite" }
+  | { type: "pinned" }
+  | { type: "category"; id: number }
+  | { type: "tag"; name: string };
 
 interface NoteSidebarProps {
   isLoading: boolean;
+  isTransitioning: boolean;
+  listViewKey: string;
   mode: "active" | "deleted";
+  activeFilter: NoteFilter;
+  categories: NoteCategory[];
+  tags: NoteTag[];
   notes: NoteListItem[];
+  onCreateCategory: () => void;
+  onFilterChange: (filter: NoteFilter) => void;
   onSearchChange: (value: string) => void;
   onSelectNote: (noteId: number) => void;
   onModeChange: (mode: "active" | "deleted") => void;
@@ -28,8 +43,15 @@ interface NoteSidebarProps {
  */
 export function NoteSidebar({
   isLoading,
+  isTransitioning,
+  listViewKey,
   mode,
+  activeFilter,
+  categories,
+  tags,
   notes,
+  onCreateCategory,
+  onFilterChange,
   onSearchChange,
   onModeChange,
   onSelectNote,
@@ -40,6 +62,18 @@ export function NoteSidebar({
   stats,
 }: NoteSidebarProps) {
   const noteCountText = mode === "active" ? `${stats.totalCount} 条笔记` : `${stats.totalCount} 条最近删除`;
+  const filterActive = (filter: NoteFilter) => {
+    if (filter.type !== activeFilter.type) {
+      return false;
+    }
+    if (filter.type === "category" && activeFilter.type === "category") {
+      return filter.id === activeFilter.id;
+    }
+    if (filter.type === "tag" && activeFilter.type === "tag") {
+      return filter.name === activeFilter.name;
+    }
+    return true;
+  };
 
   return (
     <aside className="sidebar">
@@ -83,6 +117,85 @@ export function NoteSidebar({
         </button>
       </div>
 
+      {mode === "active" ? (
+        <nav className="note-nav" aria-label="笔记组织筛选">
+          <button
+            className={filterActive({ type: "all" }) ? "active" : ""}
+            onClick={() => onFilterChange({ type: "all" })}
+            type="button"
+          >
+            <Inbox aria-hidden="true" size={15} />
+            全部笔记
+          </button>
+          <button
+            className={filterActive({ type: "uncategorized" }) ? "active" : ""}
+            onClick={() => onFilterChange({ type: "uncategorized" })}
+            type="button"
+          >
+            <Folder aria-hidden="true" size={15} />
+            未分类
+          </button>
+          <button
+            className={filterActive({ type: "favorite" }) ? "active" : ""}
+            onClick={() => onFilterChange({ type: "favorite" })}
+            type="button"
+          >
+            <Star aria-hidden="true" size={15} />
+            收藏
+          </button>
+          <button
+            className={filterActive({ type: "pinned" }) ? "active" : ""}
+            onClick={() => onFilterChange({ type: "pinned" })}
+            type="button"
+          >
+            <Pin aria-hidden="true" size={15} />
+            置顶
+          </button>
+
+          <div className="note-nav-section">
+            <div className="note-nav-section-header">
+              <span>分类</span>
+              <button aria-label="新建分类" onClick={onCreateCategory} type="button">
+                <Plus aria-hidden="true" size={14} />
+              </button>
+            </div>
+            {categories.length === 0 ? <small className="note-nav-empty">暂无分类</small> : null}
+            {categories.map((category) => (
+              <button
+                className={filterActive({ type: "category", id: category.id }) ? "active" : ""}
+                key={category.id}
+                onClick={() => onFilterChange({ type: "category", id: category.id })}
+                type="button"
+              >
+                <Folder aria-hidden="true" size={15} />
+                <span>{category.name}</span>
+                <small>{category.note_count}</small>
+              </button>
+            ))}
+          </div>
+
+          <div className="note-nav-section">
+            <div className="note-nav-section-header">
+              <span>标签</span>
+              <Tags aria-hidden="true" size={14} />
+            </div>
+            {tags.length === 0 ? <small className="note-nav-empty">暂无标签</small> : null}
+            {tags.slice(0, 10).map((tag) => (
+              <button
+                className={filterActive({ type: "tag", name: tag.name }) ? "active" : ""}
+                key={tag.name}
+                onClick={() => onFilterChange({ type: "tag", name: tag.name })}
+                type="button"
+              >
+                <Tags aria-hidden="true" size={15} />
+                <span>#{tag.name}</span>
+                <small>{tag.note_count}</small>
+              </button>
+            ))}
+          </div>
+        </nav>
+      ) : null}
+
       <label className="note-search">
         <Search aria-hidden="true" size={16} />
         <input
@@ -106,14 +219,19 @@ export function NoteSidebar({
         </select>
       </div>
 
-      <div className="note-list" aria-label="笔记列表">
+      <div
+        aria-busy={isTransitioning}
+        aria-label="笔记列表"
+        className={isTransitioning ? "note-list note-list--transitioning" : "note-list"}
+        key={listViewKey}
+      >
         {isLoading ? <p className="muted">正在加载...</p> : null}
         {!isLoading && notes.length === 0 ? (
           <p className="muted">
             {searchQuery ? "没有匹配的笔记" : mode === "active" ? "暂无笔记" : "最近删除为空"}
           </p>
         ) : null}
-        {notes.map((note) => {
+        {notes.map((note, index) => {
           const hasBadges =
             note.processing_status === "pending" ||
             note.processing_status === "processing" ||
@@ -123,7 +241,11 @@ export function NoteSidebar({
             note.status === "deleted";
 
           return (
-            <article className={note.id === selectedNote?.id ? "note-item active" : "note-item"} key={note.id}>
+            <article
+              className={note.id === selectedNote?.id ? "note-item active" : "note-item"}
+              key={note.id}
+              style={{ animationDelay: `${Math.min(index, 8) * 18}ms` }}
+            >
               <button
                 aria-label={`打开笔记：${note.title}`}
                 className="note-item-hitbox"

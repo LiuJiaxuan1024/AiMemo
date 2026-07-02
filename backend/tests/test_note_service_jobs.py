@@ -8,9 +8,15 @@ from app.schemas.note import NoteCreate
 from app.services.note_service import (
     build_note_content_hash,
     create_note,
+    create_note_category,
+    delete_note_tag,
     delete_note,
     hard_delete_note,
+    list_note_categories,
+    list_note_tags,
     list_notes,
+    merge_note_tags,
+    rename_note_tag,
     restore_note,
     update_note,
 )
@@ -151,5 +157,78 @@ def test_delete_restore_and_hard_delete_note(session):
     delete_note(session, note.id)
     hard_delete_note(session, note.id)
 
-    assert session.get(Note, note.id) is None
+    purged = session.get(Note, note.id)
+    assert purged is not None
+    assert purged.status == "purged"
+    assert purged.content == ""
+    assert purged.content_markdown == ""
+    assert list_notes(session) == []
+    assert list_notes(session, status_filter="deleted") == []
     assert session.exec(select(NoteChunk).where(NoteChunk.note_id == note.id)).all() == []
+
+
+def test_update_note_organization_fields_marks_dirty_without_rebuilding_jobs(session):
+    note = create_note(session, NoteCreate(content="原始内容", tags=["old"]))
+    original_jobs = session.exec(select(Job)).all()
+    original_hash = note.content_hash
+    category = create_note_category(session, name="项目")
+
+    updated = update_note(
+        session,
+        note.id,
+        NoteUpdate(
+            category_id=category.id,
+            tags=["project", "urgent"],
+            is_favorite=True,
+            pinned=True,
+        ),
+    )
+
+    jobs = session.exec(select(Job)).all()
+    db_note = session.get(Note, note.id)
+    assert len(jobs) == len(original_jobs)
+    assert updated.content_hash == original_hash
+    assert updated.category_id == category.id
+    assert updated.category_name == "项目"
+    assert updated.tags == ["project", "urgent"]
+    assert updated.is_favorite is True
+    assert updated.pinned_at is not None
+    assert db_note.sync_status == "dirty"
+
+
+def test_list_notes_filters_categories_tags_favorite_and_pinned(session):
+    work = create_note_category(session, name="工作")
+    life = create_note_category(session, name="生活")
+    work_note = create_note(session, NoteCreate(title="工作笔记", content="项目会议", tags=["project"]))
+    life_note = create_note(session, NoteCreate(title="生活笔记", content="晚餐记录", tags=["life"]))
+    uncategorized = create_note(session, NoteCreate(title="未分类", content="随手记", tags=["project"]))
+
+    update_note(session, work_note.id, NoteUpdate(category_id=work.id, is_favorite=True, pinned=True))
+    update_note(session, life_note.id, NoteUpdate(category_id=life.id))
+
+    assert [item.id for item in list_notes(session, category_id=work.id)] == [work_note.id]
+    assert [item.id for item in list_notes(session, category_id="uncategorized")] == [uncategorized.id]
+    assert {item.id for item in list_notes(session, tag="project")} == {work_note.id, uncategorized.id}
+    assert [item.id for item in list_notes(session, favorite=True)] == [work_note.id]
+    assert [item.id for item in list_notes(session, pinned=True)] == [work_note.id]
+
+
+def test_note_category_and_tag_management_helpers(session):
+    first = create_note_category(session, name="项目", color="green")
+    second = create_note_category(session, name="生活")
+    create_note(session, NoteCreate(title="A", content="Alpha", tags=["old", "merge-a"]))
+    create_note(session, NoteCreate(title="B", content="Beta", tags=["old", "merge-b"]))
+
+    categories = list_note_categories(session)
+    assert [category.name for category in categories] == ["项目", "生活"]
+    assert categories[0].id == first.id
+    assert categories[1].id == second.id
+    assert categories[0].color == "green"
+
+    rename_note_tag(session, old_tag="old", new_tag="new")
+    merge_note_tags(session, source_tags=["merge-a", "merge-b"], target_tag="merged")
+    delete_note_tag(session, tag="new")
+
+    tags = list_note_tags(session)
+    assert [tag.name for tag in tags] == ["merged"]
+    assert tags[0].note_count == 2

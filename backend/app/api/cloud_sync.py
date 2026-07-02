@@ -8,6 +8,8 @@ from app.schemas.cloud_sync import (
     CloudSyncConflictRead,
     CloudSyncConflictResolveRequest,
     CloudSyncDomainStatus,
+    CloudSyncRepairRequest,
+    CloudSyncRepairResult,
     CloudSyncRunResult,
     CloudSyncStatusRead,
 )
@@ -19,6 +21,7 @@ from app.services.cloud_sync_service import (
     list_domain_statuses,
     pull_once,
     push_once,
+    repair_conversation_attachment_storage_paths,
     resolve_conflict,
     sync_domain_once,
     sync_once,
@@ -70,6 +73,11 @@ def resolve_cloud_sync_conflict_api(
     session: Session = Depends(get_session),
 ) -> CloudSyncConflictRead:
     return resolve_conflict(session, conflict_id, resolution=payload.resolution)
+
+
+@router.post("/repairs/conversation-attachment-paths", response_model=CloudSyncRepairResult)
+def repair_conversation_attachment_paths_api(payload: CloudSyncRepairRequest) -> CloudSyncRepairResult:
+    return repair_conversation_attachment_storage_paths(dry_run=payload.dry_run)
 
 
 @router.get("/backups", response_model=list[CloudSyncBackupRead])

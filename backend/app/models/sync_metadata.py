@@ -46,6 +46,7 @@ class SyncConflict(SQLModel, table=True):
     entity_id: str = Field(index=True, max_length=120)
     local_revision: int = Field(default=0, index=True)
     remote_revision: int = Field(default=0, index=True)
+    conflict_type: str = Field(default="remote_changed_local_modified", index=True, max_length=80)
     local_summary: str = ""
     remote_summary: str = ""
     remote_object_key: str = Field(default="", max_length=500)

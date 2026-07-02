@@ -50,6 +50,7 @@ export interface CloudSyncConflict {
   entity_id: string;
   local_revision: number;
   remote_revision: number;
+  conflict_type: string;
   local_summary: string;
   remote_summary: string;
   status: string;
@@ -57,6 +58,8 @@ export interface CloudSyncConflict {
   created_at: string;
   updated_at: string;
 }
+
+export type CloudSyncConflictResolution = "keep_local" | "accept_remote" | "keep_both";
 
 export interface CloudSyncBackup {
   key: string;

@@ -51,6 +51,7 @@ users/{user_id}/sync/domains/memories_manifest.json
 ### 删除也是一种同步事件
 
 所有可同步业务对象都必须支持软删除标记。不能因为云端对象仍然存在，就在另一台设备上把已删除内容恢复回来。
+删除事件必须进入同步协议本身，而不是依赖 OSS 对象是否存在来推断。对象不存在可能代表用户删除、上传失败、权限异常、生命周期清理或历史版本缺失；这些语义不能混在一起。
 
 ### 冲突默认不静默覆盖
 
@@ -88,6 +89,14 @@ users/{user_id}/sync/domains/memories_manifest.json
 | ASR 输入录音 | 语音输入 | `objects/voice/asr/...` |
 | 导出 HTML/ZIP | 对话导出、笔记导出 | `exports/...` |
 | SQLite 加密备份 | 本地数据库快照 | `backups/...` |
+
+聊天附件、知识库文档等本地落盘字段必须使用相对于当前数据根目录的路径，例如
+`conversations/18/hash-photo.png`。云端业务 JSON 不应保存 `/home/...`、
+`C:\...`、`/Users/...` 这类机器相关绝对路径；跨设备拉取时由每台设备根据自己的
+`attachments_storage_dir` 重新解析本地文件路径。历史云端数据如果已经写入绝对路径，
+可通过 `POST /api/cloud-sync/repairs/conversation-attachment-paths` 先 dry-run 扫描，
+确认后用 `{"dry_run": false}` 执行修复。拉取侧仍需保留路径校验与旧数据兼容，避免旧客户端、
+备份恢复或手工修改重新污染云端 payload。
 
 ### C 类：可同步但可重建的派生数据
 
@@ -228,6 +237,69 @@ users/{user_id}/
   }
 }
 ```
+
+### Tombstone 删除墓碑
+
+删除必须作为一条可同步、可比较、可冲突处理的业务记录存在。AiMemo 不应在用户删除笔记、对话、记忆或知识文档时立刻物理删除云端 JSON；应先写入 tombstone。
+
+示例：
+
+```json
+{
+  "schema_version": 1,
+  "id": 1,
+  "domain": "notes",
+  "revision": 8,
+  "status": "deleted",
+  "deleted_at": "2026-06-27T12:00:00Z",
+  "updated_at": "2026-06-27T12:00:00Z",
+  "object_key": "users/local-user/sync/notes/1.json"
+}
+```
+
+manifest 必须继续保留该对象条目：
+
+```json
+{
+  "1": {
+    "revision": 8,
+    "content_hash": "sha256:...",
+    "updated_at": "2026-06-27T12:00:00Z",
+    "deleted": true,
+    "deleted_at": "2026-06-27T12:00:00Z",
+    "object_key": "users/local-user/sync/notes/1.json"
+  }
+}
+```
+
+拉取 tombstone 时的默认行为：
+
+| 本地状态 | 远端 tombstone | 默认行为 |
+| --- | --- | --- |
+| 本地未修改或已同步 | revision 更新 | 本地软删除，记录 `deleted_at`，同步状态变为 synced |
+| 本地也已删除 | revision 更新 | 合并为已删除，取较新的 revision |
+| 本地有未同步修改 | revision 更新 | 记录 `remote_deleted_local_modified` 冲突，不自动覆盖 |
+| 本地对象不存在 | revision 更新 | 记录 sync item 为已删除，避免后续把它当成新对象恢复 |
+
+推送 tombstone 时的默认行为：
+
+1. 本地删除先递增 `local_revision`，状态置为 dirty。
+2. push 时上传删除状态 JSON，并把 manifest 条目标记为 `deleted: true`。
+3. 不立即删除业务 JSON 对象和大对象引用，保证其他设备能拉取删除事件。
+4. `global_manifest` 和对应 domain manifest 的 revision 必须递增。
+
+物理清理策略：
+
+- tombstone 至少保留一个清理窗口，例如 30 到 90 天。
+- tombstone 清理必须晚于所有已知设备的最近同步时间；如果无法判断设备是否都同步过，则按时间窗口保守清理。
+- 清理 tombstone 前可把最终删除记录写入压缩历史或整库备份，避免误删无法追踪。
+- 大对象附件、知识库源文件等应先进入 `orphan_pending_delete`，确认没有其他活跃业务对象引用后再删除。
+
+硬删除语义：
+
+- 本地“永久删除”不等于立即从云端抹除所有痕迹。
+- 面向同步的一致性，永久删除应生成 tombstone，并在清理窗口后物理删除云端对象。
+- 如果未来支持“隐私擦除/立即云端删除”，必须作为单独的高风险操作处理，并明确会破坏其他离线设备的删除同步可恢复性。
 
 ### Conversations Manifest
 
@@ -462,6 +534,178 @@ users/{user_id}/sync/conflicts/{conflict_id}/local.json
 users/{user_id}/sync/conflicts/{conflict_id}/remote.json
 ```
 
+### 冲突降噪和自动合并
+
+长期目标不是把所有冲突都丢给用户处理。同步服务应尽量把能确定合并的情况自动处理，把真正需要判断语义的冲突留给用户。
+
+建议按数据类型分层：
+
+| 数据类型 | 自动策略 | 需要用户介入的情况 |
+| --- | --- | --- |
+| 标签、分类引用、收藏、置顶 | 字段级合并，集合类取并集，置顶/收藏取较新操作 | 同一字段两端互斥且无法判断意图 |
+| 笔记正文 | 后续可引入三方合并；第一阶段 keep_both 或冲突副本 | 两端都改正文且共同祖先不同 |
+| 笔记删除 vs 未修改 | 自动应用删除 | 本地有未同步正文修改 |
+| 对话消息追加 | 按 message id / parent_id 合并消息树 | 同一 message id 内容不同 |
+| 对话标题/摘要 | 可取较新或重算 | 用户手动改标题且远端也手动改 |
+| 长期记忆 | 按 memory_key 合并候选，保留证据来源 | 同一记忆语义相反或一端删除一端强化 |
+| 配置 | 按字段策略，非敏感偏好可取较新 | 模型、路径、密钥、工作区等高风险配置 |
+
+要实现自动合并，sync item 需要保存或能找到“共同祖先”：
+
+```text
+sync_items
+  base_revision
+  base_content_hash
+  base_snapshot_key 或 base_snapshot_inline
+```
+
+没有共同祖先时，只能做保守策略：远端新、本地脏则冲突；远端 tombstone、本地脏则冲突；远端新、本地未动则直接应用。
+
+### 乐观并发和版本前提
+
+任何设备更新云端 manifest 时，都必须基于自己刚读取到的前一个版本提交，不能盲写覆盖。
+
+推荐语义：
+
+1. pull 或 sync 前读取 `global_manifest` 和相关 domain manifest。
+2. 本地计算要提交的 patch。
+3. 上传业务对象 JSON 或 tombstone。
+4. 更新 domain manifest 时携带 `expected_manifest_revision` 或 `expected_etag`。
+5. 如果云端 manifest 已被其他设备更新，则本次 push 失败为 `remote_manifest_changed`，自动重新 pull、merge、再尝试 push。
+
+OSS 是对象存储，不是事务数据库。第一阶段可通过 ETag / If-Match / 条件写入表达“只在前一个版本未变化时覆盖 manifest”；如果 Provider 不支持条件写入，必须在写前读后再次比对，降低但不能完全消除竞态。长期更稳的方案是引入轻量同步服务或云数据库承载 manifest 事务。
+
+## 手动同步优先与冲突体验
+
+AiMemo 的目标不是多人协作编辑，而是多设备尽量及时一致。只依靠 OSS 客户端直连很难做出真正可靠的自动实时同步：客户端可能离线、manifest 更新缺少强事务、事件通知不能表达业务语义，频繁轮询也会增加复杂度和请求成本。
+
+因此当前阶段建议明确采用“用户手动同步 + 良好冲突处理体验”的策略。系统可以在必要时提示“云端可能有更新”或“本地有待上传内容”，但不默认在后台自动拉取和覆盖用户数据。
+
+### 同步触发源
+
+当前阶段推荐组合：
+
+| 触发源 | 行为 |
+| --- | --- |
+| 本地写入后 | 标记 dirty，更新同步中心的待上传数量 |
+| 应用启动/恢复前台 | 可轻量读取云端 manifest 状态，但不自动应用远端变更 |
+| 手动同步 | 用户显式触发完整 pull + merge + push |
+| 手动上传 | 只把本地 dirty 内容上传，适合单主设备使用 |
+| 手动拉取 | 只检查和应用云端更新，适合新设备初始化或迁移 |
+| 网络恢复 | 只更新状态提示，不自动同步 |
+
+后续如果引入常驻云端同步服务、云数据库或更可靠的事务能力，再把准实时自动同步作为独立阶段评估。
+
+### 当前手动同步循环
+
+本地编辑时：
+
+```text
+write local db
+mark sync item dirty
+show pending upload count in sync center
+```
+
+用户点击“同步”时：
+
+```text
+read global_manifest and changed domain manifests
+compare remote revisions with local sync items
+apply safe remote changes
+auto-merge low-risk changes
+create conflict records for semantic conflicts
+push remaining safe local dirty changes
+show summary: downloaded / uploaded / auto-merged / needs review
+```
+
+用户点击“上传”时：
+
+```text
+read latest manifest
+if remote manifest changed:
+  stop and ask user to sync first
+else:
+  push dirty items with expected manifest version
+```
+
+用户点击“拉取”时：
+
+```text
+read latest manifest
+download changed objects and tombstones
+apply safe changes
+leave semantic conflicts in conflict center
+```
+
+### 设备模型
+
+每台设备需要稳定的 `device_id` 和可读 `device_name`。manifest 更新应写入最后修改设备：
+
+```json
+{
+  "revision": 42,
+  "updated_at": "2026-06-27T12:00:00Z",
+  "device_id": "desktop-a",
+  "device_name": "ThinkStation"
+}
+```
+
+前端同步中心可以展示“最近由哪台设备更新”，但普通用户不应被要求理解 revision、etag 或 manifest。
+
+### 用户体验目标
+
+- 默认手动同步，避免用户在不知情时被远端覆盖。
+- 同步失败不阻止本地编辑。
+- 小冲突自动消化，大冲突集中到同步中心。
+- 前端只提示可理解的状态，例如“另一台设备更新了 3 条笔记，已同步”“1 条笔记需要确认”。
+- 不把每次 manifest 版本冲突都暴露成技术错误；能自动恢复的就提示“云端已更新，请先同步后再上传”。
+
+### 冲突处理体验
+
+同步中心应把冲突设计成用户能理解的任务，而不是技术异常列表。
+
+建议 UI：
+
+- 冲突收件箱：按笔记、对话、记忆、知识库、配置分组。
+- 冲突摘要：显示“本机修改”和“云端修改”的时间、设备名、标题/摘要，而不是 revision 数字。
+- 推荐操作：系统根据冲突类型给出默认建议，例如“保留两份”“采用云端删除”“保留本机修改并重新上传”。
+- 差异预览：笔记正文显示文本 diff；标签/分类/收藏/置顶显示字段级差异；删除冲突显示“云端已删除，本机有新修改”。
+- 一键处理：低风险冲突支持“全部按推荐处理”。
+- 可撤销：冲突解决前保存本地和远端快照，解决后短期内可恢复。
+
+常见冲突的默认体验：
+
+| 冲突类型 | 用户看到的描述 | 推荐操作 |
+| --- | --- | --- |
+| 远端删除，本地未改 | 另一台设备删除了这条内容 | 自动应用删除 |
+| 远端删除，本地已改 | 另一台设备删除了它，但本机后来编辑过 | 保留本机为新副本，远端删除保持生效 |
+| 两端都改笔记正文 | 本机和云端都编辑了正文 | 保留两份，后续提供合并 |
+| 两端只改标签/分类 | 两台设备都调整了整理信息 | 自动字段级合并 |
+| 对话两端追加消息 | 两台设备都追加了对话 | 按消息树自动合并 |
+| 配置冲突 | 两台设备修改了同一项设置 | 按字段显示，用户选择 |
+
+冲突解决结果也应重新进入同步队列：例如用户选择“保留本机为新副本”，系统创建新对象并标记 dirty；用户选择“采用云端删除”，系统本地软删除并标记 synced。
+
+Phase 1 当前先落地笔记冲突的三种显式处理方式：
+
+| resolution | 前端文案 | 行为 |
+| --- | --- | --- |
+| `keep_both` | 另存副本 | 先把本机当前笔记复制为新笔记并标记 dirty，再把原笔记应用为云端版本。适合“云端删除，本机有修改”的默认推荐。 |
+| `keep_local` | 保留本机 | 解除冲突，把本机当前版本标记为 dirty，下一次上传会用新 revision 覆盖云端版本或云端 tombstone。 |
+| `accept_remote` | 接受云端 / 接受删除 | 读取冲突记录中的远端 object payload，应用到本地并标记 synced；如果远端是 tombstone，本地变为软删除。 |
+
+第一版不会在 resolve 时自动 push。这样用户处理冲突和上传云端仍然是两个明确动作，避免在用户没意识到时覆盖远端状态。
+
+### OSS 事件通知的定位
+
+OSS 事件通知可以作为后续增强，用于让一个云端同步服务感知对象变化。但客户端之间直接同步时，不能依赖 OSS 事件通知作为唯一机制：
+
+- 客户端可能离线，错过事件。
+- 事件只说明对象变化，不表达业务语义。
+- 删除对象事件无法替代 tombstone。
+
+因此当前阶段优先做好手动同步、tombstone、乐观并发和冲突体验。只有当 AiMemo 有常驻云端同步服务时，再考虑用 OSS 事件通知降低同步延迟。
+
 ## 加密与隐私
 
 AiMemo 的数据包含对话、长期记忆、附件和本机路径，默认应按敏感数据处理。
@@ -567,24 +811,28 @@ DELETE /api/backups/{backup_id}
 - 总览：当前 provider、Bucket、命名空间、最后同步时间、待上传数量、冲突数量。
 - 分域状态：笔记、对话、知识库、记忆、语音、配置。
 - 对象用量：附件、知识库原始文档、语音、导出、备份。
-- 冲突列表：按对象类型筛选，支持查看本地/远端差异。
+- 冲突收件箱：按对象类型筛选，支持推荐操作、差异预览、批量按推荐处理和短期撤销。
 - 备份：创建、下载、恢复、删除。
-- 高级设置：周期拉取、周期上传、空闲上传、只手动同步、生命周期策略。
+- 高级设置：只手动同步、同步前检查远端状态、生命周期策略；周期拉取/上传作为远期高级选项。
 
 ## 分阶段路线
 
 ### Phase 1：巩固笔记同步
 
 - 完善现有 note manifest 和 note JSON。
+- 补齐 tombstone 删除墓碑：删除笔记必须推送 `deleted: true` 的 manifest 条目，另一端 pull 后应用软删除。
 - 补齐 push/pull/sync 状态展示。
-- 增加冲突记录和 keep_both 处理。
+- 增加冲突记录、keep_both 处理和 `remote_deleted_local_modified` 冲突类型。
+- 优化手动同步流程：同步前读取最新 manifest，上传前发现远端变化时提示先同步。
+- 优化冲突收件箱：显示设备、时间、摘要、推荐操作、差异预览和批量处理入口。
 - 增加本地 mock provider 回归测试。
 
 ### Phase 2：同步对话和附件
 
 - 同步 `conversations` 和 `chat_messages`。
 - 保留消息树 `parent_id`、片段追问 metadata、附件引用。
-- 聊天附件进入 `objects/chat_attachments/`。
+- 聊天附件进入 `objects/chat_attachments/`，业务 JSON 只保存相对 `storage_path` 和
+  `cloud_object_key`，不保存机器绝对路径。
 - 导出 HTML 仍是用户主动导出对象，不进入默认对话同步。
 
 ### Phase 3：同步长期记忆和配置
@@ -613,11 +861,15 @@ DELETE /api/backups/{backup_id}
 - 增加设备 ID、设备名称、最近活跃时间。
 - 支持按设备查看同步来源。
 - 增加更清晰的冲突合并 UI。
+- 评估引入云端同步服务或云数据库来提供强事务 manifest 更新和低延迟推送。
+- 评估准实时自动同步，但不作为 OSS-only 第一阶段目标。
 
 ## 测试策略
 
 - 大部分同步逻辑使用 `LocalMockStorageProvider`。
 - 每个 domain 都需要 push/pull/冲突/删除同步测试。
+- 删除同步测试必须覆盖 tombstone push、远端 tombstone pull、本地修改 vs 远端删除冲突、tombstone 清理窗口。
+- 手动同步测试必须覆盖 manifest changed 后提示先同步、冲突收件箱生成、推荐操作、批量处理和撤销快照。
 - 真实 OSS 集成测试默认跳过，只有环境变量齐全时运行。
 - 大对象上传下载测试使用小文件，不产生大量云费用。
 - 恢复测试必须覆盖“空数据库从云端拉取后能重建可用状态”。
@@ -636,6 +888,10 @@ backend/tests/test_cloud_object_lifecycle.py
 ## 风险与待决策
 
 - 是否引入全局 `sync_items` 表，还是继续在每张业务表里增加同步字段。
+- manifest 更新是否使用 OSS 条件写入；如果条件写入能力不足，是否引入轻量云端同步服务。
+- tombstone 默认保留 30 天、90 天，还是按最近设备同步时间动态清理。
+- 是否提供“启动时只检查远端状态”的轻提示，不自动拉取。
+- 冲突推荐操作的默认策略是否允许用户自定义。
 - 对话消息分片大小：按 100 条、500 条，还是按字节大小。
 - 长期记忆冲突 UI 如何设计，避免用户被复杂合并打扰。
 - 是否默认同步知识库 chunk 文本，还是只同步原始文档并重建。

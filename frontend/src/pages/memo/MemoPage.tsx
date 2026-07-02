@@ -1,18 +1,23 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { X } from "lucide-react";
 
-import { NoteSidebar } from "../../features/notes/NoteSidebar";
+import { NoteSidebar, type NoteFilter } from "../../features/notes/NoteSidebar";
 import { NotesWorkspace } from "../../features/notes/NotesWorkspace";
 import { isNoteProcessing } from "../../features/notes/noteUtils";
 import {
+  createNoteCategory,
   createNote,
   deleteNote,
   getNote,
   hardDeleteNote,
+  listNoteCategories,
+  listNoteTags,
   listNotes,
   restoreNote,
   updateNote,
 } from "../../services/api";
+import { Button } from "../../shared/ui";
 import type { Note, UpdateNoteInput } from "../../types/note";
 
 export function MemoPage() {
@@ -26,10 +31,56 @@ export function MemoPage() {
   const [workspaceMode, setWorkspaceMode] = useState<"compose" | "read">("compose");
   const [searchQuery, setSearchQuery] = useState("");
   const [sortMode, setSortMode] = useState<"updated" | "created" | "title">("updated");
+  const [activeFilter, setActiveFilter] = useState<NoteFilter>({ type: "all" });
+  const [isCategoryDialogOpen, setIsCategoryDialogOpen] = useState(false);
+  const [categoryNameDraft, setCategoryNameDraft] = useState("");
+
+  const categoriesQuery = useQuery({
+    queryKey: ["note-categories"],
+    queryFn: listNoteCategories,
+  });
+  const tagsQuery = useQuery({
+    queryKey: ["note-tags"],
+    queryFn: listNoteTags,
+  });
+  const noteListParams = useMemo(() => {
+    if (noteMode === "deleted") {
+      return { status: "deleted" };
+    }
+    if (activeFilter.type === "uncategorized") {
+      return { status: "active", categoryId: "uncategorized" as const };
+    }
+    if (activeFilter.type === "favorite") {
+      return { status: "active", favorite: true };
+    }
+    if (activeFilter.type === "pinned") {
+      return { status: "active", pinned: true };
+    }
+    if (activeFilter.type === "category") {
+      return { status: "active", categoryId: activeFilter.id };
+    }
+    if (activeFilter.type === "tag") {
+      return { status: "active", tag: activeFilter.name };
+    }
+    return { status: "active" };
+  }, [activeFilter, noteMode]);
+  const noteListViewKey = useMemo(() => {
+    if (noteMode === "deleted") {
+      return "deleted";
+    }
+    if (activeFilter.type === "category") {
+      return `category:${activeFilter.id}`;
+    }
+    if (activeFilter.type === "tag") {
+      return `tag:${activeFilter.name}`;
+    }
+    return activeFilter.type;
+  }, [activeFilter, noteMode]);
 
   const notesQuery = useQuery({
-    queryKey: ["notes", noteMode],
-    queryFn: () => listNotes(noteMode),
+    queryKey: ["notes", noteListParams],
+    queryFn: () => listNotes(noteListParams),
+    placeholderData: keepPreviousData,
     // 后台整理和 embedding 进行中时保持轻量轮询，完成后自动安静下来。
     refetchInterval: (query) => {
       const currentNotes = query.state.data ?? [];
@@ -37,6 +88,7 @@ export function MemoPage() {
     },
   });
   const notes = notesQuery.data ?? [];
+  const isSwitchingNoteList = notesQuery.isPlaceholderData && notesQuery.isFetching;
   const visibleNotes = useMemo(() => {
     const normalizedQuery = searchQuery.trim().toLowerCase();
     const filtered = normalizedQuery
@@ -46,6 +98,12 @@ export function MemoPage() {
         })
       : notes;
     return [...filtered].sort((left, right) => {
+      if (left.pinned_at && !right.pinned_at) {
+        return -1;
+      }
+      if (!left.pinned_at && right.pinned_at) {
+        return 1;
+      }
       if (sortMode === "title") {
         return left.title.localeCompare(right.title, "zh-CN");
       }
@@ -67,9 +125,10 @@ export function MemoPage() {
     enabled: Boolean(selectedNoteId),
     queryKey: ["notes", selectedNoteId],
     queryFn: () => getNote(Number(selectedNoteId)),
+    placeholderData: keepPreviousData,
     refetchInterval: (query) => (isNoteProcessing(query.state.data) ? 3000 : false),
   });
-  const selectedNote = selectedNoteQuery.data ?? null;
+  const selectedNote = selectedNoteId ? selectedNoteQuery.data ?? null : null;
 
   const createNoteMutation = useMutation({
     mutationFn: createNote,
@@ -81,6 +140,8 @@ export function MemoPage() {
       setWorkspaceMode("read");
       queryClient.setQueryData(["notes", note.id], note);
       await queryClient.invalidateQueries({ queryKey: ["notes"] });
+      await queryClient.invalidateQueries({ queryKey: ["note-categories"] });
+      await queryClient.invalidateQueries({ queryKey: ["note-tags"] });
     },
     onError: (currentError) => {
       setError(currentError instanceof Error ? currentError.message : "保存笔记失败");
@@ -93,9 +154,23 @@ export function MemoPage() {
     onSuccess: async (note) => {
       queryClient.setQueryData(["notes", note.id], note);
       await queryClient.invalidateQueries({ queryKey: ["notes"] });
+      await queryClient.invalidateQueries({ queryKey: ["note-categories"] });
+      await queryClient.invalidateQueries({ queryKey: ["note-tags"] });
     },
     onError: (currentError) => {
       setError(currentError instanceof Error ? currentError.message : "更新笔记失败");
+    },
+  });
+
+  const createCategoryMutation = useMutation({
+    mutationFn: createNoteCategory,
+    onSuccess: async () => {
+      setCategoryNameDraft("");
+      setIsCategoryDialogOpen(false);
+      await queryClient.invalidateQueries({ queryKey: ["note-categories"] });
+    },
+    onError: (currentError) => {
+      setError(currentError instanceof Error ? currentError.message : "新建分类失败");
     },
   });
 
@@ -180,8 +255,17 @@ export function MemoPage() {
   function handleNoteModeChange(nextMode: "active" | "deleted") {
     setError("");
     setNoteMode(nextMode);
+    if (nextMode === "deleted") {
+      setActiveFilter({ type: "all" });
+    }
     setSelectedNoteId(null);
     setWorkspaceMode(nextMode === "active" ? "compose" : "read");
+  }
+
+  function handleFilterChange(nextFilter: NoteFilter) {
+    setError("");
+    setActiveFilter(nextFilter);
+    setWorkspaceMode("read");
   }
 
   function handleComposeMode() {
@@ -208,6 +292,38 @@ export function MemoPage() {
         content_format: input.content_format ?? "blocknote",
       },
     });
+  }
+
+  function handleUpdateNoteOrganization(note: Note, input: UpdateNoteInput) {
+    setError("");
+    updateNoteMutation.mutate({
+      noteId: note.id,
+      input,
+    });
+  }
+
+  function handleCreateCategory() {
+    setError("");
+    setCategoryNameDraft("");
+    setIsCategoryDialogOpen(true);
+  }
+
+  function handleSubmitCategory(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const normalizedName = categoryNameDraft.trim();
+    if (!normalizedName) {
+      return;
+    }
+    setError("");
+    createCategoryMutation.mutate({ name: normalizedName });
+  }
+
+  function handleCloseCategoryDialog() {
+    if (createCategoryMutation.isPending) {
+      return;
+    }
+    setIsCategoryDialogOpen(false);
+    setCategoryNameDraft("");
   }
 
   function handleDeleteNote(note: Note) {
@@ -241,9 +357,15 @@ export function MemoPage() {
   return (
     <section className="memo-page app-shell">
       <NoteSidebar
+        activeFilter={activeFilter}
+        categories={categoriesQuery.data ?? []}
         isLoading={notesQuery.isFetching && notes.length === 0}
+        isTransitioning={isSwitchingNoteList}
+        listViewKey={noteListViewKey}
         mode={noteMode}
         notes={visibleNotes}
+        onCreateCategory={handleCreateCategory}
+        onFilterChange={handleFilterChange}
         onSearchChange={setSearchQuery}
         onModeChange={handleNoteModeChange}
         onSelectNote={handleSelect}
@@ -252,15 +374,18 @@ export function MemoPage() {
         selectedNote={selectedNote}
         sortMode={sortMode}
         stats={noteStats}
+        tags={tagsQuery.data ?? []}
       />
 
       <section className="workspace memo-workspace">
         <NotesWorkspace
+          categories={categoriesQuery.data ?? []}
           content={content}
           contentBlocks={contentBlocks}
           error={visibleError}
           isMutatingNote={isMutatingNote}
           isSaving={createNoteMutation.isPending}
+          isTransitioning={isSwitchingNoteList}
           noteMode={noteMode}
           onContentChange={handleContentChange}
           onDeleteNote={handleDeleteNote}
@@ -269,12 +394,63 @@ export function MemoPage() {
           onSubmit={handleSubmit}
           onTitleChange={setTitle}
           onUpdateNote={handleUpdateNote}
+          onUpdateNoteOrganization={handleUpdateNoteOrganization}
           onWriteNote={handleComposeMode}
           selectedNote={selectedNote}
           title={title}
           workspaceMode={workspaceMode}
         />
       </section>
+      {isCategoryDialogOpen ? (
+        <div className="memo-dialog-backdrop" role="presentation" onMouseDown={handleCloseCategoryDialog}>
+          <form
+            aria-label="新建分类"
+            aria-modal="true"
+            className="memo-dialog"
+            onMouseDown={(event) => event.stopPropagation()}
+            onSubmit={handleSubmitCategory}
+            role="dialog"
+          >
+            <header>
+              <div>
+                <strong>新建分类</strong>
+                <p>给一组笔记一个稳定入口。</p>
+              </div>
+              <button
+                aria-label="关闭"
+                className="memo-dialog-close"
+                disabled={createCategoryMutation.isPending}
+                onClick={handleCloseCategoryDialog}
+                type="button"
+              >
+                <X aria-hidden="true" size={16} />
+              </button>
+            </header>
+            <label className="memo-dialog-field">
+              <span>分类名称</span>
+              <input
+                autoFocus
+                onChange={(event) => setCategoryNameDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    handleCloseCategoryDialog();
+                  }
+                }}
+                placeholder="例如：项目、读书、生活"
+                value={categoryNameDraft}
+              />
+            </label>
+            <footer>
+              <Button disabled={createCategoryMutation.isPending} onClick={handleCloseCategoryDialog} size="sm" type="button">
+                取消
+              </Button>
+              <Button disabled={createCategoryMutation.isPending || !categoryNameDraft.trim()} size="sm" type="submit" variant="primary">
+                {createCategoryMutation.isPending ? "创建中" : "创建"}
+              </Button>
+            </footer>
+          </form>
+        </div>
+      ) : null}
     </section>
   );
 }

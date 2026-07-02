@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
+import re
+from pathlib import Path, PureWindowsPath
 import shutil
 import socket
 import tempfile
 from typing import Any, Iterable
 import zipfile
-from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
 from sqlmodel import Session, col, select
@@ -24,7 +25,7 @@ from app.models.conversation import Conversation
 from app.models.job import Job
 from app.models.knowledge import ConversationKnowledgeMount, KnowledgeDocument, KnowledgeSpace
 from app.models.long_term_memory import LongTermMemory
-from app.models.note import Note, utc_now
+from app.models.note import Note, NoteCategory, utc_now
 from app.models.runtime_config import RuntimeConfig
 from app.models.sync_metadata import SyncConflict, SyncDevice, SyncItem
 from app.models.sync_state import SyncState
@@ -36,9 +37,11 @@ from app.schemas.cloud_sync import (
     CloudSyncConflictRead,
     CloudSyncDomainRunResult,
     CloudSyncDomainStatus,
+    CloudSyncRepairResult,
     CloudSyncRunResult,
     CloudSyncStatusRead,
 )
+from app.services.attachment_service import resolve_chat_attachment_path
 from app.services.cloud_key_service import (
     backup_object_key,
     cloud_object_key,
@@ -209,19 +212,40 @@ def list_conflicts(session: Session) -> list[CloudSyncConflictRead]:
     return [_conflict_read(conflict) for conflict in _open_conflicts(session)]
 
 
-def resolve_conflict(session: Session, conflict_id: int, *, resolution: str = "keep_both") -> CloudSyncConflictRead:
+def resolve_conflict(
+    session: Session,
+    conflict_id: int,
+    *,
+    resolution: str = "keep_local",
+    provider: CloudObjectStorageProvider | None = None,
+) -> CloudSyncConflictRead:
     conflict = session.get(SyncConflict, conflict_id)
     if conflict is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sync conflict not found")
-    normalized = resolution.strip() or "keep_both"
-    if normalized != "keep_both":
+    normalized = resolution.strip() or "keep_local"
+    if normalized not in {"keep_local", "accept_remote", "keep_both"}:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": "UNSUPPORTED_CONFLICT_RESOLUTION", "message": "当前仅支持 keep_both。"},
+            detail={"code": "UNSUPPORTED_CONFLICT_RESOLUTION", "message": "不支持的冲突处理方式。"},
         )
+    storage = provider or get_storage_provider()
+    if normalized == "accept_remote":
+        _accept_remote_conflict(session, storage, conflict)
+    elif normalized == "keep_both":
+        _copy_local_note_before_accepting_remote(session, conflict)
+        _accept_remote_conflict(session, storage, conflict)
+    else:
+        _keep_local_conflict(session, conflict)
     conflict.status = "resolved"
     conflict.resolution = normalized
     conflict.updated_at = utc_now()
+    session.add(conflict)
+    session.commit()
+    session.refresh(conflict)
+    return _conflict_read(conflict)
+
+
+def _keep_local_conflict(session: Session, conflict: SyncConflict) -> None:
     if conflict.domain == "notes":
         note = session.get(Note, _parse_int(conflict.entity_id))
         if note is not None and note.sync_status == SYNC_STATUS_CONFLICTED:
@@ -234,10 +258,69 @@ def resolve_conflict(session: Session, conflict_id: int, *, resolution: str = "k
         item.status = SYNC_STATUS_DIRTY
         item.updated_at = utc_now()
         session.add(item)
-    session.add(conflict)
-    session.commit()
-    session.refresh(conflict)
-    return _conflict_read(conflict)
+
+
+def _accept_remote_conflict(session: Session, storage: CloudObjectStorageProvider, conflict: SyncConflict) -> None:
+    payload = _load_conflict_remote_payload(storage, conflict)
+    _apply_domain_payload(session, conflict.domain, payload)
+    item = _get_sync_item(session, conflict.domain, conflict.entity_id)
+    if item is not None:
+        item.cloud_revision = int(payload.get("revision") or conflict.remote_revision or item.cloud_revision or 0)
+        item.local_revision = item.cloud_revision
+        item.last_synced_revision = item.cloud_revision
+        item.content_hash = str(payload.get("content_hash") or _hash_payload(payload))
+        item.object_key = str(payload.get("object_key") or conflict.remote_object_key or item.object_key)
+        item.status = SYNC_STATUS_SYNCED
+        item.last_synced_at = utc_now()
+        item.updated_at = utc_now()
+        session.add(item)
+
+
+def _load_conflict_remote_payload(storage: CloudObjectStorageProvider, conflict: SyncConflict) -> dict[str, Any]:
+    object_key = conflict.remote_object_key or _domain_object_key(conflict.domain, conflict.entity_id)
+    try:
+        return json.loads(storage.get_bytes(object_key).decode("utf-8"))
+    except StorageNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "REMOTE_CONFLICT_PAYLOAD_MISSING", "message": "远端冲突内容不存在，无法接受云端版本。"},
+        ) from exc
+
+
+def _copy_local_note_before_accepting_remote(session: Session, conflict: SyncConflict) -> None:
+    if conflict.domain != "notes":
+        return
+    note = session.get(Note, _parse_int(conflict.entity_id))
+    if note is None:
+        return
+    duplicate = Note(
+        title=f"{note.title or '未命名笔记'}（本机副本）",
+        title_source=note.title_source,
+        content=note.content,
+        content_markdown=note.content_markdown,
+        content_blocks=note.content_blocks,
+        content_format=note.content_format,
+        content_version=note.content_version,
+        content_hash=note.content_hash,
+        summary=note.summary,
+        tags=note.tags,
+        category_id=note.category_id,
+        is_favorite=note.is_favorite,
+        pinned_at=None,
+        archived_at=note.archived_at,
+        status="active",
+        processing_status=note.processing_status,
+        processing_error=note.processing_error,
+        processed_at=note.processed_at,
+        embedding_status=note.embedding_status,
+        embedding_error=note.embedding_error,
+        embedded_at=note.embedded_at,
+        local_revision=1,
+        sync_status=SYNC_STATUS_DIRTY,
+        created_at=utc_now(),
+        updated_at=utc_now(),
+    )
+    session.add(duplicate)
 
 
 def list_backups(provider: CloudObjectStorageProvider | None = None) -> list[CloudSyncBackupRead]:
@@ -254,6 +337,96 @@ def list_backups(provider: CloudObjectStorageProvider | None = None) -> list[Clo
         )
         for item in objects
     ]
+
+
+def repair_conversation_attachment_storage_paths(
+    *,
+    provider: CloudObjectStorageProvider | None = None,
+    dry_run: bool = True,
+) -> CloudSyncRepairResult:
+    storage = provider or get_storage_provider()
+    manifest = _load_domain_manifest(storage, "conversations")
+    if manifest is None:
+        return CloudSyncRepairResult(
+            dry_run=dry_run,
+            message="Remote conversations manifest does not exist.",
+        )
+
+    scanned_count = 0
+    repaired_count = 0
+    repaired_attachment_count = 0
+    skipped_count = 0
+    error_count = 0
+    manifest_changed = False
+    for entity_id, remote_entry in _manifest_entities(manifest).items():
+        scanned_count += 1
+        object_key = str((remote_entry or {}).get("object_key") or _domain_object_key("conversations", entity_id))
+        try:
+            payload = json.loads(storage.get_bytes(object_key).decode("utf-8"))
+        except Exception:
+            error_count += 1
+            continue
+        if not isinstance(payload, dict):
+            error_count += 1
+            continue
+
+        changed_attachment_count = _repair_conversation_payload_attachment_paths(payload)
+        if not changed_attachment_count:
+            skipped_count += 1
+            continue
+
+        repaired_count += 1
+        repaired_attachment_count += changed_attachment_count
+        if dry_run:
+            continue
+
+        storage.put_bytes(
+            object_key,
+            _json_bytes(payload),
+            content_type=JSON_CONTENT_TYPE,
+            metadata={"domain": "conversations", "repair": "attachment-storage-paths"},
+        )
+        revision = int(payload.get("revision") or (remote_entry or {}).get("revision") or 0)
+        _set_manifest_entity(
+            manifest,
+            str(entity_id),
+            payload,
+            revision=revision,
+            object_key=object_key,
+            content_hash=_hash_sync_payload_content(payload),
+        )
+        manifest_changed = True
+
+    if manifest_changed:
+        manifest["global_revision"] = int(manifest.get("global_revision") or 0) + 1
+        manifest["updated_at"] = _iso_now()
+        manifest["device_id"] = _device_id()
+        _put_domain_manifest(storage, "conversations", manifest)
+
+    return CloudSyncRepairResult(
+        dry_run=dry_run,
+        scanned_count=scanned_count,
+        repaired_count=repaired_count,
+        repaired_attachment_count=repaired_attachment_count,
+        skipped_count=skipped_count,
+        error_count=error_count,
+        message="Dry run completed." if dry_run else "Repair completed.",
+    )
+
+
+def _repair_conversation_payload_attachment_paths(payload: dict[str, Any]) -> int:
+    changed_count = 0
+    for attachment in payload.get("attachments") or []:
+        if not isinstance(attachment, dict):
+            continue
+        current_path = str(attachment.get("storage_path") or "").strip()
+        if not current_path:
+            continue
+        repaired_path = _conversation_attachment_download_storage_path(attachment)
+        if repaired_path and repaired_path != current_path:
+            attachment["storage_path"] = repaired_path
+            changed_count += 1
+    return changed_count
 
 
 def create_backup(provider: CloudObjectStorageProvider | None = None) -> CloudSyncBackupCreateResult:
@@ -369,8 +542,8 @@ def _pull_domain(session: Session, storage: CloudObjectStorageProvider, domain: 
 
 def _local_domain_payloads(session: Session, domain: str) -> list[tuple[str, dict[str, Any]]]:
     if domain == "notes":
-        notes = session.exec(select(Note).where(Note.status != SYNC_STATUS_DELETED).order_by(col(Note.updated_at), col(Note.id))).all()
-        return [(str(note.id), _note_payload(note)) for note in notes if note.id is not None]
+        notes = session.exec(select(Note).order_by(col(Note.updated_at), col(Note.id))).all()
+        return [(str(note.id), _note_payload(session, note)) for note in notes if note.id is not None]
     if domain == "conversations":
         conversations = session.exec(select(Conversation).where(Conversation.status != "deleted").order_by(Conversation.updated_at, Conversation.id)).all()
         return [(str(conversation.id), _conversation_payload(session, conversation)) for conversation in conversations if conversation.id is not None]
@@ -403,7 +576,8 @@ def _apply_domain_payload(session: Session, domain: str, payload: dict[str, Any]
         _apply_knowledge_payload(session, payload)
 
 
-def _note_payload(note: Note) -> dict[str, Any]:
+def _note_payload(session: Session, note: Note) -> dict[str, Any]:
+    category = session.get(NoteCategory, note.category_id) if note.category_id is not None else None
     return {
         "title": note.title,
         "title_source": note.title_source,
@@ -414,6 +588,12 @@ def _note_payload(note: Note) -> dict[str, Any]:
         "content_hash": note.content_hash,
         "summary": note.summary,
         "tags": _decode_tags(note.tags),
+        "organization_schema_version": 1,
+        "category_id": note.category_id,
+        "category_name": category.name if category is not None and category.status == "active" else "",
+        "is_favorite": bool(note.is_favorite),
+        "pinned_at": _to_iso_or_none(note.pinned_at),
+        "archived_at": _to_iso_or_none(note.archived_at),
         "status": note.status,
         "deleted_at": _to_iso_or_none(note.deleted_at),
         "created_at": _to_iso(note.created_at),
@@ -434,6 +614,10 @@ def _apply_note_payload(session: Session, payload: dict[str, Any]) -> None:
     note.content_hash = str(payload.get("content_hash") or content_hash(note.content.strip()))
     note.summary = str(payload.get("summary") or "")
     note.tags = _encode_tags([str(item) for item in payload.get("tags") or []])
+    note.category_id = _resolve_payload_category_id(session, payload)
+    note.is_favorite = bool(payload.get("is_favorite") or False)
+    note.pinned_at = _parse_datetime(payload.get("pinned_at"))
+    note.archived_at = _parse_datetime(payload.get("archived_at"))
     note.status = str(payload.get("status") or "active")
     note.deleted_at = _parse_datetime(payload.get("deleted_at"))
     note.created_at = _parse_datetime(payload.get("created_at")) or note.created_at
@@ -446,6 +630,20 @@ def _apply_note_payload(session: Session, payload: dict[str, Any]) -> None:
     note.cloud_object_key = str(payload.get("object_key") or "")
     note.last_synced_at = utc_now()
     session.add(note)
+
+
+def _resolve_payload_category_id(session: Session, payload: dict[str, Any]) -> int | None:
+    raw_category_id = payload.get("category_id")
+    if raw_category_id is None:
+        return None
+    try:
+        category_id = int(raw_category_id)
+    except (TypeError, ValueError):
+        return None
+    category = session.get(NoteCategory, category_id)
+    if category is None or category.status != "active":
+        return None
+    return category_id
 
 
 def _conversation_payload(session: Session, conversation: Conversation) -> dict[str, Any]:
@@ -471,6 +669,7 @@ def _conversation_payload(session: Session, conversation: Conversation) -> dict[
 
 def _attachment_payload(attachment: ChatAttachment) -> dict[str, Any]:
     data = _model_payload(attachment)
+    data["storage_path"] = _portable_attachment_storage_path(attachment)
     data["cloud_object_key"] = cloud_object_key(
         settings.storage_sync_user_id,
         "chat_attachments",
@@ -614,7 +813,7 @@ def _apply_knowledge_payload(session: Session, payload: dict[str, Any]) -> None:
 def _upload_payload_assets(storage: CloudObjectStorageProvider, domain: str, payload: dict[str, Any]) -> None:
     if domain == "conversations":
         for attachment in payload.get("attachments") or []:
-            path = Path(str(attachment.get("storage_path") or ""))
+            path = _conversation_attachment_upload_source(attachment)
             key = str(attachment.get("cloud_object_key") or "")
             if key and path.exists() and path.is_file():
                 storage.put_bytes(key, path.read_bytes(), content_type=str(attachment.get("mime_type") or "application/octet-stream"))
@@ -635,10 +834,12 @@ def _download_payload_assets(storage: CloudObjectStorageProvider, domain: str, p
             key = str(attachment.get("cloud_object_key") or "")
             if not key:
                 continue
-            target = Path(str(attachment.get("storage_path") or ""))
-            if not target.is_absolute():
-                target = Path(settings.attachments_storage_dir).expanduser() / "conversations" / str(attachment.get("conversation_id")) / target.name
-                attachment["storage_path"] = str(target.resolve())
+            storage_path = _conversation_attachment_download_storage_path(attachment)
+            attachment["storage_path"] = storage_path
+            try:
+                target = resolve_chat_attachment_path(storage_path)
+            except ValueError:
+                continue
             if not target.exists():
                 try:
                     target.parent.mkdir(parents=True, exist_ok=True)
@@ -659,6 +860,116 @@ def _download_payload_assets(storage: CloudObjectStorageProvider, domain: str, p
                     target.write_bytes(storage.get_bytes(key))
                 except StorageNotFoundError:
                     pass
+
+
+def _portable_attachment_storage_path(attachment: ChatAttachment) -> str:
+    raw_path = str(attachment.storage_path or "").strip()
+    root = Path(settings.attachments_storage_dir).expanduser().resolve()
+    if raw_path:
+        if PureWindowsPath(raw_path).is_absolute() or _contains_windows_absolute_path(raw_path):
+            filename = _safe_attachment_storage_name(
+                {
+                    "original_name": attachment.original_name,
+                    "cloud_object_key": cloud_object_key(
+                        settings.storage_sync_user_id,
+                        "chat_attachments",
+                        attachment.conversation_id,
+                        attachment.id or 0,
+                        f"{attachment.sha256[:16]}-{Path(attachment.original_name or 'attachment').name}",
+                    ),
+                },
+                raw_path,
+            )
+            return f"conversations/{_safe_path_segment(str(attachment.conversation_id))}/{filename}"
+        path = Path(raw_path).expanduser()
+        if path.is_absolute():
+            try:
+                resolved = path.resolve(strict=False)
+            except OSError:
+                resolved = path
+            if _path_is_relative_to(resolved, root):
+                return resolved.relative_to(root).as_posix()
+        else:
+            return path.as_posix().lstrip("/")
+    filename = _safe_attachment_storage_name(
+        {
+            "original_name": attachment.original_name,
+            "cloud_object_key": cloud_object_key(
+                settings.storage_sync_user_id,
+                "chat_attachments",
+                attachment.conversation_id,
+                attachment.id or 0,
+                f"{attachment.sha256[:16]}-{Path(attachment.original_name or 'attachment').name}",
+            ),
+        },
+        raw_path,
+    )
+    return f"conversations/{_safe_path_segment(str(attachment.conversation_id))}/{filename}"
+
+
+def _conversation_attachment_upload_source(attachment: dict[str, Any]) -> Path:
+    raw_storage_path = str(attachment.get("storage_path") or "").strip()
+    if not raw_storage_path:
+        return Path("")
+    try:
+        return resolve_chat_attachment_path(raw_storage_path)
+    except ValueError:
+        return Path("")
+
+
+def _conversation_attachment_download_storage_path(attachment: dict[str, Any]) -> str:
+    root = Path(settings.attachments_storage_dir).expanduser().resolve()
+    raw_storage_path = str(attachment.get("storage_path") or "").strip()
+    if raw_storage_path:
+        candidate = Path(raw_storage_path).expanduser()
+        if candidate.is_absolute():
+            try:
+                resolved = candidate.resolve(strict=False)
+            except OSError:
+                resolved = candidate
+            if _path_is_relative_to(resolved, root):
+                return resolved.relative_to(root).as_posix()
+        elif not PureWindowsPath(raw_storage_path).is_absolute() and not _contains_windows_absolute_path(raw_storage_path):
+            relative_storage_path = raw_storage_path.replace("\\", "/").lstrip("/")
+            target = (root / relative_storage_path).resolve(strict=False)
+            if _path_is_relative_to(target, root) and Path(relative_storage_path).name:
+                return relative_storage_path
+    conversation_id = _safe_path_segment(str(attachment.get("conversation_id") or "unknown"))
+    filename = _safe_attachment_storage_name(attachment, raw_storage_path)
+    return f"conversations/{conversation_id}/{filename}"
+
+
+def _safe_attachment_storage_name(attachment: dict[str, Any], raw_storage_path: str) -> str:
+    candidates = [
+        raw_storage_path.replace("\\", "/").rsplit("/", 1)[-1] if raw_storage_path else "",
+        Path(raw_storage_path).name if raw_storage_path else "",
+        PureWindowsPath(raw_storage_path).name if raw_storage_path else "",
+        str(attachment.get("original_name") or ""),
+        str(attachment.get("cloud_object_key") or "").rsplit("/", 1)[-1],
+    ]
+    for candidate in candidates:
+        cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(candidate).name.strip())
+        cleaned = cleaned.strip("._")
+        if cleaned:
+            return cleaned[:255]
+    return "attachment"
+
+
+def _contains_windows_absolute_path(value: str) -> bool:
+    return bool(re.search(r"(^|[\\/])[A-Za-z]:[\\/]", value))
+
+
+def _safe_path_segment(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip()).strip("._")
+    return cleaned or "unknown"
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def _enqueue_knowledge_rebuild_if_needed(session: Session, document: KnowledgeDocument) -> None:
@@ -801,7 +1112,7 @@ def _set_manifest_entity(
         "revision": revision,
         "content_hash": content_hash,
         "updated_at": str(payload.get("updated_at") or _iso_now()),
-        "deleted": payload.get("status") == SYNC_STATUS_DELETED,
+        "deleted": _payload_is_tombstone(payload),
         "object_key": object_key,
         "summary": _payload_summary(payload),
     }
@@ -865,6 +1176,7 @@ def _record_conflict(
     remote_entry: dict[str, Any] | None,
 ) -> None:
     remote_revision = int((remote_entry or {}).get("revision") or 0)
+    conflict_type = _remote_conflict_type(remote_entry)
     existing = session.exec(
         select(SyncConflict)
         .where(SyncConflict.provider == settings.storage_provider)
@@ -881,10 +1193,13 @@ def _record_conflict(
             entity_id=entity_id,
             local_revision=int(item.local_revision or 0),
             remote_revision=remote_revision,
+            conflict_type=conflict_type,
             local_summary=item.content_hash,
             remote_summary=str((remote_entry or {}).get("summary") or (remote_entry or {}).get("content_hash") or ""),
             remote_object_key=str((remote_entry or {}).get("object_key") or ""),
         )
+    else:
+        existing.conflict_type = conflict_type
     existing.status = CONFLICT_STATUS_OPEN
     existing.updated_at = utc_now()
     session.add(existing)
@@ -899,6 +1214,16 @@ def _record_conflict(
             note.sync_status = SYNC_STATUS_CONFLICTED
             note.sync_conflict_id = f"note:{note.id}:remote:{remote_revision}"
             session.add(note)
+
+
+def _remote_conflict_type(remote_entry: dict[str, Any] | None) -> str:
+    if bool((remote_entry or {}).get("deleted")):
+        return "remote_deleted_local_modified"
+    return "remote_changed_local_modified"
+
+
+def _payload_is_tombstone(payload: dict[str, Any]) -> bool:
+    return str(payload.get("status") or "") in {SYNC_STATUS_DELETED, "purged"}
 
 
 def _mark_domain_entity_synced(session: Session, domain: str, entity_id: str, revision: int, object_key: str) -> None:
@@ -982,6 +1307,7 @@ def _conflict_read(conflict: SyncConflict) -> CloudSyncConflictRead:
         entity_id=conflict.entity_id,
         local_revision=conflict.local_revision,
         remote_revision=conflict.remote_revision,
+        conflict_type=conflict.conflict_type,
         local_summary=conflict.local_summary,
         remote_summary=conflict.remote_summary,
         status=conflict.status,
@@ -1067,6 +1393,11 @@ def _payload_summary(payload: dict[str, Any]) -> str:
 
 def _hash_payload(payload: dict[str, Any]) -> str:
     return hashlib.sha256(_json_bytes(payload)).hexdigest()
+
+
+def _hash_sync_payload_content(payload: dict[str, Any]) -> str:
+    sync_metadata_keys = {"schema_version", "id", "domain", "revision", "object_key"}
+    return _hash_payload({key: value for key, value in payload.items() if key not in sync_metadata_keys})
 
 
 def _json_bytes(value: dict[str, Any]) -> bytes:

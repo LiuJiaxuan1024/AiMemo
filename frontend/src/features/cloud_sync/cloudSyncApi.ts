@@ -2,6 +2,7 @@ import type {
   CloudSyncBackup,
   CloudSyncBackupCreateResult,
   CloudSyncConflict,
+  CloudSyncConflictResolution,
   CloudSyncDomainStatus,
   CloudSyncRunResult,
   CloudSyncStatus,
@@ -54,10 +55,13 @@ export function listCloudSyncConflicts(): Promise<CloudSyncConflict[]> {
   return request<CloudSyncConflict[]>("/api/cloud-sync/conflicts");
 }
 
-export function resolveCloudSyncConflict(conflictId: number): Promise<CloudSyncConflict> {
+export function resolveCloudSyncConflict(
+  conflictId: number,
+  resolution: CloudSyncConflictResolution,
+): Promise<CloudSyncConflict> {
   return request<CloudSyncConflict>(`/api/cloud-sync/conflicts/${conflictId}/resolve`, {
     method: "POST",
-    body: JSON.stringify({ resolution: "keep_both" }),
+    body: JSON.stringify({ resolution }),
   });
 }
 
